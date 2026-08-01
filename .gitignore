@@ -1,0 +1,15 @@
+# Build
+.xmake
+build
+
+# IDE
+vsxmake2026
+compile_commands.json
+*.xcodeproj
+
+# Clangd
+.cache
+
+# Engine files
+Caramel.log
+imgui.ini
