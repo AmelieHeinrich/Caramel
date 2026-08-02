@@ -1,7 +1,5 @@
 Basics
-- ImGui
-- Input
-- Asset system
+- Asset compressor
 - Scene hierarchy
 - Render graph
 - Job system (enkits)
@@ -19,8 +17,6 @@ GPU driven rendering
 - 2-pass occlusion cull
 
 Base lighting pass
-- Depth prepass
-- Visibility buffer
 - Cook-torrance + burley
 - Clustered light culling
 - IES profiles

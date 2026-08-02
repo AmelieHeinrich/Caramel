@@ -96,6 +96,20 @@ public:
     const value_type* CStr() const { return this->c_str(); }
 };
 
+namespace std
+{
+    // String is a distinct type from std::string (its base class), so std::hash<std::string>
+    // doesn't automatically apply to it -- needed to use String as a TDictionary key.
+    template<>
+    struct hash<String>
+    {
+        size_t operator()(const String& value) const noexcept
+        {
+            return std::hash<std::basic_string<char>>{}(value);
+        }
+    };
+}
+
 template<typename K, typename V>
 class TDictionary : public std::unordered_map<K, V, std::hash<K>, std::equal_to<K>>
 {

@@ -5,4 +5,5 @@
 -- 
 
 includes("Caramel")
+includes("CaramelAsset")
 includes("ThirdParty")

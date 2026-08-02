@@ -5,10 +5,18 @@
  */
 
 #include "Renderer.hpp"
+#include "agfx/agfx.hpp"
 
 #include <Caramel/Core/Logger.hpp>
+#include <Caramel/Renderer/Shader/ShaderServer.hpp>
+#include <Caramel/Renderer/ImGuiRenderer.hpp>
 
-Renderer::Renderer()
+#include <imgui.h>
+
+Renderer::Renderer(SDL_Window* window)
+    : m_Window(window)
+    , m_FenceValue(0)
+    , m_FrameSlot(0)
 {
     agfxDeviceCreateInfo deviceCreateInfo{};
     deviceCreateInfo.displayServerProtocol = AGFX_DISPLAY_SERVER_PROTOCOL_WAYLAND;
@@ -20,14 +28,94 @@ Renderer::Renderer()
     deviceCreateInfo.logFunction = Log;
 
     m_Device = agfx::Device(deviceCreateInfo);
+    m_CommandQueue = m_Device.CreateCommandQueue(agfx::CommandQueueType::Graphics);
+    m_Fence = m_Device.CreateFence();
+    m_NativeHandle = MakeUnique<NativeHandle>(m_Window);
 
-    agfxDeviceInfo deviceInfo = m_Device.GetInfo();
-    CARAMEL_INFO("Name: {}, Version: {}", deviceInfo.name, deviceInfo.driverVersion);
+    int32 width, height;
+    SDL_GetWindowSizeInPixels(m_Window, &width, &height);
+
+    agfx::SwapChainCreateInfo swapChainCreateInfo{};
+    swapChainCreateInfo.width = width;
+    swapChainCreateInfo.height = height;
+    swapChainCreateInfo.imageCount = FrameCount;
+    swapChainCreateInfo.queue = m_CommandQueue;
+    swapChainCreateInfo.vsync = false;
+    swapChainCreateInfo.isHDR = false;
+
+    m_SwapChain = m_NativeHandle->CreateSwapChain(m_Device, swapChainCreateInfo);
+
+    for (uint64 i = 0; i < FrameCount; ++i) {
+        m_FenceFrameSlots[i] = 0;
+        m_CommandBuffers[i] = m_Device.CreateCommandBuffer(m_CommandQueue);
+    }
+
+    ShaderServer::Initialize(m_Device, *this);
+    m_ImGuiRenderer = MakeUnique<ImGuiRenderer>(m_Device, m_CommandQueue, m_SwapChain.GetFormat(), (uint32)FrameCount);
 }
 
 Renderer::~Renderer()
 {
+    ShaderServer::Shutdown();
+}
 
+void Renderer::Render()
+{
+    m_FrameSlot = (uint32_t)(m_FenceValue % FrameCount);
+    m_Fence.Wait(m_FenceFrameSlots[m_FrameSlot]);
+
+    ShaderServer::Tick();
+
+    if (m_ResizeNextFrame) {
+        int32 width, height;
+        SDL_GetWindowSizeInPixels(m_Window, &width, &height);
+
+        m_SwapChain.Resize(width, height);
+        m_ResizeNextFrame = false;
+    }
+
+    agfx::CommandBuffer& commandBuffer = m_CommandBuffers[m_FrameSlot];
+    commandBuffer.Reset();
+    commandBuffer.Begin();
+
+    agfx::Texture backBuffer = m_SwapChain.AcquireNextTexture();
+    commandBuffer.TextureBarrier(backBuffer, agfx::ResourceState::Present, agfx::ResourceState::RenderTarget);
+
+    agfx::RenderTargetCreateInfo renderTargetCreateInfo{};
+    renderTargetCreateInfo.texture = backBuffer;
+    agfx::RenderTarget renderTarget = m_Device.CreateRenderTarget(renderTargetCreateInfo);
+    
+    agfx::RenderPassCreateInfo renderPassCreateInfo{};
+    renderPassCreateInfo.colorAttachmentCount = 1;
+    renderPassCreateInfo.colorAttachments[0].renderTarget = renderTarget;
+    renderPassCreateInfo.colorAttachments[0].loadOp = AGFX_LOAD_OPERATION_CLEAR;
+    renderPassCreateInfo.colorAttachments[0].storeOp = AGFX_STORE_OPERATION_STORE;
+    renderPassCreateInfo.colorAttachments[0].clearColor[0] = 0.8f;
+    renderPassCreateInfo.colorAttachments[0].clearColor[1] = 0.1f;
+    renderPassCreateInfo.colorAttachments[0].clearColor[2] = 0.1f;
+    renderPassCreateInfo.colorAttachments[0].clearColor[3] = 1.0f;
+    renderPassCreateInfo.name = "Main Render Pass";
+
+    agfx::RenderPass renderPass = commandBuffer.BeginRenderPass(renderPassCreateInfo);
+
+    int32 width, height;
+    SDL_GetWindowSizeInPixels(m_Window, &width, &height);
+    m_ImGuiRenderer->RenderDrawData(ImGui::GetDrawData(), renderPass, (uint32)width, (uint32)height, (uint32)m_FrameSlot);
+
+    renderPass.End();
+
+    commandBuffer.TextureBarrier(backBuffer, agfx::ResourceState::RenderTarget, agfx::ResourceState::Present);
+    commandBuffer.End();
+    m_CommandQueue.Submit(commandBuffer);
+    m_SwapChain.Present();
+
+    m_FenceFrameSlots[m_FrameSlot] = ++m_FenceValue;
+    m_CommandQueue.Signal(m_Fence, m_FenceValue);
+}
+
+void Renderer::Resize()
+{
+    m_ResizeNextFrame = true;
 }
 
 void* Renderer::Allocate(uint64 size)

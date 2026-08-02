@@ -5,7 +5,7 @@
 -- 
 
 add_rules("mode.debug", "mode.release", "mode.releasedbg")
-add_requires("libsdl3", "spdlog", "glm")
+add_requires("libsdl3", "spdlog", "glm", "meshoptimizer", "nlohmann_json", "stb", "cgltf")
 add_requires("imgui", { configs = { docking = true, sdl3 = true } })
 
 -- General defines
@@ -27,6 +27,7 @@ elseif is_plat("macosx") then
     add_defines("CARAMEL_MACOS", { public = true })
     add_linkdirs("Content/Binaries/Mac", { public = true })
     add_cxxflags("-fobjc-arc", "-x objective-c++", { public = true })
+    add_requires("astc-encoder 5.3.0")
 end
 
 includes("Sources")

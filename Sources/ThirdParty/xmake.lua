@@ -6,4 +6,6 @@
 
 includes("AGFX")
 includes("AGFXShader")
-includes("AGFXImGui")
+if not is_plat("macosx") then
+    includes("Compressonator")
+end

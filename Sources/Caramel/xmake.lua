@@ -8,5 +8,5 @@ target("Caramel")
     set_kind("binary")
     add_files("**.cpp")
 
-    add_deps("agfx")
-    add_packages("libsdl3", "glm", "spdlog")
+    add_deps("agfx", "agfx_shader")
+    add_packages("libsdl3", "glm", "spdlog", "imgui")
