@@ -1,8 +1,10 @@
 Basics
+- Cleanup
+- Simple scripting
 - Render graph
+- Material bucketing (render queues)
 - GPU scene representation
 - BLAS/TLAS building (async compute)
-- Material bucketing (render queues)
 
 GPU driven rendering
 - Indirect mesh draw setup
