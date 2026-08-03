@@ -93,6 +93,14 @@ struct agfxCommandBuffer {
 struct agfxTexture {
     ID3D12Resource* d3d12Resource;
     agfxTextureCreateInfo createInfo;
+    // Actual current D3D12_BARRIER_LAYOUT of every subresource (index via D3D12CalcSubresource with
+    // plane 0), updated at the end of every agfxCommandBufferTextureBarrier call. Enhanced-barrier
+    // validation checks LayoutBefore against the resource's real tracked layout, which the caller's
+    // oldState can't reliably predict once a resource crosses command list types -- e.g. a copy queue
+    // can only ever leave a texture in D3D12_BARRIER_LAYOUT_COMMON, never a state-specific layout like
+    // COPY_DEST, regardless of what AGFX's resource-state model says it's logically in. Tracking the
+    // real value here means the barrier function never has to guess.
+    std::vector<D3D12_BARRIER_LAYOUT> subresourceLayouts;
 };
 
 struct agfxBuffer {
@@ -887,6 +895,11 @@ void agfxCommandBufferTextureBarrier(agfxCommandBuffer* commandBuffer, agfxTextu
     bool allMips = (mip == (uint32_t)AGFX_SUBRESOURCE_ALL_MIPS);
     bool allLayers = (layer == (uint32_t)AGFX_SUBRESOURCE_ALL_LAYERS);
 
+    uint32_t mipBegin = allMips ? 0 : mip;
+    uint32_t mipEnd = allMips ? texture->createInfo.mipLevels : mip + 1;
+    uint32_t layerBegin = allLayers ? 0 : layer;
+    uint32_t layerEnd = allLayers ? texture->createInfo.depthOrArrayLayers : layer + 1;
+
     CD3DX12_BARRIER_SUBRESOURCE_RANGE range(0xffffffff);
     if (allMips && allLayers) {
         range = CD3DX12_BARRIER_SUBRESOURCE_RANGE(0xffffffff);
@@ -900,14 +913,41 @@ void agfxCommandBufferTextureBarrier(agfxCommandBuffer* commandBuffer, agfxTextu
         range = CD3DX12_BARRIER_SUBRESOURCE_RANGE(mip, 1, 0, texture->createInfo.depthOrArrayLayers);
     }
 
+    // Enhanced-barrier validation checks LayoutBefore against the resource's actual current layout,
+    // which the caller-supplied oldState can't reliably predict once a resource crosses command list
+    // types -- e.g. a copy queue (D3D12_COMMAND_LIST_TYPE_COPY) can only ever leave a texture in
+    // D3D12_BARRIER_LAYOUT_COMMON, never a state-specific layout like COPY_DEST, no matter what
+    // AGFX's resource-state model says it's logically in (see the queueType clamp on layoutAfter
+    // below). So LayoutBefore is read from texture->subresourceLayouts -- our own record of what we
+    // last actually set -- instead of being derived from oldState. oldState still drives sync/access:
+    // those describe what GPU work needs to be flushed/made visible, which the caller genuinely
+    // knows and layout tracking has no bearing on.
+    uint32_t firstSubresource = D3D12CalcSubresource(mipBegin, layerBegin, 0, texture->createInfo.mipLevels, texture->createInfo.depthOrArrayLayers);
+    D3D12_BARRIER_LAYOUT layoutBefore = texture->subresourceLayouts[firstSubresource];
+    D3D12_BARRIER_LAYOUT layoutAfter = agfxResourceStateToD3D12BarrierLayout(newState);
+
+    // Copy-queue command lists only accept D3D12_BARRIER_LAYOUT_COMMON as LayoutAfter -- state-specific
+    // layouts like COPY_DEST/COPY_SOURCE/SHADER_RESOURCE are rejected by the debug layer ("LayoutAfter
+    // ... is incompatible with command list type D3D12_COMMAND_LIST_TYPE_COPY") even though the
+    // matching sync/access values are still valid there.
+    if (commandBuffer->queueType == AGFX_COMMAND_QUEUE_TYPE_TRANSFER) {
+        layoutAfter = D3D12_BARRIER_LAYOUT_COMMON;
+    }
+
     CD3DX12_TEXTURE_BARRIER textureBarrier(
         agfxResourceStateToD3D12BarrierSync(oldState), agfxResourceStateToD3D12BarrierSync(newState),
         agfxResourceStateToD3D12BarrierAccess(oldState), agfxResourceStateToD3D12BarrierAccess(newState),
-        agfxResourceStateToD3D12BarrierLayout(oldState), agfxResourceStateToD3D12BarrierLayout(newState),
+        layoutBefore, layoutAfter,
         texture->d3d12Resource, range);
 
     CD3DX12_BARRIER_GROUP group(1, &textureBarrier);
     commandBuffer->d3d12CommandList->Barrier(1, &group);
+
+    for (uint32_t l = layerBegin; l < layerEnd; ++l) {
+        for (uint32_t m = mipBegin; m < mipEnd; ++m) {
+            texture->subresourceLayouts[D3D12CalcSubresource(m, l, 0, texture->createInfo.mipLevels, texture->createInfo.depthOrArrayLayers)] = layoutAfter;
+        }
+    }
 }
 
 void agfxCommandBufferMemoryBarrier(agfxCommandBuffer* commandBuffer, agfxResourceState oldState, agfxResourceState newState, agfxBool agglomerate) {
@@ -973,6 +1013,10 @@ void agfxCommandBufferAliasingBarrier(agfxCommandBuffer* commandBuffer, agfxText
         CD3DX12_BARRIER_GROUP(1, &textureBarrier),
     };
     commandBuffer->d3d12CommandList->Barrier(_countof(groups), groups);
+
+    // Keep the incoming texture's tracked layout (read by agfxCommandBufferTextureBarrier's
+    // LayoutBefore lookup) in sync with what this barrier actually just set it to.
+    incomingTexture->subresourceLayouts.assign(incomingTexture->subresourceLayouts.size(), agfxResourceStateToD3D12BarrierLayout(incomingState));
 }
 
 // Texture
@@ -992,7 +1036,7 @@ static D3D12_RESOURCE_DESC agfxTextureResourceDesc(const agfxTextureCreateInfo* 
 }
 
 agfxTexture* agfxTextureCreate(agfxDevice* device, const agfxTextureCreateInfo* createInfo) {
-    agfxTexture* texture = (agfxTexture*)device->createInfo.allocate(sizeof(agfxTexture));
+    agfxTexture* texture = new (device->createInfo.allocate(sizeof(agfxTexture))) agfxTexture();
     memcpy(&texture->createInfo, createInfo, sizeof(agfxTextureCreateInfo));
 
     D3D12_RESOURCE_DESC resourceDesc = agfxTextureResourceDesc(createInfo);
@@ -1033,11 +1077,16 @@ agfxTexture* agfxTextureCreate(agfxDevice* device, const agfxTextureCreateInfo* 
         device->createInfo.free(texture);
         return NULL;
     }
+
+    // Legacy D3D12_RESOURCE_STATE_COMMON at creation maps to D3D12_BARRIER_LAYOUT_COMMON under
+    // enhanced barriers for every subresource.
+    texture->subresourceLayouts.assign((size_t)createInfo->mipLevels * createInfo->depthOrArrayLayers, D3D12_BARRIER_LAYOUT_COMMON);
     return texture;
 }
 
 void agfxTextureDestroy(agfxDevice* device, agfxTexture* texture) {
     if (texture->d3d12Resource) texture->d3d12Resource->Release();
+    texture->~agfxTexture();
     device->createInfo.free(texture);
 }
 
@@ -1657,8 +1706,7 @@ agfxSwapChain* agfxSwapChainCreate(agfxDevice* device, const agfxSwapChainCreate
         ID3D12Resource* resource = nullptr;
         swapChain->dxgiSwapChain->GetBuffer(i, IID_PPV_ARGS(&resource));
 
-        agfxTexture* texture = (agfxTexture*)device->createInfo.allocate(sizeof(agfxTexture));
-        memset(texture, 0, sizeof(agfxTexture));
+        agfxTexture* texture = new (device->createInfo.allocate(sizeof(agfxTexture))) agfxTexture();
         texture->d3d12Resource = resource;
         texture->createInfo.type = AGFX_TEXTURE_TYPE_2D;
         texture->createInfo.format = swapChain->format;
@@ -1667,6 +1715,8 @@ agfxSwapChain* agfxSwapChainCreate(agfxDevice* device, const agfxSwapChainCreate
         texture->createInfo.height = createInfo->height;
         texture->createInfo.depthOrArrayLayers = 1;
         texture->createInfo.mipLevels = 1;
+        // DXGI hands back swap chain images already in the implicit present layout, not COMMON.
+        texture->subresourceLayouts.assign(1, D3D12_BARRIER_LAYOUT_PRESENT);
 
         swapChain->backBuffers[i] = texture;
     }
@@ -1680,6 +1730,7 @@ void agfxSwapChainDestroy(agfxDevice* device, agfxSwapChain* swapChain) {
         if (swapChain->backBuffers[i]->d3d12Resource) {
             swapChain->backBuffers[i]->d3d12Resource->Release();
         }
+        swapChain->backBuffers[i]->~agfxTexture();
         device->createInfo.free(swapChain->backBuffers[i]);
     }
     device->createInfo.free(swapChain->backBuffers);
@@ -1706,6 +1757,8 @@ void agfxSwapChainResize(agfxDevice* device, agfxSwapChain* swapChain, uint32_t 
         swapChain->backBuffers[i]->d3d12Resource = resource;
         swapChain->backBuffers[i]->createInfo.width = width;
         swapChain->backBuffers[i]->createInfo.height = height;
+        // ResizeBuffers hands back fresh images, again in the implicit present layout.
+        swapChain->backBuffers[i]->subresourceLayouts.assign(1, D3D12_BARRIER_LAYOUT_PRESENT);
     }
 
     swapChain->createInfo.width = width;
