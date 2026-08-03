@@ -65,15 +65,17 @@ void StreamingModel::BeginLoad(TShared<CPUModel> source, uint32 meshIndex, Strea
 
 bool StreamingModel::RequestNextLOD(StreamingManager& manager)
 {
-    if (HasPendingLOD())
-        return false;
-
     uint32 residentLOD = m_HighestResidentLOD.load(std::memory_order_acquire);
     if (residentLOD != kNoResidentLOD && residentLOD == CaramelAsset::kLodCount - 1)
         return false; // Already fully resident.
 
     uint32 lodIndex = m_NextLodToLoad;
     if (lodIndex == kNoResidentLOD)
+        return false;
+
+    // Claim the in-flight slot before scheduling, so a caller ticking faster than the job completes
+    // cannot start a second LOD on top of this one.
+    if (m_UploadInFlight.exchange(true, std::memory_order_acq_rel))
         return false;
 
     m_PendingLOD.store(lodIndex, std::memory_order_relaxed);
@@ -114,6 +116,7 @@ void StreamingModel::PollCompletion(uint64 completedFenceValue)
 
     m_PendingFenceValue.store(0, std::memory_order_release);
     m_PendingLOD.store(kNoResidentLOD, std::memory_order_relaxed);
+    m_UploadInFlight.store(false, std::memory_order_release);
 }
 
 void StreamingModel::OnLODResident(uint32 lodIndex)

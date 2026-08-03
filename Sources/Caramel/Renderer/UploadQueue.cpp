@@ -20,17 +20,17 @@ void UploadQueue::Init(agfx::Device& device)
     }
 }
 
-uint64 UploadQueue::EnqueueTextureUpload(agfx::Texture& texture, uint32 mipLevel, const void* data, size_t dataSize, uint32 width, uint32 height, uint32 bytesPerRow)
+uint64 UploadQueue::AllocateStagingLocked(uint64 size, uint64 alignment)
 {
-    assert(dataSize <= kStagingBufferSize && "Upload larger than a single staging buffer");
-
-    std::lock_guard lock(m_RecordMutex);
-
     // A batch of independent uploads (e.g. every streaming texture requesting its next mip in
     // the same tick) can outgrow one frame's staging buffer before the caller gets a chance to
     // Flush() -- flush early rather than writing/copying past the buffer.
-    if (m_Frames[m_CurrentFrameIndex].writeOffset + dataSize > kStagingBufferSize)
+    uint64 offset = (m_Frames[m_CurrentFrameIndex].writeOffset + alignment - 1) & ~(alignment - 1);
+    if (offset + size > kStagingBufferSize)
+    {
         FlushLocked();
+        offset = 0; // The rotated-to slot restarts at 0, which satisfies any alignment.
+    }
 
     UploadFrame& frame = m_Frames[m_CurrentFrameIndex];
     if (!frame.recording)
@@ -39,10 +39,23 @@ uint64 UploadQueue::EnqueueTextureUpload(agfx::Texture& texture, uint32 mipLevel
         frame.recording = true;
     }
 
-    // Copy into this frame's staging buffer at the current write offset.
+    frame.writeOffset = offset + size;
+    return offset;
+}
+
+uint64 UploadQueue::EnqueueTextureUpload(agfx::Texture& texture, uint32 mipLevel, const void* data, size_t dataSize, uint32 width, uint32 height, uint32 bytesPerRow)
+{
+    assert(dataSize <= kStagingBufferSize && "Upload larger than a single staging buffer");
+
+    std::lock_guard lock(m_RecordMutex);
+
+    uint64 srcOffset = AllocateStagingLocked(dataSize, kTextureCopyAlignment);
+    UploadFrame& frame = m_Frames[m_CurrentFrameIndex];
+
+    // Copy into this frame's staging buffer at the reserved offset.
     {
         agfx::MappedBuffer mapped(frame.stagingBuffer);
-        std::memcpy(mapped.As<uint8_t>() + frame.writeOffset, data, dataSize);
+        std::memcpy(mapped.As<uint8_t>() + srcOffset, data, dataSize);
     }
 
     agfx::TextureRegion region;
@@ -56,10 +69,8 @@ uint64 UploadQueue::EnqueueTextureUpload(agfx::Texture& texture, uint32 mipLevel
     frame.commandBuffer.TextureBarrier(texture, agfx::ResourceState::Common, agfx::ResourceState::CopyDest, mipLevel, 0);
 
     auto pass = frame.commandBuffer.BeginComputePass("Upload mip");
-    pass.CopyBufferToTexture(frame.stagingBuffer, frame.writeOffset, texture, region, mipLevel, 0, bytesPerRow, dataSize);
+    pass.CopyBufferToTexture(frame.stagingBuffer, srcOffset, texture, region, mipLevel, 0, bytesPerRow, dataSize);
     pass.End();
-
-    frame.writeOffset += dataSize;
 
     return m_NextFenceValue;
 }
@@ -70,26 +81,17 @@ uint64 UploadQueue::EnqueueBufferUpload(agfx::Buffer& dst, uint64 dstOffset, con
 
     std::lock_guard lock(m_RecordMutex);
 
-    if (m_Frames[m_CurrentFrameIndex].writeOffset + dataSize > kStagingBufferSize)
-        FlushLocked();
-
+    uint64 srcOffset = AllocateStagingLocked(dataSize, kBufferCopyAlignment);
     UploadFrame& frame = m_Frames[m_CurrentFrameIndex];
-    if (!frame.recording)
-    {
-        frame.commandBuffer.Begin();
-        frame.recording = true;
-    }
 
     {
         agfx::MappedBuffer mapped(frame.stagingBuffer);
-        std::memcpy(mapped.As<uint8_t>() + frame.writeOffset, data, dataSize);
+        std::memcpy(mapped.As<uint8_t>() + srcOffset, data, dataSize);
     }
 
     auto pass = frame.commandBuffer.BeginComputePass("Upload buffer");
-    pass.CopyBufferToBuffer(frame.stagingBuffer, dst, frame.writeOffset, dstOffset, dataSize);
+    pass.CopyBufferToBuffer(frame.stagingBuffer, dst, srcOffset, dstOffset, dataSize);
     pass.End();
-
-    frame.writeOffset += dataSize;
 
     return m_NextFenceValue;
 }

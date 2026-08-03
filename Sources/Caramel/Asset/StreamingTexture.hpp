@@ -40,7 +40,7 @@ public:
     uint32 GetHeight() const { return m_Source.GetHeight(); }
 
     uint32 SnapshotResidentMip() const { return m_HighestResidentMip.load(std::memory_order_acquire); }
-    bool HasPendingMip() const { return m_PendingFenceValue.load(std::memory_order_acquire) != 0; }
+    bool HasPendingMip() const { return m_UploadInFlight.load(std::memory_order_acquire); }
 
     // Bindless texture ID scoped to just the currently-resident mip, ready for ImGui::Image --
     // ImTextureID_Invalid while nothing has landed yet.
@@ -58,7 +58,11 @@ private:
     // been requested.
     uint32 m_NextMipToLoad = 0;
 
-    std::atomic<uint64> m_PendingFenceValue{ 0 }; // 0 == nothing in flight
+    // Claimed synchronously by RequestNextMip, released by PollCompletion once the mip is resident.
+    // See the matching field on StreamingModel for why m_PendingFenceValue cannot double as this.
+    std::atomic<bool> m_UploadInFlight{ false };
+
+    std::atomic<uint64> m_PendingFenceValue{ 0 }; // 0 == fence not published yet
     std::atomic<uint32> m_PendingMip{ kNoResidentMip };
 
     // One view per mip level, each covering [level, mipCount), all created up front. Creating them

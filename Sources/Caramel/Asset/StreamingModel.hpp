@@ -45,7 +45,7 @@ public:
     const glm::mat4& GetWorldTransform() const { return m_WorldTransform; }
 
     uint32 SnapshotResidentLOD() const { return m_HighestResidentLOD.load(std::memory_order_acquire); }
-    bool HasPendingLOD() const { return m_PendingFenceValue.load(std::memory_order_acquire) != 0; }
+    bool HasPendingLOD() const { return m_UploadInFlight.load(std::memory_order_acquire); }
 
     uint32 GetMeshletCount(uint32 lod) const { return GetMesh().lods[lod].meshletCount; }
 
@@ -69,6 +69,14 @@ private:
     // LOD has been requested.
     uint32 m_NextLodToLoad = 0;
 
-    std::atomic<uint64> m_PendingFenceValue{ 0 }; // 0 == nothing in flight
+    // Claimed synchronously by RequestNextLOD, released by PollCompletion once the LOD is resident.
+    // m_PendingFenceValue cannot serve as the in-flight flag: the job publishes it only after the
+    // (slow) disk read, so between RequestNextLOD returning and that store the mesh would look idle
+    // and a second LOD would be scheduled concurrently -- two jobs then race to write
+    // m_PendingFenceValue/m_PendingLOD, and the loser's stale pair can promote a LOD whose upload
+    // has not landed, or walk the resident LOD backwards.
+    std::atomic<bool> m_UploadInFlight{ false };
+
+    std::atomic<uint64> m_PendingFenceValue{ 0 }; // 0 == fence not published yet
     std::atomic<uint32> m_PendingLOD{ kNoResidentLOD };
 };

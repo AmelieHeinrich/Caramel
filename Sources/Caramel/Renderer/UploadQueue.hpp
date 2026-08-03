@@ -34,6 +34,18 @@ public:
 private:
     static constexpr uint64 kStagingBufferSize = 64 * 1024 * 1024;
 
+    // Required alignment of a staging-buffer source offset. Buffer-to-texture copies are the strict
+    // ones: Metal wants the offset to be a multiple of the destination format's block size (16 for
+    // BC7/ASTC), D3D12 wants a multiple of D3D12_TEXTURE_DATA_PLACEMENT_ALIGNMENT. Plain
+    // buffer-to-buffer copies only need natural alignment.
+    static constexpr uint64 kTextureCopyAlignment = 512;
+    static constexpr uint64 kBufferCopyAlignment = 16;
+
+    // Reserves `size` bytes in the current frame's staging buffer at an `alignment`-aligned offset,
+    // flushing early if this frame's buffer is full, and opens the slot's command buffer if needed.
+    // Returns the offset to write to. Assumes m_RecordMutex is already held by the caller.
+    uint64 AllocateStagingLocked(uint64 size, uint64 alignment);
+
     // Submits the current frame's command buffer and advances to the next ring slot. Assumes
     // m_RecordMutex is already held by the caller.
     uint64 FlushLocked();

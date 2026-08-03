@@ -42,15 +42,17 @@ TShared<GPUTexture> StreamingTexture::BeginLoad(CPUTexture source, StreamingMana
 
 bool StreamingTexture::RequestNextMip(StreamingManager& manager)
 {
-    if (HasPendingMip())
-        return false;
-
     uint32 residentMip = m_HighestResidentMip.load(std::memory_order_acquire);
     if (residentMip != kNoResidentMip && residentMip == 0)
         return false; // Already fully resident.
 
     uint32 mipIndex = m_NextMipToLoad;
     if (mipIndex == kNoResidentMip)
+        return false;
+
+    // Claim the in-flight slot before scheduling, so a caller ticking faster than the job completes
+    // cannot start a second mip on top of this one.
+    if (m_UploadInFlight.exchange(true, std::memory_order_acq_rel))
         return false;
 
     m_PendingMip.store(mipIndex, std::memory_order_relaxed);
@@ -84,6 +86,7 @@ void StreamingTexture::PollCompletion(uint64 completedFenceValue)
 
     m_PendingFenceValue.store(0, std::memory_order_release);
     m_PendingMip.store(kNoResidentMip, std::memory_order_relaxed);
+    m_UploadInFlight.store(false, std::memory_order_release);
 }
 
 void StreamingTexture::OnMipResident(uint32 mipIndex)
