@@ -40,7 +40,7 @@ void StreamingManager::ProcessPendingInits()
 
         m_Textures.PushBack(texture);
         if (pending.materialIndex >= 0)
-            m_MaterialTextures[pending.materialIndex] = texture;
+            m_MaterialTextures[MaterialKey(pending.requestId, pending.materialIndex, pending.slot)] = texture;
     }
 
     uint32 meshBudget = kMeshInitsPerUpdate;
@@ -48,6 +48,7 @@ void StreamingManager::ProcessPendingInits()
     {
         TShared<CPUModel> model;
         uint32 meshIndex = 0;
+        uint32 requestId = 0;
         {
             std::lock_guard lock(m_PendingMutex);
             if (m_PendingModelInits.IsEmpty())
@@ -56,12 +57,13 @@ void StreamingManager::ProcessPendingInits()
             PendingModelInit& pending = m_PendingModelInits[0];
             model = pending.model;
             meshIndex = pending.nextMeshIndex++;
+            requestId = pending.requestId;
             if (pending.nextMeshIndex >= model->GetMeshes().Size())
                 m_PendingModelInits.erase(m_PendingModelInits.begin());
         }
 
         TShared<StreamingModel> streamingModel = MakeShared<StreamingModel>();
-        streamingModel->BeginLoad(model, meshIndex, *this);
+        streamingModel->BeginLoad(model, meshIndex, *this, requestId);
         m_Models.PushBack(std::move(streamingModel));
 
         createdAnything = true;
@@ -121,10 +123,10 @@ void StreamingManager::PumpStreaming()
 
 void StreamingManager::LoadTexture(const String& path)
 {
-    JobSystem::Get().RunDetached([this, path]() { StagePendingTexture(path, -1); });
+    JobSystem::Get().RunDetached([this, path]() { StagePendingTexture(path, -1, 0); });
 }
 
-void StreamingManager::StagePendingTexture(const String& path, int32 materialIndex)
+void StreamingManager::StagePendingTexture(const String& path, int32 materialIndex, uint32 requestId, MaterialTextureSlot slot)
 {
     CPUTexture source(path);
     if (!source.IsValid())
@@ -134,15 +136,17 @@ void StreamingManager::StagePendingTexture(const String& path, int32 materialInd
     }
 
     std::lock_guard lock(m_PendingMutex);
-    m_PendingTextureInits.PushBack(PendingTextureInit{ std::move(source), materialIndex });
+    m_PendingTextureInits.PushBack(PendingTextureInit{ std::move(source), materialIndex, requestId, slot });
 }
 
-void StreamingManager::LoadModel(const String& path)
+uint32 StreamingManager::LoadModel(const String& path)
 {
-    JobSystem::Get().RunDetached([this, path]() { ExecuteModelLoad(path); });
+    uint32 requestId = m_NextRequestId++;
+    JobSystem::Get().RunDetached([this, path, requestId]() { ExecuteModelLoad(path, requestId); });
+    return requestId;
 }
 
-void StreamingManager::ExecuteModelLoad(const String& path)
+void StreamingManager::ExecuteModelLoad(const String& path, uint32 requestId)
 {
     TShared<CPUModel> model = MakeShared<CPUModel>(path);
     if (!model->IsValid())
@@ -154,22 +158,31 @@ void StreamingManager::ExecuteModelLoad(const String& path)
     for (int32 materialIndex = 0; materialIndex < (int32)model->GetMaterials().Size(); ++materialIndex)
     {
         const ModelMaterial& material = model->GetMaterials()[materialIndex];
-        if (material.baseColorTexture.Empty())
-            continue;
 
-        StagePendingTexture(material.baseColorTexture, materialIndex);
+        struct { const String& path; MaterialTextureSlot slot; } slots[] = {
+            { material.baseColorTexture, MaterialTextureSlot::BaseColor },
+            { material.normalTexture, MaterialTextureSlot::Normal },
+            { material.metallicRoughnessTexture, MaterialTextureSlot::MetallicRoughness },
+            { material.occlusionTexture, MaterialTextureSlot::Occlusion },
+            { material.emissiveTexture, MaterialTextureSlot::Emissive },
+        };
+        for (const auto& s : slots)
+        {
+            if (!s.path.Empty())
+                StagePendingTexture(s.path, materialIndex, requestId, s.slot);
+        }
     }
 
     if (model->GetMeshes().IsEmpty())
         return;
 
     std::lock_guard lock(m_PendingMutex);
-    m_PendingModelInits.PushBack(PendingModelInit{ std::move(model), 0 });
+    m_PendingModelInits.PushBack(PendingModelInit{ std::move(model), 0, requestId });
 }
 
-TShared<StreamingTexture> StreamingManager::GetMaterialTexture(int32 materialIndex) const
+TShared<StreamingTexture> StreamingManager::GetMaterialTexture(uint32 requestId, int32 materialIndex, MaterialTextureSlot slot) const
 {
-    auto it = m_MaterialTextures.find(materialIndex);
+    auto it = m_MaterialTextures.find(MaterialKey(requestId, materialIndex, slot));
     return it != m_MaterialTextures.end() ? it->second : nullptr;
 }
 
@@ -192,6 +205,6 @@ void StreamingManager::ExecuteDirectoryLoad(const String& directory)
     {
         if (!entry.is_regular_file() || entry.path().extension() != ".ctex")
             continue;
-        StagePendingTexture(entry.path().string(), -1);
+        StagePendingTexture(entry.path().string(), -1, 0);
     }
 }

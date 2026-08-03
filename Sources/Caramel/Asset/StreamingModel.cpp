@@ -9,7 +9,11 @@
 
 #include <Caramel/Core/JobSystem.hpp>
 
+#include <Jolt/Core/StreamWrapper.h>
+
 #include <glm/gtc/matrix_transform.hpp>
+
+#include <sstream>
 
 namespace
 {
@@ -44,10 +48,11 @@ namespace
     }
 }
 
-void StreamingModel::BeginLoad(TShared<CPUModel> source, uint32 meshIndex, StreamingManager& manager)
+void StreamingModel::BeginLoad(TShared<CPUModel> source, uint32 meshIndex, StreamingManager& manager, uint32 requestId)
 {
     m_Source = std::move(source);
     m_MeshIndex = meshIndex;
+    m_RequestId = requestId;
     m_Gpu = GPUModel(GetMesh());
     m_WorldTransform = FindMeshWorldTransform(*m_Source, m_MeshIndex);
 
@@ -56,6 +61,24 @@ void StreamingModel::BeginLoad(TShared<CPUModel> source, uint32 meshIndex, Strea
     m_Source->LoadVertexBuffer(m_MeshIndex, vertexBytes.Data());
     manager.GetUploadQueue().EnqueueBufferUpload(m_Gpu.GetVertexBuffer(), 0, vertexBytes.Data(), vertexBytes.Size());
     manager.MarkDirty();
+
+    if (mesh.colliderLength > 0)
+    {
+        JobSystem::Get().RunDetached([this]() {
+            TArray<uint8> colliderBytes(GetMesh().colliderLength);
+            m_Source->LoadCollider(m_MeshIndex, colliderBytes.Data());
+
+            std::istringstream in(std::string(reinterpret_cast<const char*>(colliderBytes.Data()), colliderBytes.Size()), std::ios::binary);
+            JPH::StreamInWrapper streamIn(in);
+
+            JPH::Shape::ShapeResult result = JPH::Shape::sRestoreFromBinaryState(streamIn);
+            if (!result.HasError())
+            {
+                m_ColliderShape = result.Get();
+                m_ColliderReady.store(true, std::memory_order_release);
+            }
+        });
+    }
 
     m_NextLodToLoad = 0;
     RequestNextLOD(manager);
@@ -126,4 +149,16 @@ uint64 StreamingModel::PollCompletion(uint64 completedFenceValue)
 void StreamingModel::OnLODResident(uint32 lodIndex)
 {
     m_HighestResidentLOD.store(lodIndex, std::memory_order_release);
+}
+
+const ModelMaterial& StreamingModel::GetMaterial() const
+{
+    static const ModelMaterial kNoMaterial;
+
+    int32 materialIndex = GetMesh().materialIndex;
+    const TArray<ModelMaterial>& materials = m_Source->GetMaterials();
+    if (materialIndex < 0 || (uint32)materialIndex >= materials.Size())
+        return kNoMaterial;
+
+    return materials[materialIndex];
 }

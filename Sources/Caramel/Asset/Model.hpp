@@ -45,6 +45,7 @@ struct ModelMesh
 
     uint64 vertexBufferOffset = 0, vertexBufferLength = 0;
     uint64 skinBufferOffset = 0, skinBufferLength = 0; // both 0 when !hasSkin
+    uint64 colliderOffset = 0, colliderLength = 0; // both 0 when the compiler couldn't cook a collider
 
     ModelLOD lods[CaramelAsset::kLodCount]; // coarse-to-fine
 };
@@ -83,6 +84,18 @@ struct ModelMaterial
     String emissiveTexture;
 };
 
+// Identifies one of ModelMaterial's texture slots -- used to key streamed textures per (model,
+// material, slot) instead of just (model, material), since a material has up to 5 independent ones.
+enum class MaterialTextureSlot : uint8
+{
+    BaseColor = 0,
+    Normal,
+    MetallicRoughness,
+    Occlusion,
+    Emissive,
+    Count
+};
+
 // Parses a compiled .cmdl file's header and JSON chunk up front -- cheap, at most a few MB of
 // text -- and exposes on-demand, per-range reads of the binary chunk, which can be hundreds of MB.
 // Each Load*() call is self-contained (opens its own file handle) so it's safe to fire off from
@@ -106,6 +119,11 @@ public:
     const TArray<ModelMesh>& GetMeshes() const { return m_Meshes; }
     const TArray<ModelNode>& GetNodes() const { return m_Nodes; }
     const TArray<ModelMaterial>& GetMaterials() const { return m_Materials; }
+    // Mutable access for scene-local material overrides (Scene::ApplyMaterialOverrides) -- each
+    // Scene entity gets its own private CPUModel instance (ExecuteModelLoad parses a fresh one per
+    // LoadModel() call, never shared/cached across entities), so mutating in place here never leaks
+    // into other entities or scenes that happen to reference the same .cmdl path.
+    TArray<ModelMaterial>& GetMaterials() { return m_Materials; }
 
     // Reads mesh[meshIndex]'s Vertex[]/SkinVertex[] range into `destination`, which must be at
     // least vertexBufferLength/skinBufferLength bytes. Returns the number of bytes actually read
@@ -117,6 +135,10 @@ public:
     // meshlet triangles + bounds) into `destination` in one read; must be at least
     // lods[lodIndex].GetByteLength() bytes. Returns the number of bytes actually read.
     uint64 LoadLOD(uint32 meshIndex, uint32 lodIndex, void* destination) const;
+
+    // Reads mesh[meshIndex]'s cooked JPH::Shape::SaveBinaryState() bytes into `destination`, which
+    // must be at least colliderLength bytes. Returns 0 (no-op) if the mesh has no collider.
+    uint64 LoadCollider(uint32 meshIndex, void* destination) const;
 
 private:
     uint64 ReadBinaryRange(uint64 offset, uint64 length, void* destination) const;

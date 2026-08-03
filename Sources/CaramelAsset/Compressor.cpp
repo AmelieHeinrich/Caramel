@@ -388,6 +388,18 @@ namespace CaramelAsset
                 j["skinBufferLength"] = 0;
             }
 
+            if (!mesh.colliderData.IsEmpty())
+            {
+                uint64 colliderOffset = AppendBinary(ctx, mesh.colliderData);
+                j["colliderOffset"] = colliderOffset;
+                j["colliderLength"] = mesh.colliderData.Size();
+            }
+            else
+            {
+                j["colliderOffset"] = 0;
+                j["colliderLength"] = 0;
+            }
+
             // mesh.lods[] is coarse-to-fine (see MeshCompressor.hpp), so this also writes the binary
             // chunk coarse-to-fine -- a streamer can load LOD entries from lods[0] onward in file order.
             nlohmann::json lodsJson = nlohmann::json::array();

@@ -34,6 +34,10 @@ struct InstanceData {
 };
 
 struct SponzaPushConstants {
+    // Must come first -- see the mirrored C++ struct in SponzaRenderer.cpp for why (16-byte vector
+    // alignment). emissiveFactor's w is unused.
+    float4 vBaseColorFactor;
+    float4 vEmissiveFactor;
     ResourceHandle rFrameConstants;
     ResourceHandle rInstanceBuffer;
     uint uInstanceIndex;
@@ -108,7 +112,7 @@ void SponzaMS(
 float4 SponzaPS(VSOut input) : SV_Target {
     AGFXTexture2D<float4> tBaseColor = AGFXTexture2D<float4>::Create(g_Constants.rBaseColorTexture);
     AGFXSampler sSampler = AGFXSampler::Create(g_Constants.rSampler);
-    float4 baseColor = tBaseColor.Sample(sSampler, input.vUV);
+    float4 baseColor = tBaseColor.Sample(sSampler, input.vUV) * g_Constants.vBaseColorFactor;
 
     float3 normal = normalize(input.vWorldNormal);
     float3 lightDir = normalize(float3(-0.4f, 1.0f, -0.3f));
@@ -116,5 +120,6 @@ float4 SponzaPS(VSOut input) : SV_Target {
 
     float3 ambient = baseColor.rgb * 0.25f;
     float3 diffuse = baseColor.rgb * ndotl * 0.85f;
-    return float4(ambient + diffuse, baseColor.a);
+    float3 emissive = g_Constants.vEmissiveFactor.rgb;
+    return float4(ambient + diffuse + emissive, baseColor.a);
 }

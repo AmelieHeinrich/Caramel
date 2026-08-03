@@ -9,6 +9,9 @@
 #include <Caramel/Asset/Model.hpp>
 #include <Caramel/Asset/GPUModel.hpp>
 
+#include <Jolt/Jolt.h>
+#include <Jolt/Physics/Collision/Shape/Shape.h>
+
 #include <atomic>
 
 class StreamingManager;
@@ -18,7 +21,7 @@ class StreamingModel
 public:
     static constexpr uint32 kNoResidentLOD = UINT32_MAX;
 
-    void BeginLoad(TShared<CPUModel> source, uint32 meshIndex, StreamingManager& manager);
+    void BeginLoad(TShared<CPUModel> source, uint32 meshIndex, StreamingManager& manager, uint32 requestId);
 
     bool RequestNextLOD(StreamingManager& manager);
 
@@ -28,11 +31,24 @@ public:
 
     const ModelMesh& GetMesh() const { return m_Source->GetMeshes()[m_MeshIndex]; }
     const glm::mat4& GetWorldTransform() const { return m_WorldTransform; }
+    uint32 GetRequestId() const { return m_RequestId; }
+
+    // Guards materialIndex < 0 (unassigned) by returning a default-constructed material.
+    const ModelMaterial& GetMaterial() const;
+
+    // Shared with every other StreamingModel that came from the same LoadModel() call (one CPUModel
+    // per call, one StreamingModel per mesh) -- used by Scene::ApplyMaterialOverrides to mutate an
+    // arbitrary materialIndex's factors in place, independent of which mesh's materialIndex this
+    // particular StreamingModel itself has.
+    TShared<CPUModel> GetSourceModel() const { return m_Source; }
 
     uint32 SnapshotResidentLOD() const { return m_HighestResidentLOD.load(std::memory_order_acquire); }
     bool HasPendingLOD() const { return m_UploadInFlight.load(std::memory_order_acquire); }
 
     uint32 GetMeshletCount(uint32 lod) const { return GetMesh().lods[lod].meshletCount; }
+
+    bool HasCollider() const { return m_ColliderReady.load(std::memory_order_acquire); }
+    JPH::RefConst<JPH::Shape> GetColliderShape() const { return m_ColliderShape; }
 
     agfx::BufferView& GetVertexBufferView() { return m_Gpu.GetVertexBufferView(); }
     agfx::BufferView& GetMeshletBufferView(uint32 lod) { return m_Gpu.GetMeshletBufferView(lod); }
@@ -44,6 +60,7 @@ private:
 
     TShared<CPUModel> m_Source;
     uint32 m_MeshIndex = 0;
+    uint32 m_RequestId = 0;
     glm::mat4 m_WorldTransform{ 1.0f };
 
     GPUModel m_Gpu;
@@ -56,4 +73,9 @@ private:
 
     std::atomic<uint64> m_PendingFenceValue{ 0 };
     std::atomic<uint32> m_PendingLOD{ kNoResidentLOD };
+
+    // Published once by the collider-load job started from BeginLoad(); read-only afterwards, so
+    // concurrent readers just copy the same immutable Ref once m_ColliderReady is observed true.
+    JPH::RefConst<JPH::Shape> m_ColliderShape;
+    std::atomic<bool> m_ColliderReady{ false };
 };

@@ -1,7 +1,4 @@
 Basics
-- Collider serializing
-- Scene hierarchy, serialization
-- Mouse picking
 - Render graph
 - GPU scene representation
 - BLAS/TLAS building (async compute)

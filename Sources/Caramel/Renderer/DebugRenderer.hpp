@@ -64,6 +64,9 @@ public:
 
     void Triangle(const glm::vec3& a, const glm::vec3& b, const glm::vec3& c, const DebugStyle& style = {});
 
+    /// Axis-aligned box spanning `boundsMin` to `boundsMax`, drawn as 12 wireframe edges.
+    void Box(const glm::vec3& boundsMin, const glm::vec3& boundsMax, const DebugStyle& style = {});
+
     /// Shaft from `from` to `to` capped with a cone head. Negative head values pick a size
     /// proportional to the shaft length (20%) and head length (40%) respectively.
     void Arrow(const glm::vec3& from, const glm::vec3& to, const DebugStyle& style = {}, float headLength = -1.0f, float headRadius = -1.0f);

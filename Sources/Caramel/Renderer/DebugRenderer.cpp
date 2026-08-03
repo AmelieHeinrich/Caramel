@@ -411,6 +411,33 @@ void DebugRenderer::Triangle(const glm::vec3& a, const glm::vec3& b, const glm::
     }
 }
 
+void DebugRenderer::Box(const glm::vec3& boundsMin, const glm::vec3& boundsMax, const DebugStyle& style)
+{
+    glm::vec3 corners[8] = {
+        { boundsMin.x, boundsMin.y, boundsMin.z }, { boundsMax.x, boundsMin.y, boundsMin.z },
+        { boundsMax.x, boundsMax.y, boundsMin.z }, { boundsMin.x, boundsMax.y, boundsMin.z },
+        { boundsMin.x, boundsMin.y, boundsMax.z }, { boundsMax.x, boundsMin.y, boundsMax.z },
+        { boundsMax.x, boundsMax.y, boundsMax.z }, { boundsMin.x, boundsMax.y, boundsMax.z },
+    };
+
+    if (style.filled) {
+        EmitQuad(corners[0], corners[3], corners[2], corners[1], style); // -Z
+        EmitQuad(corners[4], corners[5], corners[6], corners[7], style); // +Z
+        EmitQuad(corners[0], corners[1], corners[5], corners[4], style); // -Y
+        EmitQuad(corners[3], corners[7], corners[6], corners[2], style); // +Y
+        EmitQuad(corners[0], corners[4], corners[7], corners[3], style); // -X
+        EmitQuad(corners[1], corners[2], corners[6], corners[5], style); // +X
+        return;
+    }
+
+    for (int i = 0; i < 4; ++i) {
+        int next = (i + 1) % 4;
+        EmitLine(corners[i], corners[next], style);
+        EmitLine(corners[4 + i], corners[4 + next], style);
+        EmitLine(corners[i], corners[4 + i], style);
+    }
+}
+
 void DebugRenderer::Arrow(const glm::vec3& from, const glm::vec3& to, const DebugStyle& style, float headLength, float headRadius)
 {
     glm::vec3 shaft = to - from;

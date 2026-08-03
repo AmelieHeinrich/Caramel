@@ -16,6 +16,7 @@ target("CaramelAsset")
     set_kind("static")
     add_files("*.cpp")
     add_packages("meshoptimizer", "cgltf", "stb", "glm", "nlohmann_json", "spdlog")
+    add_deps("Jolt")
 
     if is_plat("macosx") then
         add_files("ASTCCompressor/ASTCTextureCompressor.cpp")

@@ -11,9 +11,12 @@
 #include <Caramel/Renderer/Common.hpp>
 #include <Caramel/Renderer/UploadQueue.hpp>
 #include <Caramel/Renderer/Camera.hpp>
+#include <Caramel/Scene/RenderInstance.hpp>
 
 #include <AGFX/agfx.hpp>
 #include <SDL3/SDL.h>
+
+#include <imgui.h>
 
 class DebugRenderer;
 class ImGuiRenderer;
@@ -26,9 +29,16 @@ public:
     Renderer(SDL_Window* window);
     ~Renderer();
 
-    void Render(const Camera& camera, StreamingManager& streamingManager);
+    void Render(const Camera& camera, StreamingManager& streamingManager, const TArray<RenderInstance>& renderInstances);
     void Resize();
     void WaitIdle() { m_Fence.Wait(m_FenceValue); }
+
+    // Sets the size the scene (Sponza + debug renderer) should be rendered at this frame, driven by
+    // the ImGui Viewport panel's content region rather than the SDL window -- decoupled from the
+    // swapchain/backbuffer, which keeps tracking the real window size for the final ImGui composite.
+    // Actual GPU resource resize is deferred to the top of the next Render() call, same as Resize().
+    void SetViewportSize(uint32 width, uint32 height);
+    ImTextureID GetViewportTextureID() const { return m_SceneColorTexID; }
 
     /// Queues a CopyDest -> PixelShaderResource transition for one mip, recorded on the graphics
     /// queue at the start of the next frame. Used by texture streaming: the transfer queue leaves
@@ -60,6 +70,18 @@ private:
     agfx::Texture m_DepthTexture;
     bool m_DepthNeedsInitialTransition = true;
     void CreateDepthTexture(uint32 width, uint32 height);
+
+    // Offscreen target the scene (Sponza + debug renderer) renders into, sized to the ImGui
+    // Viewport panel's content region and sampled back by that same panel via ImGui::Image(). Ping-
+    // pongs between RenderTarget (while the scene pass writes it) and PixelShaderResource (while
+    // ImGui samples it), unlike the backbuffer, which only ever needs one-way Present<->RenderTarget.
+    agfx::Texture m_SceneColorTexture;
+    agfx::TextureView m_SceneColorView;
+    ImTextureID m_SceneColorTexID = ImTextureID_Invalid;
+    uint32 m_ViewportWidth = 1;
+    uint32 m_ViewportHeight = 1;
+    bool m_SceneColorNeedsInitialTransition = true;
+    void CreateSceneColorTexture(uint32 width, uint32 height);
 
     TUnique<ImGuiRenderer> m_ImGuiRenderer;
     TUnique<SponzaRenderer> m_SponzaRenderer;

@@ -5,8 +5,8 @@
 -- 
 
 add_rules("mode.debug", "mode.release", "mode.releasedbg")
-add_requires("libsdl3", "spdlog", "glm", "meshoptimizer", "nlohmann_json", "stb", "cgltf", "enkits", "joltphysics", "imguizmo")
-add_requires("imgui", { configs = { docking = true, sdl3 = true } })
+add_requires("libsdl3", "spdlog", "glm", "meshoptimizer", "nlohmann_json", "stb", "cgltf", "enkits")
+add_requires("imgui v1.92.7-docking", { configs = { sdl3 = true } })
 
 -- General defines
 set_rundir(".")

@@ -36,6 +36,7 @@ namespace CaramelAsset
         TArray<Vertex> vertices;
         TArray<SkinVertex> skinVertices; // empty when !hasSkin
         MeshletLOD lods[kLodCount]; // coarse-to-fine: lods[0] is the coarsest, lods[kLodCount - 1] is full detail
+        TArray<uint8> colliderData; // Jolt Shape::SaveBinaryState() bytes cooked from lods[1]'s triangles, empty on failure
     };
 
     class MeshCompressor
@@ -47,5 +48,8 @@ namespace CaramelAsset
         static void ExtractAttributes(const cgltf_primitive& primitive, const cgltf_skin* skin, CompiledMesh& outMesh, TArray<uint32>& outIndices);
         static void GenerateTangents(TArray<Vertex>& vertices, const TArray<uint32>& indices);
         static MeshletLOD BuildMeshletLOD(const TArray<Vertex>& vertices, const TArray<uint32>& indices, float32 achievedError);
+        // Cooks a Jolt JPH::MeshShape from `vertices`/`indices` (a flat triangle list, pre-meshlet)
+        // and returns its Shape::SaveBinaryState() bytes, ready to embed in the .cmdl. Empty on failure.
+        static TArray<uint8> CookCollider(const TArray<Vertex>& vertices, const TArray<uint32>& indices);
     };
 }

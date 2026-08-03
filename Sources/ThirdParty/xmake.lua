@@ -9,3 +9,4 @@ includes("AGFXShader")
 if not is_plat("macosx") then
     includes("Compressonator")
 end
+includes("Jolt")

@@ -64,7 +64,8 @@ Renderer::Renderer(SDL_Window* window)
         m_CommandBuffers[i] = m_Device.CreateCommandBuffer(m_CommandQueue);
     }
 
-    CreateDepthTexture((uint32)width, (uint32)height);
+    CreateDepthTexture(m_ViewportWidth, m_ViewportHeight);
+    CreateSceneColorTexture(m_ViewportWidth, m_ViewportHeight);
 
     ShaderServer::Initialize(m_Device, *this);
     m_ImGuiRenderer = MakeUnique<ImGuiRenderer>(m_Device, m_CommandQueue, m_SwapChain.GetFormat(), (uint32)FRAMES_IN_FLIGHT);
@@ -89,13 +90,57 @@ void Renderer::CreateDepthTexture(uint32 width, uint32 height)
     m_Device.MakeResourcesResident();
 }
 
+void Renderer::CreateSceneColorTexture(uint32 width, uint32 height)
+{
+    agfx::TextureCreateInfo colorInfo;
+    colorInfo.SetSize(width, height)
+             .SetFormat(m_SwapChain.GetFormat())
+             .SetType(agfx::TextureType::Texture2D)
+             .SetUsage(agfx::TextureUsage::ColorAttachment | agfx::TextureUsage::Sampled)
+             .SetMipLevels(1);
+    m_SceneColorTexture = m_Device.CreateTexture(colorInfo);
+    m_SceneColorTexture.SetName("Scene Color Buffer");
+
+    agfx::TextureViewCreateInfo colorViewInfo = agfx::TextureViewCreateInfo().SetTexture(m_SceneColorTexture)
+                                                                              .SetFormat(m_SwapChain.GetFormat())
+                                                                              .SetMipRange(0, 1)
+                                                                              .SetWriteable(false);
+    m_SceneColorView = m_Device.CreateTextureView(colorViewInfo);
+    m_SceneColorTexID = (ImTextureID)(intptr_t)m_SceneColorView.GetHandle();
+    m_SceneColorNeedsInitialTransition = true;
+
+    m_Device.MakeResourcesResident();
+}
+
+void Renderer::SetViewportSize(uint32 width, uint32 height)
+{
+    width = width > 0 ? width : 1;
+    height = height > 0 ? height : 1;
+    if (width == m_ViewportWidth && height == m_ViewportHeight)
+        return;
+
+    m_ViewportWidth = width;
+    m_ViewportHeight = height;
+
+    // Must resize synchronously here, not deferred to the next Render() call (unlike the backbuffer/
+    // Resize()): Application::ShowViewport() calls this and immediately hands GetViewportTextureID()
+    // to ImGui::Image() in the same frame's draw list, which is finalized (ImGui::Render()) before
+    // Render() runs. Deferring the resize would destroy/recreate this texture (and its bindless view)
+    // *after* this frame's draw commands already captured the old handle, so the GPU would end up
+    // sampling a freed descriptor -- this caused a real DXGI_ERROR_DEVICE_HUNG/TDR when docking the
+    // Viewport panel changed its size mid-frame.
+    m_Device.WaitIdle();
+    CreateSceneColorTexture(m_ViewportWidth, m_ViewportHeight);
+    CreateDepthTexture(m_ViewportWidth, m_ViewportHeight);
+}
+
 Renderer::~Renderer()
 {
     m_Device.WaitIdle();
     ShaderServer::Shutdown();
 }
 
-void Renderer::Render(const Camera& camera, StreamingManager& streamingManager)
+void Renderer::Render(const Camera& camera, StreamingManager& streamingManager, const TArray<RenderInstance>& renderInstances)
 {
     m_FrameSlot = (uint32_t)(m_FenceValue % FRAMES_IN_FLIGHT);
     m_Fence.Wait(m_FenceFrameSlots[m_FrameSlot]);
@@ -107,7 +152,6 @@ void Renderer::Render(const Camera& camera, StreamingManager& streamingManager)
     if (m_ResizeNextFrame) {
         m_Device.WaitIdle();
         m_SwapChain.Resize(width, height);
-        CreateDepthTexture((uint32)width, (uint32)height);
         m_ResizeNextFrame = false;
     }
 
@@ -119,12 +163,9 @@ void Renderer::Render(const Camera& camera, StreamingManager& streamingManager)
         agfxCommandBufferTextureBarrier(commandBuffer, transition.texture, AGFX_RESOURCE_STATE_COPY_DEST, AGFX_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, transition.mip, 0, 1);
     m_PendingMipTransitions.Clear();
 
-    agfx::Texture backBuffer = m_SwapChain.AcquireNextTexture();
-    commandBuffer.TextureBarrier(backBuffer, agfx::ResourceState::Present, agfx::ResourceState::RenderTarget);
-
-    agfx::RenderTargetCreateInfo renderTargetCreateInfo{};
-    renderTargetCreateInfo.texture = backBuffer;
-    agfx::RenderTarget renderTarget = m_Device.CreateRenderTarget(renderTargetCreateInfo);
+    agfx::RenderTargetCreateInfo sceneColorTargetCreateInfo{};
+    sceneColorTargetCreateInfo.texture = m_SceneColorTexture;
+    agfx::RenderTarget sceneColorTarget = m_Device.CreateRenderTarget(sceneColorTargetCreateInfo);
 
     agfx::RenderTargetCreateInfo depthTargetCreateInfo{};
     depthTargetCreateInfo.texture = m_DepthTexture;
@@ -139,10 +180,20 @@ void Renderer::Render(const Camera& camera, StreamingManager& streamingManager)
         m_DepthNeedsInitialTransition = false;
     }
 
+    // The scene color texture, unlike depth, ping-pongs every frame: RenderTarget while the scene/
+    // debug passes write it below, then PixelShaderResource so the ImGui pass can sample it via
+    // ImGui::Image() in the Viewport panel. The very first use is Common -> RenderTarget instead.
+    if (m_SceneColorNeedsInitialTransition) {
+        commandBuffer.TextureBarrier(m_SceneColorTexture, agfx::ResourceState::Common, agfx::ResourceState::RenderTarget);
+        m_SceneColorNeedsInitialTransition = false;
+    } else {
+        commandBuffer.TextureBarrier(m_SceneColorTexture, agfx::ResourceState::PixelShaderResource, agfx::ResourceState::RenderTarget);
+    }
+
     {
         agfx::RenderPassCreateInfo scenePassInfo{};
         scenePassInfo.colorAttachmentCount = 1;
-        scenePassInfo.colorAttachments[0].renderTarget = renderTarget;
+        scenePassInfo.colorAttachments[0].renderTarget = sceneColorTarget;
         scenePassInfo.colorAttachments[0].loadOp = AGFX_LOAD_OPERATION_CLEAR;
         scenePassInfo.colorAttachments[0].storeOp = AGFX_STORE_OPERATION_STORE;
         scenePassInfo.colorAttachments[0].clearColor[0] = 0.1f;
@@ -155,20 +206,31 @@ void Renderer::Render(const Camera& camera, StreamingManager& streamingManager)
         scenePassInfo.depthAttachment.storeOp = AGFX_STORE_OPERATION_STORE;
         scenePassInfo.depthAttachment.clearDepth = 1.0f;
         scenePassInfo.name = "Scene Pass";
-        scenePassInfo.width = width;
-        scenePassInfo.height = height;
+        scenePassInfo.width = m_ViewportWidth;
+        scenePassInfo.height = m_ViewportHeight;
 
         agfx::RenderPass scenePass = commandBuffer.BeginRenderPass(scenePassInfo);
-        m_SponzaRenderer->Render(scenePass, streamingManager, camera, (uint32)width, (uint32)height, (uint32)m_FrameSlot);
+        m_SponzaRenderer->Render(scenePass, streamingManager, renderInstances, camera, m_ViewportWidth, m_ViewportHeight, (uint32)m_FrameSlot);
         scenePass.End();
     }
 
-    m_DebugRenderer->Flush(commandBuffer, renderTarget, depthTarget, camera, (uint32)width, (uint32)height, (uint32)m_FrameSlot);
+    m_DebugRenderer->Flush(commandBuffer, sceneColorTarget, depthTarget, camera, m_ViewportWidth, m_ViewportHeight, (uint32)m_FrameSlot);
 
+    commandBuffer.TextureBarrier(m_SceneColorTexture, agfx::ResourceState::RenderTarget, agfx::ResourceState::PixelShaderResource);
+
+    agfx::Texture backBuffer = m_SwapChain.AcquireNextTexture();
+    commandBuffer.TextureBarrier(backBuffer, agfx::ResourceState::Present, agfx::ResourceState::RenderTarget);
+
+    agfx::RenderTargetCreateInfo renderTargetCreateInfo{};
+    renderTargetCreateInfo.texture = backBuffer;
+    agfx::RenderTarget renderTarget = m_Device.CreateRenderTarget(renderTargetCreateInfo);
+
+    // Nothing draws directly onto the backbuffer anymore except ImGui (the Viewport panel just
+    // shows the offscreen scene color texture as an image), so this can clear instead of load.
     agfx::RenderPassCreateInfo renderPassCreateInfo{};
     renderPassCreateInfo.colorAttachmentCount = 1;
     renderPassCreateInfo.colorAttachments[0].renderTarget = renderTarget;
-    renderPassCreateInfo.colorAttachments[0].loadOp = AGFX_LOAD_OPERATION_LOAD;
+    renderPassCreateInfo.colorAttachments[0].loadOp = AGFX_LOAD_OPERATION_CLEAR;
     renderPassCreateInfo.colorAttachments[0].storeOp = AGFX_STORE_OPERATION_STORE;
     renderPassCreateInfo.name = "Main Render Pass";
     renderPassCreateInfo.width = width;

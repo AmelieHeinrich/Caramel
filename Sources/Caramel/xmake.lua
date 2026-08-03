@@ -8,5 +8,5 @@ target("Caramel")
     set_kind("binary")
     add_files("**.cpp")
 
-    add_deps("agfx", "agfx_shader")
+    add_deps("agfx", "agfx_shader", "Jolt")
     add_packages("libsdl3", "glm", "spdlog", "imgui", "enkits", "nlohmann_json")

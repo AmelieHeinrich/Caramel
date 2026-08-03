@@ -10,8 +10,13 @@
 
 #include <glm/gtc/type_ptr.hpp>
 
+#include <Jolt/Jolt.h>
+#include <Jolt/Physics/Collision/Shape/MeshShape.h>
+#include <Jolt/Core/StreamWrapper.h>
+
 #include <algorithm>
 #include <cmath>
+#include <sstream>
 
 namespace CaramelAsset
 {
@@ -170,6 +175,37 @@ namespace CaramelAsset
             float32 handedness = (glm::dot(glm::cross(n, t), tan2[i]) < 0.0f) ? -1.0f : 1.0f;
             vertices[i].tangent = glm::vec4(tangent, handedness);
         }
+    }
+
+    TArray<uint8> MeshCompressor::CookCollider(const TArray<Vertex>& vertices, const TArray<uint32>& indices)
+    {
+        if (indices.IsEmpty() || vertices.IsEmpty())
+            return TArray<uint8>();
+
+        JPH::VertexList joltVertices;
+        joltVertices.reserve(vertices.Size());
+        for (const Vertex& v : vertices)
+            joltVertices.push_back(JPH::Float3(v.position.x, v.position.y, v.position.z));
+
+        JPH::IndexedTriangleList joltTriangles;
+        joltTriangles.reserve(indices.Size() / 3);
+        for (size_t i = 0; i + 2 < indices.Size(); i += 3)
+            joltTriangles.push_back(JPH::IndexedTriangle(indices[i], indices[i + 1], indices[i + 2]));
+
+        JPH::MeshShapeSettings settings(joltVertices, joltTriangles);
+        JPH::Shape::ShapeResult result = settings.Create();
+        if (result.HasError())
+            return TArray<uint8>();
+
+        std::ostringstream out(std::ios::binary);
+        JPH::StreamOutWrapper streamOut(out);
+        result.Get()->SaveBinaryState(streamOut);
+
+        std::string bytes = out.str();
+        TArray<uint8> colliderData(bytes.size());
+        if (!bytes.empty())
+            std::memcpy(colliderData.Data(), bytes.data(), bytes.size());
+        return colliderData;
     }
 
     MeshletLOD MeshCompressor::BuildMeshletLOD(const TArray<Vertex>& vertices, const TArray<uint32>& indices, float32 achievedError)
@@ -335,6 +371,12 @@ namespace CaramelAsset
                     lodIndices = std::move(sloppyIndices);
                 }
             }
+
+            // The collider is cooked from lodIndex 1 (ratio 0.12, stored at mesh.lods[kLodCount - 2] --
+            // the array slot the Model Viewer UI calls "LOD 1") before this level's index buffer gets
+            // reordered for GPU vertex-cache locality and split into meshlets.
+            if (lodIndex == 1)
+                mesh.colliderData = CookCollider(mesh.vertices, lodIndices);
 
             meshopt_optimizeVertexCache(lodIndices.Data(), lodIndices.Data(), lodIndices.Size(), mesh.vertices.Size());
 

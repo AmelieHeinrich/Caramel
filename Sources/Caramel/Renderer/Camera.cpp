@@ -51,3 +51,24 @@ glm::mat4 Camera::GetProjection(float aspectRatio) const
     glm::mat4 projection = glm::perspective(glm::radians(m_FovDegrees), aspectRatio, m_NearPlane, m_FarPlane);
     return projection;
 }
+
+void Camera::ScreenPointToRay(const glm::vec2& screenPos, uint32 width, uint32 height, float aspectRatio, glm::vec3& outOrigin, glm::vec3& outDir) const
+{
+    // Same NDC-depth convention as DebugRenderer::Frustum, which unprojects the same way.
+#if defined(GLM_FORCE_DEPTH_ZERO_TO_ONE)
+    constexpr float kNdcNearZ = 0.0f;
+#else
+    constexpr float kNdcNearZ = -1.0f;
+#endif
+
+    glm::mat4 inverseViewProj = glm::inverse(GetViewProjection(aspectRatio));
+
+    float ndcX = width != 0 ? (2.0f * screenPos.x / (float)width - 1.0f) : 0.0f;
+    float ndcY = height != 0 ? (1.0f - 2.0f * screenPos.y / (float)height) : 0.0f;
+
+    glm::vec4 nearPoint = inverseViewProj * glm::vec4(ndcX, ndcY, kNdcNearZ, 1.0f);
+    glm::vec4 farPoint = inverseViewProj * glm::vec4(ndcX, ndcY, 1.0f, 1.0f);
+
+    outOrigin = glm::vec3(nearPoint) / nearPoint.w;
+    outDir = (glm::vec3(farPoint) / farPoint.w) - outOrigin;
+}

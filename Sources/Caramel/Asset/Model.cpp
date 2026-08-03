@@ -51,6 +51,8 @@ namespace
         mesh.vertexBufferLength = j.value("vertexBufferLength", uint64(0));
         mesh.skinBufferOffset = j.value("skinBufferOffset", uint64(0));
         mesh.skinBufferLength = j.value("skinBufferLength", uint64(0));
+        mesh.colliderOffset = j.value("colliderOffset", uint64(0));
+        mesh.colliderLength = j.value("colliderLength", uint64(0));
 
         const auto& lodsJson = j.at("lods");
         for (uint32 i = 0; i < CaramelAsset::kLodCount && i < lodsJson.size(); i++)
@@ -212,4 +214,10 @@ uint64 CPUModel::LoadLOD(uint32 meshIndex, uint32 lodIndex, void* destination) c
 {
     const ModelLOD& lod = m_Meshes[meshIndex].lods[lodIndex];
     return ReadBinaryRange(lod.GetByteOffset(), lod.GetByteLength(), destination);
+}
+
+uint64 CPUModel::LoadCollider(uint32 meshIndex, void* destination) const
+{
+    const ModelMesh& mesh = m_Meshes[meshIndex];
+    return ReadBinaryRange(mesh.colliderOffset, mesh.colliderLength, destination);
 }

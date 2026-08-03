@@ -26,9 +26,15 @@ namespace
 
     // Mirrors Content/Shaders/Sponza.hlsl's SponzaPushConstants field-for-field; HLSL's
     // ResourceHandle is a plain uint, so this side just uses uint32 (same convention as
-    // ImGuiRenderer::ImGuiPushConstants).
+    // ImGuiRenderer::ImGuiPushConstants). The two float4s come first so they land 16-byte-aligned
+    // without needing manual padding -- HLSL vectors can't straddle a 16-byte boundary, and starting
+    // a run of uints partway through would silently desync the two sides' offsets otherwise.
+    // emissiveFactor is glm::vec3 on the CPU side but carried as a float4 here (w unused) for the
+    // same reason.
     struct SponzaPushConstants
     {
+        glm::vec4 baseColorFactor;
+        glm::vec4 emissiveFactor;
         uint32 rFrameConstants;
         uint32 rInstanceBuffer;
         uint32 uInstanceIndex;
@@ -100,42 +106,35 @@ SponzaRenderer::SponzaRenderer(agfx::Device& device, agfx::TextureFormat colorFo
     }
 }
 
-void SponzaRenderer::EnsureInstanceBuffer(StreamingManager& streamingManager)
+void SponzaRenderer::UpdateInstanceBuffer(const TArray<RenderInstance>& renderInstances)
 {
-    const TArray<TShared<StreamingModel>>& models = streamingManager.GetModels();
-    if (models.Size() <= m_InstanceCount && models.Size() <= m_InstanceCapacity)
-        return;
-
-    // Sponza is static: instance data (one model matrix per mesh) never changes once written, so
-    // the buffer is only (re)built when new meshes show up -- not every frame.
-    uint32 newCapacity = (uint32)models.Size();
-    agfx::BufferCreateInfo bufferInfo;
-    bufferInfo.SetSize(sizeof(InstanceData) * newCapacity).SetStride(sizeof(InstanceData)).SetUsage(agfx::BufferUsage::ShaderRead).SetMemoryType(agfx::BufferMemoryType::CPUToGPU);
-    m_InstanceBuffer = m_Device->CreateBuffer(bufferInfo);
-    m_InstanceBuffer.SetName("Sponza Instance Buffer");
-
-    agfx::BufferViewCreateInfo viewInfo;
-    viewInfo.SetBuffer(m_InstanceBuffer.Get()).SetType(agfx::BufferViewType::Structured).SetOffset(0).SetWriteable(false);
-    m_InstanceBufferView = m_Device->CreateBufferView(viewInfo);
-
+    uint32 count = (uint32)renderInstances.Size();
+    if (count > m_InstanceCapacity)
     {
-        agfx::MappedBuffer mapped(m_InstanceBuffer);
-        InstanceData* dst = mapped.As<InstanceData>();
-        for (uint32 i = 0; i < newCapacity; ++i)
-            dst[i].model = models[i]->GetWorldTransform();
+        agfx::BufferCreateInfo bufferInfo;
+        bufferInfo.SetSize(sizeof(InstanceData) * count).SetStride(sizeof(InstanceData)).SetUsage(agfx::BufferUsage::ShaderRead).SetMemoryType(agfx::BufferMemoryType::CPUToGPU);
+        m_InstanceBuffer = m_Device->CreateBuffer(bufferInfo);
+        m_InstanceBuffer.SetName("Sponza Instance Buffer");
+
+        agfx::BufferViewCreateInfo viewInfo;
+        viewInfo.SetBuffer(m_InstanceBuffer.Get()).SetType(agfx::BufferViewType::Structured).SetOffset(0).SetWriteable(false);
+        m_InstanceBufferView = m_Device->CreateBufferView(viewInfo);
+
+        m_InstanceCapacity = count;
     }
 
-    m_InstanceCapacity = newCapacity;
-    m_InstanceCount = newCapacity;
+    agfx::MappedBuffer mapped(m_InstanceBuffer);
+    InstanceData* dst = mapped.As<InstanceData>();
+    for (uint32 i = 0; i < count; ++i)
+        dst[i].model = renderInstances[i].transform;
 }
 
-void SponzaRenderer::Render(agfx::RenderPass& renderPass, StreamingManager& streamingManager, const Camera& camera, uint32 width, uint32 height, uint32 frameIndex)
+void SponzaRenderer::Render(agfx::RenderPass& renderPass, StreamingManager& streamingManager, const TArray<RenderInstance>& renderInstances, const Camera& camera, uint32 width, uint32 height, uint32 frameIndex)
 {
-    const TArray<TShared<StreamingModel>>& models = streamingManager.GetModels();
-    if (models.IsEmpty())
+    if (renderInstances.IsEmpty())
         return;
 
-    EnsureInstanceBuffer(streamingManager);
+    UpdateInstanceBuffer(renderInstances);
 
     {
         FrameConstants constants;
@@ -152,9 +151,9 @@ void SponzaRenderer::Render(agfx::RenderPass& renderPass, StreamingManager& stre
     renderPass.SetScissor(0, 0, width, height);
     renderPass.SetPipeline(*pipeline);
 
-    for (uint32 i = 0; i < models.Size(); ++i)
+    for (uint32 i = 0; i < renderInstances.Size(); ++i)
     {
-        StreamingModel& model = *models[i];
+        StreamingModel& model = *renderInstances[i].mesh;
         uint32 lod = model.SnapshotResidentLOD();
         if (lod == StreamingModel::kNoResidentLOD)
             continue; // Vertex buffer/first LOD hasn't landed yet.
@@ -163,10 +162,14 @@ void SponzaRenderer::Render(agfx::RenderPass& renderPass, StreamingManager& stre
         if (meshletCount == 0)
             continue;
 
-        TShared<StreamingTexture> baseColor = streamingManager.GetMaterialTexture(model.GetMesh().materialIndex);
+        TShared<StreamingTexture> baseColor = streamingManager.GetMaterialTexture(model.GetRequestId(), model.GetMesh().materialIndex, MaterialTextureSlot::BaseColor);
         bool hasResidentTexture = baseColor && baseColor->SnapshotResidentMip() != StreamingTexture::kNoResidentMip;
 
+        const ModelMaterial& material = model.GetMaterial();
+
         SponzaPushConstants pc{};
+        pc.baseColorFactor = material.baseColorFactor;
+        pc.emissiveFactor = glm::vec4(material.emissiveFactor, 0.0f);
         pc.rFrameConstants = (uint32)m_CameraBufferViews[frameIndex].GetHandle();
         pc.rInstanceBuffer = (uint32)m_InstanceBufferView.GetHandle();
         pc.uInstanceIndex = i;

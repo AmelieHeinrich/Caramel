@@ -8,6 +8,11 @@
 
 #include <spdlog/spdlog.h>
 
+#include <Jolt/Jolt.h>
+#include <Jolt/Core/Memory.h>
+#include <Jolt/Core/Factory.h>
+#include <Jolt/RegisterTypes.h>
+
 #include <cstring>
 
 namespace
@@ -64,8 +69,16 @@ int main(int argc, char** argv)
         return 1;
     }
 
+    JPH::RegisterDefaultAllocator();
+    JPH::Factory::sInstance = new JPH::Factory();
+    JPH::RegisterTypes();
+
     CaramelAsset::Compressor compressor;
     bool success = compressor.Compile(inputPath, options);
+
+    JPH::UnregisterTypes();
+    delete JPH::Factory::sInstance;
+    JPH::Factory::sInstance = nullptr;
 
     return success ? 0 : 1;
 }
