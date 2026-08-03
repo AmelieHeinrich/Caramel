@@ -49,11 +49,5 @@ glm::mat4 Camera::GetView() const
 glm::mat4 Camera::GetProjection(float aspectRatio) const
 {
     glm::mat4 projection = glm::perspective(glm::radians(m_FovDegrees), aspectRatio, m_NearPlane, m_FarPlane);
-#if defined(CARAMEL_LINUX)
-    // glm::perspective targets OpenGL's Y-up clip space; Vulkan's is Y-down (the one AGFX backend
-    // that differs here -- D3D12 and Metal both already match glm's convention), so only the
-    // Vulkan backend needs the flip.
-    projection[1][1] *= -1.0f;
-#endif
     return projection;
 }
