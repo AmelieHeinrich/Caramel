@@ -213,7 +213,14 @@ void Application::ShowViewport()
     m_ViewportRectMin = ImGui::GetCursorScreenPos();
     m_ViewportRectSize = ImVec2(contentSize.x > 0.0f ? contentSize.x : 1.0f, contentSize.y > 0.0f ? contentSize.y : 1.0f);
 
-    m_Renderer->SetViewportSize((uint32)m_ViewportRectSize.x, (uint32)m_ViewportRectSize.y);
+    int windowW = 0, windowH = 0, pixelW = 0, pixelH = 0;
+    SDL_GetWindowSize(m_Window, &windowW, &windowH);
+    SDL_GetWindowSizeInPixels(m_Window, &pixelW, &pixelH);
+    float dpiScale = (windowW > 0 && pixelW > 0) ? ((float)pixelW / (float)windowW) : 1.0f;
+    const uint32 viewportTextureWidth = (uint32)std::max(1.0f, std::ceil(m_ViewportRectSize.x * dpiScale));
+    const uint32 viewportTextureHeight = (uint32)std::max(1.0f, std::ceil(m_ViewportRectSize.y * dpiScale));
+
+    m_Renderer->SetViewportSize(viewportTextureWidth, viewportTextureHeight);
     ImGui::Image(m_Renderer->GetViewportTextureID(), m_ViewportRectSize);
 
     // Attached directly to the Image() item above rather than a separate invisible overlay window:
@@ -247,12 +254,20 @@ void Application::ShowOverlay()
 #elif defined(CARAMEL_MAC)
     ImGui::Text("Backend: Metal 4");
 #endif
-    ImGui::Text("Viewport: %dx%d", (int)m_ViewportRectSize.x, (int)m_ViewportRectSize.y);
     {
-        int windowWidth = 0, windowHeight = 0;
-        SDL_GetWindowSizeInPixels(m_Window, &windowWidth, &windowHeight);
-        if (windowWidth != (int)m_ViewportRectSize.x || windowHeight != (int)m_ViewportRectSize.y)
-            ImGui::Text("Window: %dx%d", windowWidth, windowHeight);
+        int windowW = 0, windowH = 0, pixelW = 0, pixelH = 0;
+        SDL_GetWindowSize(m_Window, &windowW, &windowH);
+        SDL_GetWindowSizeInPixels(m_Window, &pixelW, &pixelH);
+        float dpiScale = (windowW > 0 && pixelW > 0) ? ((float)pixelW / (float)windowW) : 1.0f;
+
+        int viewportPixelW = (int)std::max(1.0f, std::ceil(m_ViewportRectSize.x * dpiScale));
+        int viewportPixelH = (int)std::max(1.0f, std::ceil(m_ViewportRectSize.y * dpiScale));
+
+        if (dpiScale != 1.0f)
+            ImGui::Text("Viewport: %dx%d px (%dx%d @ %.2gx)", viewportPixelW, viewportPixelH, (int)m_ViewportRectSize.x, (int)m_ViewportRectSize.y, dpiScale);
+        else
+            ImGui::Text("Viewport: %dx%d px", viewportPixelW, viewportPixelH);
+        ImGui::Text("Window: %dx%d px", pixelW, pixelH);
     }
     ImGui::Separator();
     ImGui::Text("Device: %s", m_DeviceInfo.name);

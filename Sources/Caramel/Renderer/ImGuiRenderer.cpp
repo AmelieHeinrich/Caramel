@@ -178,6 +178,9 @@ ImGuiRenderer::ImGuiRenderer(agfx::Device& device, agfx::CommandQueue& queue, ag
     // Ubuntu-Regular for body text (readable at compact UI sizes); Quicksand-Bold reserved as a
     // separate display font for section headers/titles via GetHeaderFont().
     io.FontDefault = io.Fonts->AddFontFromFileTTF("Content/Fonts/Ubuntu-Regular.ttf", 17.0f);
+#if defined(CARAMEL_MACOS)
+    io.FontGlobalScale = 0.75f;
+#endif
 
     static const ImWchar kIconRanges[] = { ICON_MIN_FA, ICON_MAX_FA, 0 };
     ImFontConfig iconConfig;
