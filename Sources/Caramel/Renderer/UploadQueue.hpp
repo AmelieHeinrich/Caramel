@@ -16,15 +16,12 @@
 class UploadQueue
 {
 public:
+    static constexpr uint64 kStagingBufferSize = 64 * 1024 * 1024;
+
     void Init(agfx::Device& device);
 
     uint64 EnqueueTextureUpload(agfx::Texture& texture, uint32 mipLevel, const void* data, size_t dataSize, uint32 width, uint32 height, uint32 bytesPerRow);
 
-    // Buffer-to-buffer sibling of EnqueueTextureUpload -- e.g. mesh LOD streaming, where the
-    // destination is a plain agfx::Buffer (meshlet/meshlet-vertex/meshlet-triangle data) rather
-    // than a texture mip. No barrier is recorded: unlike a texture mip (which must reach
-    // PixelShaderResource before it can be sampled) a ShaderRead buffer needs no layout transition,
-    // so the upload fence alone gates when the caller may consider the data resident.
     uint64 EnqueueBufferUpload(agfx::Buffer& dst, uint64 dstOffset, const void* data, size_t dataSize);
 
     uint64 Flush();
@@ -32,22 +29,11 @@ public:
     agfx::Fence& GetFence() { return m_Fence; }
 
 private:
-    static constexpr uint64 kStagingBufferSize = 64 * 1024 * 1024;
-
-    // Required alignment of a staging-buffer source offset. Buffer-to-texture copies are the strict
-    // ones: Metal wants the offset to be a multiple of the destination format's block size (16 for
-    // BC7/ASTC), D3D12 wants a multiple of D3D12_TEXTURE_DATA_PLACEMENT_ALIGNMENT. Plain
-    // buffer-to-buffer copies only need natural alignment.
     static constexpr uint64 kTextureCopyAlignment = 512;
     static constexpr uint64 kBufferCopyAlignment = 16;
 
-    // Reserves `size` bytes in the current frame's staging buffer at an `alignment`-aligned offset,
-    // flushing early if this frame's buffer is full, and opens the slot's command buffer if needed.
-    // Returns the offset to write to. Assumes m_RecordMutex is already held by the caller.
     uint64 AllocateStagingLocked(uint64 size, uint64 alignment);
 
-    // Submits the current frame's command buffer and advances to the next ring slot. Assumes
-    // m_RecordMutex is already held by the caller.
     uint64 FlushLocked();
 
     agfx::Device* m_Device = nullptr;
@@ -61,9 +47,6 @@ private:
         agfx::CommandBuffer commandBuffer;
         uint64 writeOffset = 0;
         uint64 fenceValue = 0;
-        // Whether Begin() has been called without a matching End(). A command allocator may only
-        // have one open command buffer, so the buffer is only opened once work is actually
-        // recorded into the slot.
         bool recording = false;
     };
     UploadFrame m_Frames[FRAMES_IN_FLIGHT];

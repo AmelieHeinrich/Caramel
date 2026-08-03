@@ -31,7 +31,6 @@ public:
     void Run();
 private:
     void ShowOverlay();
-    void ShowContentViewer();
     void ShowModelViewer();
     void ShowViewport();
     void ShowInspector();
@@ -48,15 +47,5 @@ private:
 
     agfxDeviceInfo m_DeviceInfo;
 
-    // Content Viewer state.
-    bool m_ContentViewerLoaded = false;
-    bool m_ContentViewerAutoStream = true;
-    float m_ContentViewerStreamInterval = 0.5f;
-    float m_ContentViewerStreamTimer = 0.0f;
-
-    // Model Viewer state.
     bool m_ModelViewerLoaded = false;
-    bool m_ModelViewerAutoStream = true;
-    float m_ModelViewerStreamInterval = 0.5f;
-    float m_ModelViewerStreamTimer = 0.0f;
 };

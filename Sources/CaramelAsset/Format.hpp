@@ -143,14 +143,6 @@ namespace CaramelAsset
         return blocksPerRow * block.bytesPerBlock;
     }
 
-    // Extent to use for a full-mip buffer->texture copy of a block-compressed format.
-    //
-    // Below a certain mip level the logical size (e.g. 1x1 or 2x2) is smaller than one block, and
-    // the source bytes still hold a whole block -- but the copy region is expressed in texels of
-    // the *destination* mip, so it must never exceed that mip's logical size. Rounding up to the
-    // block dimensions asks to write a 4x4 region into a 1x1 mip and trips copy validation; the
-    // driver handles the partial trailing block itself. The round-up is therefore clamped, which
-    // for a full-mip copy leaves the logical extent as-is.
     inline void GetBlockAlignedExtent(ECompressedTextureFormat format, uint32 width, uint32 height, uint32& outWidth, uint32& outHeight)
     {
         BlockInfo block = GetBlockInfo(format);

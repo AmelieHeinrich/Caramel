@@ -22,14 +22,11 @@ void UploadQueue::Init(agfx::Device& device)
 
 uint64 UploadQueue::AllocateStagingLocked(uint64 size, uint64 alignment)
 {
-    // A batch of independent uploads (e.g. every streaming texture requesting its next mip in
-    // the same tick) can outgrow one frame's staging buffer before the caller gets a chance to
-    // Flush() -- flush early rather than writing/copying past the buffer.
     uint64 offset = (m_Frames[m_CurrentFrameIndex].writeOffset + alignment - 1) & ~(alignment - 1);
     if (offset + size > kStagingBufferSize)
     {
         FlushLocked();
-        offset = 0; // The rotated-to slot restarts at 0, which satisfies any alignment.
+        offset = 0;
     }
 
     UploadFrame& frame = m_Frames[m_CurrentFrameIndex];
@@ -52,7 +49,6 @@ uint64 UploadQueue::EnqueueTextureUpload(agfx::Texture& texture, uint32 mipLevel
     uint64 srcOffset = AllocateStagingLocked(dataSize, kTextureCopyAlignment);
     UploadFrame& frame = m_Frames[m_CurrentFrameIndex];
 
-    // Copy into this frame's staging buffer at the reserved offset.
     {
         agfx::MappedBuffer mapped(frame.stagingBuffer);
         std::memcpy(mapped.As<uint8_t>() + srcOffset, data, dataSize);
@@ -61,11 +57,6 @@ uint64 UploadQueue::EnqueueTextureUpload(agfx::Texture& texture, uint32 mipLevel
     agfx::TextureRegion region;
     region.SetSize(width, height);
 
-    // The copy contract wants the destination mip in CopyDest; until its first transition a fresh
-    // texture's mips sit in Common. The matching CopyDest -> PixelShaderResource transition happens
-    // on the graphics queue once the upload fence signals (Renderer::EnqueueMipTransition): shader
-    // stages are not valid barrier targets on a transfer queue, and the graphics-side barrier
-    // doubles as the cross-queue visibility sync for the copied data.
     frame.commandBuffer.TextureBarrier(texture, agfx::ResourceState::Common, agfx::ResourceState::CopyDest, mipLevel, 0);
 
     auto pass = frame.commandBuffer.BeginComputePass("Upload mip");
@@ -106,8 +97,6 @@ uint64 UploadQueue::FlushLocked()
 {
     UploadFrame& frame = m_Frames[m_CurrentFrameIndex];
 
-    // Nothing was recorded into this slot -- there is no command buffer to close and submitting
-    // would burn a fence value for no work.
     if (!frame.recording)
         return m_NextFenceValue - 1;
 
@@ -122,8 +111,6 @@ uint64 UploadQueue::FlushLocked()
     m_CurrentFrameIndex = (m_CurrentFrameIndex + 1) % FRAMES_IN_FLIGHT;
     UploadFrame& next = m_Frames[m_CurrentFrameIndex];
 
-    // Before reusing this frame slot, make sure its last submission actually finished. The
-    // command buffer is left closed; the next Enqueue reopens it.
     m_Fence.Wait(next.fenceValue);
     next.commandBuffer.Reset();
     next.writeOffset = 0;

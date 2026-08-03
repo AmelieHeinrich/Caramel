@@ -68,6 +68,8 @@ Renderer::Renderer(SDL_Window* window)
     ShaderServer::Initialize(m_Device, *this);
     m_ImGuiRenderer = MakeUnique<ImGuiRenderer>(m_Device, m_CommandQueue, m_SwapChain.GetFormat(), (uint32)FRAMES_IN_FLIGHT);
     m_SponzaRenderer = MakeUnique<SponzaRenderer>(m_Device, m_SwapChain.GetFormat(), kDepthFormat, (uint32)FRAMES_IN_FLIGHT);
+
+    m_Device.MakeResourcesResident();
 }
 
 void Renderer::CreateDepthTexture(uint32 width, uint32 height)
@@ -81,6 +83,8 @@ void Renderer::CreateDepthTexture(uint32 width, uint32 height)
     m_DepthTexture = m_Device.CreateTexture(depthInfo);
     m_DepthTexture.SetName("Scene Depth Buffer");
     m_DepthNeedsInitialTransition = true;
+
+    m_Device.MakeResourcesResident();
 }
 
 Renderer::~Renderer()

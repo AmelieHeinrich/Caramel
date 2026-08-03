@@ -14,24 +14,16 @@ struct TextureMip
 {
     uint32 width = 0;
     uint32 height = 0;
-    uint64 offset = 0; // absolute, from the start of the file
-    uint64 size = 0;   // compressed byte size, no padding included
+    uint64 offset = 0;
+    uint64 size = 0;
 };
 
-// Parses a compiled .ctex file's header + mip table up front (32 + 16*mipCount bytes) and exposes
-// on-demand, per-mip reads of the compressed block data. Each LoadMip() call is self-contained
-// (opens its own file handle) so it's safe to fire off from any thread, e.g. one JobSystem job per
-// mip, letting a caller stream in exactly the mips it currently wants. Does no GPU work.
 class CPUTexture
 {
 public:
     CPUTexture() = default;
-    // Convenience constructor equivalent to CPUTexture{} + Load(path); check IsValid() to see
-    // whether it succeeded.
     explicit CPUTexture(const String& path) { Load(path); }
 
-    // Opens `path` and parses the header + mip table. Returns false, leaving the asset empty, on
-    // a missing file or a bad magic/empty mip table.
     bool Load(const String& path);
 
     bool IsValid() const { return !m_Mips.IsEmpty(); }
@@ -44,8 +36,6 @@ public:
 
     const TextureMip& GetMip(uint32 mipIndex) const { return m_Mips[mipIndex]; }
 
-    // Reads mip[mipIndex]'s compressed block data into `destination`, which must be at least
-    // GetMip(mipIndex).size bytes. Returns the number of bytes actually read (0 on failure).
     uint64 LoadMip(uint32 mipIndex, void* destination) const;
 
 private:

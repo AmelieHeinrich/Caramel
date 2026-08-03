@@ -15,11 +15,6 @@
 
 class StreamingManager;
 
-// Coarse-to-fine progressive streaming for a single texture: creates the full-mip-count GPU
-// texture up front, then streams mips in one at a time starting from the coarsest (largest mip
-// index) down to the finest (mip 0), via StreamingManager's shared UploadQueue. At most one mip
-// is ever in flight at a time -- call RequestNextMip() to kick off the next one once the previous
-// has landed (SnapshotResidentMip() != kNoResidentMip).
 class StreamingTexture
 {
 public:
@@ -27,13 +22,9 @@ public:
 
     TShared<GPUTexture> BeginLoad(CPUTexture source, StreamingManager& manager);
 
-    // Schedules the next (finer) mip if none is currently in flight and mips remain. Returns
-    // false if there was nothing to do (a mip is already pending, or mip 0 is already resident).
     bool RequestNextMip(StreamingManager& manager);
-
-    // Called once per frame by StreamingManager::Update() with the upload queue's fence's
-    // completed value; promotes the pending mip to resident once its upload has landed.
-    void PollCompletion(uint64 completedFenceValue);
+    uint64 PollCompletion(uint64 completedFenceValue);
+    uint64 GetNextUploadBytes() const;
 
     uint32 GetMipCount() const { return m_Source.GetMipCount(); }
     uint32 GetWidth() const { return m_Source.GetWidth(); }
@@ -42,8 +33,6 @@ public:
     uint32 SnapshotResidentMip() const { return m_HighestResidentMip.load(std::memory_order_acquire); }
     bool HasPendingMip() const { return m_UploadInFlight.load(std::memory_order_acquire); }
 
-    // Bindless texture ID scoped to just the currently-resident mip, ready for ImGui::Image --
-    // ImTextureID_Invalid while nothing has landed yet.
     ImTextureID GetDisplayTexID() const { return m_DisplayTexID; }
 
 private:
@@ -53,22 +42,12 @@ private:
     TShared<GPUTexture> m_Destination;
 
     std::atomic<uint32> m_HighestResidentMip{ kNoResidentMip };
-
-    // Cursor walking the mip table backwards (coarsest to finest). kNoResidentMip once mip 0 has
-    // been requested.
     uint32 m_NextMipToLoad = 0;
 
-    // Claimed synchronously by RequestNextMip, released by PollCompletion once the mip is resident.
-    // See the matching field on StreamingModel for why m_PendingFenceValue cannot double as this.
     std::atomic<bool> m_UploadInFlight{ false };
-
-    std::atomic<uint64> m_PendingFenceValue{ 0 }; // 0 == fence not published yet
+    std::atomic<uint64> m_PendingFenceValue{ 0 };
     std::atomic<uint32> m_PendingMip{ kNoResidentMip };
 
-    // One view per mip level, each covering [level, mipCount), all created up front. Creating them
-    // lazily and dropping the previous one on every promotion would recycle the bindless slot
-    // while frames referencing it are still in flight -- harmless on D3D12, but on Metal the
-    // texture view pool entry is rewritten under the GPU and the texture flickers for a frame.
     TArray<agfx::TextureView> m_MipViews;
     ImTextureID m_DisplayTexID = ImTextureID_Invalid;
 };

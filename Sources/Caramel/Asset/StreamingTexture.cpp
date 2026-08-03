@@ -22,7 +22,6 @@ TShared<GPUTexture> StreamingTexture::BeginLoad(CPUTexture source, StreamingMana
                                                                    .SetUsage(agfx::TextureUsage::Sampled);
     m_Destination = MakeShared<GPUTexture>(textureInfo);
 
-    // A view is just a descriptor, so every mip's view can be built before its data lands.
     const uint32 mipCount = m_Source.GetMipCount();
     m_MipViews.reserve(mipCount);
     for (uint32 mip = 0; mip < mipCount; ++mip)
@@ -44,21 +43,19 @@ bool StreamingTexture::RequestNextMip(StreamingManager& manager)
 {
     uint32 residentMip = m_HighestResidentMip.load(std::memory_order_acquire);
     if (residentMip != kNoResidentMip && residentMip == 0)
-        return false; // Already fully resident.
+        return false;
 
     uint32 mipIndex = m_NextMipToLoad;
     if (mipIndex == kNoResidentMip)
         return false;
 
-    // Claim the in-flight slot before scheduling, so a caller ticking faster than the job completes
-    // cannot start a second mip on top of this one.
     if (m_UploadInFlight.exchange(true, std::memory_order_acq_rel))
         return false;
 
     m_PendingMip.store(mipIndex, std::memory_order_relaxed);
     m_NextMipToLoad = (mipIndex == 0) ? kNoResidentMip : (mipIndex - 1);
 
-    JobSystem::Get().Schedule([this, &manager, mipIndex]() {
+    JobSystem::Get().RunDetached([this, &manager, mipIndex]() {
         const TextureMip& mip = m_Source.GetMip(mipIndex);
         TArray<uint8> compressed(mip.size);
         m_Source.LoadMip(mipIndex, compressed.data());
@@ -75,24 +72,32 @@ bool StreamingTexture::RequestNextMip(StreamingManager& manager)
     return true;
 }
 
-void StreamingTexture::PollCompletion(uint64 completedFenceValue)
+uint64 StreamingTexture::GetNextUploadBytes() const
+{
+    if (HasPendingMip() || m_NextMipToLoad == kNoResidentMip)
+        return 0;
+    return m_Source.GetMip(m_NextMipToLoad).size;
+}
+
+uint64 StreamingTexture::PollCompletion(uint64 completedFenceValue)
 {
     uint64 pendingFence = m_PendingFenceValue.load(std::memory_order_acquire);
     if (pendingFence == 0 || completedFenceValue < pendingFence)
-        return;
+        return 0;
 
     uint32 mipIndex = m_PendingMip.load(std::memory_order_relaxed);
+    uint64 retiredBytes = m_Source.GetMip(mipIndex).size;
     OnMipResident(mipIndex);
 
     m_PendingFenceValue.store(0, std::memory_order_release);
     m_PendingMip.store(kNoResidentMip, std::memory_order_relaxed);
     m_UploadInFlight.store(false, std::memory_order_release);
+
+    return retiredBytes;
 }
 
 void StreamingTexture::OnMipResident(uint32 mipIndex)
 {
-    // The transfer queue left this mip in CopyDest; the graphics queue transitions it for sampling
-    // at the top of the frame, before the ImGui pass that may now reference it through m_DisplayTexID.
     Renderer::Get().EnqueueMipTransition(m_Destination->GetTexture(), mipIndex);
 
     m_DisplayTexID = (ImTextureID)(intptr_t)m_MipViews[mipIndex].GetHandle();

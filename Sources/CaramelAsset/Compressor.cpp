@@ -7,6 +7,7 @@
 #include "Compressor.hpp"
 #include "Format.hpp"
 #include "MeshCompressor.hpp"
+#include "Parallel.hpp"
 #include "TextureCompressor.hpp"
 
 #include <cgltf.h>
@@ -25,6 +26,23 @@ namespace CaramelAsset
 {
     namespace
     {
+        struct TextureJob
+        {
+            const cgltf_image* image = nullptr;
+            ETextureRole role = ETextureRole::Generic;
+            std::string fileName;
+            bool succeeded = false;
+        };
+
+        struct MeshJob
+        {
+            const cgltf_mesh* mesh = nullptr;
+            const cgltf_primitive* primitive = nullptr;
+            const cgltf_skin* skin = nullptr;
+            std::string name;
+            CompiledMesh compiled;
+        };
+
         struct CompileContext
         {
             cgltf_data* gltf = nullptr;
@@ -35,7 +53,9 @@ namespace CaramelAsset
             nlohmann::json json;
             TArray<uint8> binary;
 
-            TDictionary<const cgltf_image*, std::string> compiledTextures; // image ptr -> .ctex file name
+            TDictionary<const cgltf_image*, size_t> compiledTextures;
+            TArray<TextureJob> textureJobs;
+            TArray<nlohmann::json> materialJsons;
         };
 
         void LogVerbose(const CompileContext& ctx, const std::string& message)
@@ -150,10 +170,10 @@ namespace CaramelAsset
             return file.good();
         }
 
-        // Decodes, compresses, and writes a .ctex for a texture slot, deduplicating by source
-        // image so a texture referenced by multiple materials is only compiled once.
-        // Returns the .ctex file name (relative to the output directory), or "" if the slot is unused.
-        std::string CompileTextureForRole(CompileContext& ctx, const cgltf_texture_view& view, ETextureRole role)
+        // Reserves a .ctex for a texture slot, deduplicating by source image so a texture referenced
+        // by multiple materials is only compiled once. Returns the .ctex file name (relative to the
+        // output directory), or "" if the slot is unused.
+        std::string ReserveTextureForRole(CompileContext& ctx, const cgltf_texture_view& view, ETextureRole role)
         {
             if (!view.texture || !view.texture->image)
                 return "";
@@ -162,42 +182,58 @@ namespace CaramelAsset
 
             auto it = ctx.compiledTextures.Find(image);
             if (it != ctx.compiledTextures.End())
-                return it->second;
+                return ctx.textureJobs[it->second].fileName;
 
-            TArray<uint8> pixels;
-            uint32 width = 0, height = 0;
-            if (!DecodeImageRGBA8(ctx, *image, pixels, width, height))
-            {
-                spdlog::warn("CaramelAssetCompiler: failed to decode texture '{}'", image->name ? image->name : image->uri ? image->uri : "?");
-                return "";
-            }
-
-            if (role == ETextureRole::MetallicRoughness)
-            {
-                // glTF packs roughness in G and metalness in B -- repack into a synthetic (roughness, metal) RG image.
-                for (size_t i = 0; i < static_cast<size_t>(width) * height; i++)
-                {
-                    uint8 g = pixels[i * 4 + 1];
-                    uint8 b = pixels[i * 4 + 2];
-                    pixels[i * 4 + 0] = g;
-                    pixels[i * 4 + 1] = b;
-                }
-            }
-
-            CompiledTexture compiled = TextureCompressor::Compile(pixels.Data(), width, height, role);
-
+            TextureJob job;
+            job.image = image;
+            job.role = role;
             // Stored/returned relative to the asset's cache folder (not to the referencing material
             // file) so both the .cmdl and any Materials/*.json can resolve it the same way.
-            std::string fileName = "Textures/" + SanitizeFileName(image->name ? image->name : "Texture") + "_" + std::to_string(ctx.compiledTextures.Size()) + ".ctex";
-            if (!WriteCtex(compiled, std::filesystem::path(ctx.outputDirectory) / fileName))
-            {
-                spdlog::warn("CaramelAssetCompiler: failed to write '{}'", fileName);
-                return "";
-            }
+            job.fileName = "Textures/" + SanitizeFileName(image->name ? image->name : "Texture") + "_" + std::to_string(ctx.compiledTextures.Size()) + ".ctex";
 
-            LogVerbose(ctx, "compiled texture " + fileName);
-            ctx.compiledTextures.Insert(image, fileName);
-            return fileName;
+            ctx.compiledTextures.Insert(image, ctx.textureJobs.Size());
+            ctx.textureJobs.PushBack(std::move(job));
+            return ctx.textureJobs[ctx.textureJobs.Size() - 1].fileName;
+        }
+
+        void CompileTextures(CompileContext& ctx)
+        {
+            ParallelFor(ctx.textureJobs.Size(), [&ctx](size_t index)
+            {
+                TextureJob& job = ctx.textureJobs[index];
+
+                TArray<uint8> pixels;
+                uint32 width = 0, height = 0;
+                if (!DecodeImageRGBA8(ctx, *job.image, pixels, width, height))
+                {
+                    spdlog::warn("CaramelAssetCompiler: failed to decode texture '{}'",
+                        job.image->name ? job.image->name : job.image->uri ? job.image->uri : "?");
+                    return;
+                }
+
+                if (job.role == ETextureRole::MetallicRoughness)
+                {
+                    // glTF packs roughness in G and metalness in B -- repack into a synthetic (roughness, metal) RG image.
+                    for (size_t i = 0; i < static_cast<size_t>(width) * height; i++)
+                    {
+                        uint8 g = pixels[i * 4 + 1];
+                        uint8 b = pixels[i * 4 + 2];
+                        pixels[i * 4 + 0] = g;
+                        pixels[i * 4 + 1] = b;
+                    }
+                }
+
+                CompiledTexture compiled = TextureCompressor::Compile(pixels.Data(), width, height, job.role);
+
+                if (!WriteCtex(compiled, std::filesystem::path(ctx.outputDirectory) / job.fileName))
+                {
+                    spdlog::warn("CaramelAssetCompiler: failed to write '{}'", job.fileName);
+                    return;
+                }
+
+                LogVerbose(ctx, "compiled texture " + job.fileName);
+                job.succeeded = true;
+            });
         }
 
         // Materials are written as standalone, hand-editable JSON files (rather than embedded in the
@@ -217,8 +253,7 @@ namespace CaramelAsset
 
         void CompileMaterials(CompileContext& ctx)
         {
-            auto& materialsJson = ctx.json["materials"];
-            materialsJson = nlohmann::json::array();
+            ctx.materialJsons.Reserve(ctx.gltf->materials_count);
 
             for (cgltf_size i = 0; i < ctx.gltf->materials_count; i++)
             {
@@ -232,7 +267,7 @@ namespace CaramelAsset
                 {
                     const cgltf_pbr_metallic_roughness& pbr = material.pbr_metallic_roughness;
 
-                    baseColor = CompileTextureForRole(ctx, pbr.base_color_texture, ETextureRole::BaseColor);
+                    baseColor = ReserveTextureForRole(ctx, pbr.base_color_texture, ETextureRole::BaseColor);
                     j["baseColorFactor"] = { pbr.base_color_factor[0], pbr.base_color_factor[1], pbr.base_color_factor[2], pbr.base_color_factor[3] };
                     j["metallicFactor"] = pbr.metallic_factor;
                     j["roughnessFactor"] = pbr.roughness_factor;
@@ -242,12 +277,12 @@ namespace CaramelAsset
 
                     if (sharedWithOcclusion)
                     {
-                        metallicRoughness = CompileTextureForRole(ctx, pbr.metallic_roughness_texture, ETextureRole::ORM);
+                        metallicRoughness = ReserveTextureForRole(ctx, pbr.metallic_roughness_texture, ETextureRole::ORM);
                         occlusion = metallicRoughness;
                     }
                     else
                     {
-                        metallicRoughness = CompileTextureForRole(ctx, pbr.metallic_roughness_texture, ETextureRole::MetallicRoughness);
+                        metallicRoughness = ReserveTextureForRole(ctx, pbr.metallic_roughness_texture, ETextureRole::MetallicRoughness);
                     }
                 }
                 else
@@ -257,10 +292,10 @@ namespace CaramelAsset
                     j["roughnessFactor"] = 1.0f;
                 }
 
-                normal = CompileTextureForRole(ctx, material.normal_texture, ETextureRole::Normal);
-                emissive = CompileTextureForRole(ctx, material.emissive_texture, ETextureRole::Emissive);
+                normal = ReserveTextureForRole(ctx, material.normal_texture, ETextureRole::Normal);
+                emissive = ReserveTextureForRole(ctx, material.emissive_texture, ETextureRole::Emissive);
                 if (occlusion.empty() && material.occlusion_texture.texture)
-                    occlusion = CompileTextureForRole(ctx, material.occlusion_texture, ETextureRole::Occlusion);
+                    occlusion = ReserveTextureForRole(ctx, material.occlusion_texture, ETextureRole::Occlusion);
 
                 j["baseColorTexture"] = baseColor;
                 j["normalTexture"] = normal;
@@ -272,7 +307,39 @@ namespace CaramelAsset
                 j["alphaCutoff"] = material.alpha_cutoff;
                 j["doubleSided"] = static_cast<bool>(material.double_sided);
 
-                std::string materialFile = WriteMaterialFile(ctx, j, i, material.name);
+                ctx.materialJsons.PushBack(std::move(j));
+            }
+        }
+
+        void WriteMaterialFiles(CompileContext& ctx)
+        {
+            TDictionary<std::string, bool> failedNames;
+            for (const TextureJob& job : ctx.textureJobs)
+                if (!job.succeeded)
+                    failedNames.Insert(job.fileName, true);
+
+            static const char* kTextureKeys[] = {
+                "baseColorTexture", "normalTexture", "metallicRoughnessTexture", "occlusionTexture", "emissiveTexture"
+            };
+
+            auto& materialsJson = ctx.json["materials"];
+            materialsJson = nlohmann::json::array();
+
+            for (size_t i = 0; i < ctx.materialJsons.Size(); i++)
+            {
+                nlohmann::json& j = ctx.materialJsons[i];
+                if (failedNames.Size() > 0)
+                {
+                    for (const char* key : kTextureKeys)
+                    {
+                        const std::string& name = j[key].get_ref<const std::string&>();
+                        if (!name.empty() && failedNames.Contains(name))
+                            j[key] = "";
+                    }
+                }
+
+                const char* materialName = ctx.gltf->materials[i].name;
+                std::string materialFile = WriteMaterialFile(ctx, j, i, materialName);
                 if (materialFile.empty())
                     spdlog::warn("CaramelAssetCompiler: failed to write material file for material {}", i);
 
@@ -361,10 +428,10 @@ namespace CaramelAsset
             auto& meshesJson = ctx.json["meshes"];
             meshesJson = nlohmann::json::array();
 
+            TArray<MeshJob> jobs;
             for (cgltf_size mi = 0; mi < ctx.gltf->meshes_count; mi++)
             {
                 const cgltf_mesh& mesh = ctx.gltf->meshes[mi];
-                TArray<int32> primitiveIndices;
 
                 auto skinIt = meshSkinMap.Find(&mesh);
                 const cgltf_skin* skin = (skinIt != meshSkinMap.End()) ? skinIt->second : nullptr;
@@ -379,26 +446,39 @@ namespace CaramelAsset
                     }
 
                     std::string baseName = mesh.name ? mesh.name : "Mesh";
-                    std::string name = mesh.primitives_count > 1 ? (baseName + "_" + std::to_string(pi)) : baseName;
 
-                    LogVerbose(ctx, "compiling mesh " + name);
-
-                    CompiledMesh compiled = MeshCompressor::Compile(primitive, skin, String(name));
-                    if (compiled.vertices.IsEmpty())
-                    {
-                        spdlog::warn("CaramelAssetCompiler: primitive '{}' produced no vertices, skipping", name);
-                        continue;
-                    }
-
-                    compiled.materialIndex = primitive.material ? static_cast<int32>(primitive.material - ctx.gltf->materials) : -1;
-                    compiled.skinIndex = skin ? static_cast<int32>(skin - ctx.gltf->skins) : -1;
-
-                    nlohmann::json meshJson = SerializeMesh(ctx, compiled);
-                    primitiveIndices.PushBack(static_cast<int32>(meshesJson.size()));
-                    meshesJson.push_back(meshJson);
+                    MeshJob job;
+                    job.mesh = &mesh;
+                    job.primitive = &primitive;
+                    job.skin = skin;
+                    job.name = mesh.primitives_count > 1 ? (baseName + "_" + std::to_string(pi)) : baseName;
+                    jobs.PushBack(std::move(job));
                 }
 
-                meshIndexMap.Insert(&mesh, primitiveIndices);
+                meshIndexMap.Insert(&mesh, TArray<int32>());
+            }
+
+            ParallelFor(jobs.Size(), [&ctx, &jobs](size_t index)
+            {
+                MeshJob& job = jobs[index];
+                LogVerbose(ctx, "compiling mesh " + job.name);
+
+                job.compiled = MeshCompressor::Compile(*job.primitive, job.skin, String(job.name));
+                job.compiled.materialIndex = job.primitive->material ? static_cast<int32>(job.primitive->material - ctx.gltf->materials) : -1;
+                job.compiled.skinIndex = job.skin ? static_cast<int32>(job.skin - ctx.gltf->skins) : -1;
+            });
+
+            for (MeshJob& job : jobs)
+            {
+                if (job.compiled.vertices.IsEmpty())
+                {
+                    spdlog::warn("CaramelAssetCompiler: primitive '{}' produced no vertices, skipping", job.name);
+                    continue;
+                }
+
+                nlohmann::json meshJson = SerializeMesh(ctx, job.compiled);
+                meshIndexMap.Find(job.mesh)->second.PushBack(static_cast<int32>(meshesJson.size()));
+                meshesJson.push_back(meshJson);
             }
 
             return meshIndexMap;
@@ -719,6 +799,8 @@ namespace CaramelAsset
         spdlog::info("Compiling '{}' -> '{}'", inputGltfPath.CStr(), ctx.outputDirectory);
 
         CompileMaterials(ctx);
+        CompileTextures(ctx);
+        WriteMaterialFiles(ctx);
 
         TDictionary<const cgltf_mesh*, const cgltf_skin*> meshSkinMap = BuildMeshSkinMap(ctx);
         TDictionary<const cgltf_mesh*, TArray<int32>> meshIndexMap = CompileMeshes(ctx, meshSkinMap);

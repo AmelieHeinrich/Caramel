@@ -101,7 +101,6 @@ void Application::Run()
         m_Camera.Update(ImGui::GetIO().DeltaTime);
         ImGui::NewFrame();
         ShowOverlay();
-        ShowContentViewer();
         ShowModelViewer();
         ImGui::Render();
 
@@ -131,101 +130,34 @@ void Application::ShowOverlay()
     ImGui::End();
 }
 
-void Application::ShowContentViewer()
-{
-    ImGui::SetNextWindowSize(ImVec2(640, 520), ImGuiCond_FirstUseEver);
-    ImGui::Begin("Content Viewer");
-
-    if (!m_ContentViewerLoaded) {
-        if (ImGui::Button("Load Sponza Textures")) {
-            m_StreamingManager->LoadDirectory("Content/Cache/Sponza/Textures");
-            m_ContentViewerLoaded = true;
-        }
-    } else {
-        ImGui::Text("%d textures loaded", (int)m_StreamingManager->GetTextures().Size());
-    }
-
-    ImGui::Separator();
-
-    ImGui::Checkbox("Automatic streaming", &m_ContentViewerAutoStream);
-    if (m_ContentViewerAutoStream) {
-        ImGui::SliderFloat("Interval (s)", &m_ContentViewerStreamInterval, 0.1f, 2.0f);
-
-        m_ContentViewerStreamTimer += ImGui::GetIO().DeltaTime;
-        if (m_ContentViewerStreamTimer >= m_ContentViewerStreamInterval) {
-            m_ContentViewerStreamTimer = 0.0f;
-            for (const TShared<StreamingTexture>& texture : m_StreamingManager->GetTextures())
-                texture->RequestNextMip(*m_StreamingManager);
-        }
-    } else if (ImGui::Button("Advance All")) {
-        for (const TShared<StreamingTexture>& texture : m_StreamingManager->GetTextures())
-            texture->RequestNextMip(*m_StreamingManager);
-    }
-
-    ImGui::Separator();
-
-    const float thumbSize = 128.0f;
-    float availWidth = ImGui::GetContentRegionAvail().x;
-    int columnCount = (int)(availWidth / (thumbSize + 8.0f));
-    if (columnCount < 1)
-        columnCount = 1;
-
-    int index = 0;
-    for (const TShared<StreamingTexture>& texture : m_StreamingManager->GetTextures()) {
-        ImGui::BeginGroup();
-        uint32 residentMip = texture->SnapshotResidentMip();
-        if (residentMip != StreamingTexture::kNoResidentMip) {
-            ImGui::Image(texture->GetDisplayTexID(), ImVec2(thumbSize, thumbSize));
-            ImGui::Text("%ux%u", texture->GetWidth(), texture->GetHeight());
-            ImGui::Text("mip %u/%u", residentMip, texture->GetMipCount() - 1);
-        } else {
-            ImGui::Dummy(ImVec2(thumbSize, thumbSize));
-            ImGui::Text("Loading...");
-        }
-        ImGui::EndGroup();
-
-        index++;
-        if (index % columnCount != 0)
-            ImGui::SameLine();
-    }
-
-    ImGui::End();
-}
-
 void Application::ShowModelViewer()
 {
     ImGui::SetNextWindowSize(ImVec2(640, 480), ImGuiCond_FirstUseEver);
     ImGui::Begin("Model Viewer");
 
     if (!m_ModelViewerLoaded) {
-        if (ImGui::Button("Load Sponza Model")) {
-            if (!m_ContentViewerLoaded) {
-                m_StreamingManager->LoadDirectory("Content/Cache/Sponza/Textures");
-                m_ContentViewerLoaded = true;
-            }
-            m_StreamingManager->LoadModel("Content/Cache/Sponza/Sponza.cmdl");
+        if (ImGui::Button("Load Bistro")) {
+            m_StreamingManager->LoadModel("Content/Cache/IntelSponza/IntelSponza.cmdl");
             m_ModelViewerLoaded = true;
         }
     } else {
-        ImGui::Text("%d meshes loaded", (int)m_StreamingManager->GetModels().Size());
+        ImGui::Text("%d meshes, %d textures loaded",
+                    (int)m_StreamingManager->GetModels().Size(),
+                    (int)m_StreamingManager->GetTextures().Size());
     }
 
     ImGui::Separator();
 
-    ImGui::Checkbox("Automatic streaming##Model", &m_ModelViewerAutoStream);
-    if (m_ModelViewerAutoStream) {
-        ImGui::SliderFloat("Interval (s)##Model", &m_ModelViewerStreamInterval, 0.1f, 2.0f);
+    bool autoStream = m_StreamingManager->GetAutoStream();
+    if (ImGui::Checkbox("Automatic streaming##Model", &autoStream))
+        m_StreamingManager->SetAutoStream(autoStream);
 
-        m_ModelViewerStreamTimer += ImGui::GetIO().DeltaTime;
-        if (m_ModelViewerStreamTimer >= m_ModelViewerStreamInterval) {
-            m_ModelViewerStreamTimer = 0.0f;
-            for (const TShared<StreamingModel>& model : m_StreamingManager->GetModels())
-                model->RequestNextLOD(*m_StreamingManager);
-        }
-    } else if (ImGui::Button("Advance All##Model")) {
-        for (const TShared<StreamingModel>& model : m_StreamingManager->GetModels())
-            model->RequestNextLOD(*m_StreamingManager);
-    }
+    if (!autoStream && ImGui::Button("Advance##Model"))
+        m_StreamingManager->PumpStreaming();
+
+    ImGui::Text("Upload budget: %.1f / %.1f MB in flight",
+                m_StreamingManager->GetBytesInFlight() / (1024.0 * 1024.0),
+                StreamingManager::GetMaxBytesInFlight() / (1024.0 * 1024.0));
 
     ImGui::Separator();
 
