@@ -1,7 +1,8 @@
 Basics
-- Scene hierarchy
+- Collider serializing
+- Scene hierarchy, serialization
+- Mouse picking
 - Render graph
-- GPU debug tooling (debug renderer)
 - GPU scene representation
 - BLAS/TLAS building (async compute)
 - Material bucketing (render queues)

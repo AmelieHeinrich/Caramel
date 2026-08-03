@@ -15,6 +15,7 @@
 #include <AGFX/agfx.hpp>
 #include <SDL3/SDL.h>
 
+class DebugRenderer;
 class ImGuiRenderer;
 class SponzaRenderer;
 class StreamingManager;
@@ -62,6 +63,7 @@ private:
 
     TUnique<ImGuiRenderer> m_ImGuiRenderer;
     TUnique<SponzaRenderer> m_SponzaRenderer;
+    TUnique<DebugRenderer> m_DebugRenderer;
 
     struct PendingMipTransition
     {

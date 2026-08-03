@@ -8,6 +8,7 @@
 
 #include <Caramel/Core/Logger.hpp>
 #include <Caramel/Renderer/Shader/ShaderServer.hpp>
+#include <Caramel/Renderer/DebugRenderer.hpp>
 #include <Caramel/Renderer/ImGuiRenderer.hpp>
 #include <Caramel/Renderer/SponzaRenderer.hpp>
 
@@ -68,6 +69,7 @@ Renderer::Renderer(SDL_Window* window)
     ShaderServer::Initialize(m_Device, *this);
     m_ImGuiRenderer = MakeUnique<ImGuiRenderer>(m_Device, m_CommandQueue, m_SwapChain.GetFormat(), (uint32)FRAMES_IN_FLIGHT);
     m_SponzaRenderer = MakeUnique<SponzaRenderer>(m_Device, m_SwapChain.GetFormat(), kDepthFormat, (uint32)FRAMES_IN_FLIGHT);
+    m_DebugRenderer = MakeUnique<DebugRenderer>(m_Device, m_SwapChain.GetFormat(), kDepthFormat, (uint32)FRAMES_IN_FLIGHT);
 
     m_Device.MakeResourcesResident();
 }
@@ -113,8 +115,6 @@ void Renderer::Render(const Camera& camera, StreamingManager& streamingManager)
     commandBuffer.Reset();
     commandBuffer.Begin();
 
-    // Mips whose streaming upload finished since last frame: take them from CopyDest to sampleable
-    // before anything in this frame reads them.
     for (const PendingMipTransition& transition : m_PendingMipTransitions)
         agfxCommandBufferTextureBarrier(commandBuffer, transition.texture, AGFX_RESOURCE_STATE_COPY_DEST, AGFX_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, transition.mip, 0, 1);
     m_PendingMipTransitions.Clear();
@@ -131,9 +131,9 @@ void Renderer::Render(const Camera& camera, StreamingManager& streamingManager)
     depthTargetCreateInfo.SetIsDepth(true);
     agfx::RenderTarget depthTarget = m_Device.CreateRenderTarget(depthTargetCreateInfo);
 
-    // The depth buffer is cleared and written every frame and never sampled elsewhere, so it stays
-    // in DepthWrite for its whole lifetime -- only the one-time Common -> DepthWrite transition
-    // after (re)creation is needed, not a transition every frame.
+    // The depth buffer is cleared and written by the scene pass and then only re-read as a depth
+    // attachment by the debug pass, so it stays in DepthWrite for its whole lifetime -- only the
+    // one-time Common -> DepthWrite transition after (re)creation is needed, not one every frame.
     if (m_DepthNeedsInitialTransition) {
         commandBuffer.TextureBarrier(m_DepthTexture, agfx::ResourceState::Common, agfx::ResourceState::DepthWrite);
         m_DepthNeedsInitialTransition = false;
@@ -152,7 +152,7 @@ void Renderer::Render(const Camera& camera, StreamingManager& streamingManager)
         scenePassInfo.hasDepthAttachment = 1;
         scenePassInfo.depthAttachment.renderTarget = depthTarget;
         scenePassInfo.depthAttachment.loadOp = AGFX_LOAD_OPERATION_CLEAR;
-        scenePassInfo.depthAttachment.storeOp = AGFX_STORE_OPERATION_DONT_CARE;
+        scenePassInfo.depthAttachment.storeOp = AGFX_STORE_OPERATION_STORE;
         scenePassInfo.depthAttachment.clearDepth = 1.0f;
         scenePassInfo.name = "Scene Pass";
         scenePassInfo.width = width;
@@ -162,6 +162,8 @@ void Renderer::Render(const Camera& camera, StreamingManager& streamingManager)
         m_SponzaRenderer->Render(scenePass, streamingManager, camera, (uint32)width, (uint32)height, (uint32)m_FrameSlot);
         scenePass.End();
     }
+
+    m_DebugRenderer->Flush(commandBuffer, renderTarget, depthTarget, camera, (uint32)width, (uint32)height, (uint32)m_FrameSlot);
 
     agfx::RenderPassCreateInfo renderPassCreateInfo{};
     renderPassCreateInfo.colorAttachmentCount = 1;

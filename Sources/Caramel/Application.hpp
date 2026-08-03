@@ -9,6 +9,7 @@
 #include <Caramel/Core/Common.hpp>
 #include <Caramel/Renderer/Renderer.hpp>
 #include <Caramel/Renderer/Camera.hpp>
+#include <Caramel/Renderer/DebugRendererDemo.hpp>
 #include <Caramel/Asset/StreamingManager.hpp>
 
 #include <SDL3/SDL.h>
@@ -44,6 +45,7 @@ private:
     TUnique<Renderer> m_Renderer;
     TUnique<StreamingManager> m_StreamingManager;
     Camera m_Camera;
+    DebugRendererDemo m_DebugDemo;
 
     agfxDeviceInfo m_DeviceInfo;
 

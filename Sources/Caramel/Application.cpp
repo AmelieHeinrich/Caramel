@@ -100,8 +100,12 @@ void Application::Run()
         Input::NewFrame();
         m_Camera.Update(ImGui::GetIO().DeltaTime);
         ImGui::NewFrame();
+        // Debug geometry is submitted before the UI that reports on it, so the counters in
+        // ShowUI() describe the frame that is about to be drawn rather than the previous one.
+        m_DebugDemo.Draw(ImGui::GetIO().DeltaTime);
         ShowOverlay();
         ShowModelViewer();
+        m_DebugDemo.ShowUI();
         ImGui::Render();
 
         m_Renderer->Render(m_Camera, *m_StreamingManager);
