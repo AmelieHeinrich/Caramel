@@ -2111,14 +2111,43 @@ void agfxComputePassCopyTextureToBuffer(agfxComputePass* computePass, agfxTextur
     computePass->commandBuffer->d3d12CommandList->CopyTextureRegion(&dstLoc, 0, 0, 0, &srcLoc, &srcBox);
 }
 
+// All BC formats D3D12 supports use a 4x4 block (ASTC isn't a valid D3D12 format at all -- see
+// agfxTextureFormatToDXGIFormat above).
+static bool agfxIsBCFormat(agfxTextureFormat format) {
+    switch (format) {
+        case AGFX_TEXTURE_FORMAT_BC1_UNORM:
+        case AGFX_TEXTURE_FORMAT_BC1_UNORM_SRGB:
+        case AGFX_TEXTURE_FORMAT_BC3_UNORM:
+        case AGFX_TEXTURE_FORMAT_BC3_UNORM_SRGB:
+        case AGFX_TEXTURE_FORMAT_BC4_UNORM:
+        case AGFX_TEXTURE_FORMAT_BC5_UNORM:
+        case AGFX_TEXTURE_FORMAT_BC6H_UFLOAT:
+        case AGFX_TEXTURE_FORMAT_BC7_UNORM:
+        case AGFX_TEXTURE_FORMAT_BC7_UNORM_SRGB:
+            return true;
+        default:
+            return false;
+    }
+}
+
 void agfxComputePassCopyBufferToTexture(agfxComputePass* computePass, agfxBuffer* buffer, uint64_t sourceOffset, agfxTexture* texture, const agfxTextureRegion* region, uint32_t mipLevel, uint32_t layer, uint32_t bytesPerRow, uint32_t bytesPerImage) {
     UINT subresourceIndex = D3D12CalcSubresource(mipLevel, layer, 0, texture->createInfo.mipLevels, texture->createInfo.depthOrArrayLayers);
+
+    // D3D12 requires block-compressed copy footprints/boxes to be block-aligned, even for mips
+    // smaller than one block -- the resource always reserves a full block for such mips, so
+    // padding the copy extent up (independent of what the caller's logical mip size is) is safe.
+    UINT copyWidth = region->width;
+    UINT copyHeight = region->height;
+    if (agfxIsBCFormat(texture->createInfo.format)) {
+        copyWidth = (copyWidth + 3) & ~3u;
+        copyHeight = (copyHeight + 3) & ~3u;
+    }
 
     D3D12_PLACED_SUBRESOURCE_FOOTPRINT footprint = {};
     footprint.Offset = sourceOffset;
     footprint.Footprint.Format = agfxTextureFormatToDXGIFormat(texture->createInfo.format);
-    footprint.Footprint.Width = region->width;
-    footprint.Footprint.Height = region->height;
+    footprint.Footprint.Width = copyWidth;
+    footprint.Footprint.Height = copyHeight;
     footprint.Footprint.Depth = region->depth;
     footprint.Footprint.RowPitch = (UINT)bytesPerRow;
 
@@ -2136,8 +2165,8 @@ void agfxComputePassCopyBufferToTexture(agfxComputePass* computePass, agfxBuffer
     srcBox.left = 0;
     srcBox.top = 0;
     srcBox.front = 0;
-    srcBox.right = region->width;
-    srcBox.bottom = region->height;
+    srcBox.right = copyWidth;
+    srcBox.bottom = copyHeight;
     srcBox.back = region->depth;
 
     computePass->commandBuffer->d3d12CommandList->CopyTextureRegion(&dstLoc, region->x, region->y, region->z, &srcLoc, &srcBox);
