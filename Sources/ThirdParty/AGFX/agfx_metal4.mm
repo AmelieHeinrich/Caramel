@@ -1258,8 +1258,8 @@ void agfxComputePassCopyTextureToBuffer(agfxComputePass* computePass, agfxTextur
     [computePass->encoder copyFromTexture:texture->texture sourceSlice:layer sourceLevel:mipLevel sourceOrigin:agfxTextureRegionToMTL(region).origin sourceSize:agfxTextureRegionToMTL(region).size toBuffer:buffer->buffer destinationOffset:bufferOffset destinationBytesPerRow:bytesPerRow destinationBytesPerImage:bytesPerImage];
 }
 
-void agfxComputePassCopyBufferToTexture(agfxComputePass* computePass, agfxBuffer* buffer, agfxTexture* texture, const agfxTextureRegion* region, uint32_t mipLevel, uint32_t layer, uint32_t bytesPerRow, uint32_t bytesPerImage) {
-    [computePass->encoder copyFromBuffer:buffer->buffer sourceOffset:0 sourceBytesPerRow:bytesPerRow sourceBytesPerImage:bytesPerImage sourceSize:agfxTextureRegionToMTL(region).size toTexture:texture->texture destinationSlice:layer destinationLevel:mipLevel destinationOrigin:agfxTextureRegionToMTL(region).origin];
+void agfxComputePassCopyBufferToTexture(agfxComputePass* computePass, agfxBuffer* buffer, uint64_t sourceOffset, agfxTexture* texture, const agfxTextureRegion* region, uint32_t mipLevel, uint32_t layer, uint32_t bytesPerRow, uint32_t bytesPerImage) {
+    [computePass->encoder copyFromBuffer:buffer->buffer sourceOffset:sourceOffset sourceBytesPerRow:bytesPerRow sourceBytesPerImage:bytesPerImage sourceSize:agfxTextureRegionToMTL(region).size toTexture:texture->texture destinationSlice:layer destinationLevel:mipLevel destinationOrigin:agfxTextureRegionToMTL(region).origin];
 }
 
 void agfxComputePassCopyBufferToBuffer(agfxComputePass* computePass, agfxBuffer* srcBuffer, agfxBuffer* dstBuffer, uint64_t srcOffset, uint64_t dstOffset, uint64_t size) {

@@ -5,7 +5,6 @@
  */
 
 #include "Renderer.hpp"
-#include "agfx/agfx.hpp"
 
 #include <Caramel/Core/Logger.hpp>
 #include <Caramel/Renderer/Shader/ShaderServer.hpp>
@@ -13,14 +12,18 @@
 
 #include <imgui.h>
 
+Renderer* Renderer::s_Instance = nullptr;
+
 Renderer::Renderer(SDL_Window* window)
     : m_Window(window)
     , m_FenceValue(0)
     , m_FrameSlot(0)
 {
+    s_Instance = this;
+
     agfxDeviceCreateInfo deviceCreateInfo{};
     deviceCreateInfo.displayServerProtocol = AGFX_DISPLAY_SERVER_PROTOCOL_WAYLAND;
-    deviceCreateInfo.enableValidation = false;
+    deviceCreateInfo.enableValidation = true;
     deviceCreateInfo.allocate = Allocate;
     deviceCreateInfo.free = Free;
     deviceCreateInfo.tempAllocate = TempAllocate;
@@ -38,20 +41,20 @@ Renderer::Renderer(SDL_Window* window)
     agfx::SwapChainCreateInfo swapChainCreateInfo{};
     swapChainCreateInfo.width = width;
     swapChainCreateInfo.height = height;
-    swapChainCreateInfo.imageCount = FrameCount;
+    swapChainCreateInfo.imageCount = FRAMES_IN_FLIGHT;
     swapChainCreateInfo.queue = m_CommandQueue;
     swapChainCreateInfo.vsync = false;
     swapChainCreateInfo.isHDR = false;
 
     m_SwapChain = m_NativeHandle->CreateSwapChain(m_Device, swapChainCreateInfo);
 
-    for (uint64 i = 0; i < FrameCount; ++i) {
+    for (uint64 i = 0; i < FRAMES_IN_FLIGHT; ++i) {
         m_FenceFrameSlots[i] = 0;
         m_CommandBuffers[i] = m_Device.CreateCommandBuffer(m_CommandQueue);
     }
 
     ShaderServer::Initialize(m_Device, *this);
-    m_ImGuiRenderer = MakeUnique<ImGuiRenderer>(m_Device, m_CommandQueue, m_SwapChain.GetFormat(), (uint32)FrameCount);
+    m_ImGuiRenderer = MakeUnique<ImGuiRenderer>(m_Device, m_CommandQueue, m_SwapChain.GetFormat(), (uint32)FRAMES_IN_FLIGHT);
 }
 
 Renderer::~Renderer()
@@ -61,7 +64,7 @@ Renderer::~Renderer()
 
 void Renderer::Render()
 {
-    m_FrameSlot = (uint32_t)(m_FenceValue % FrameCount);
+    m_FrameSlot = (uint32_t)(m_FenceValue % FRAMES_IN_FLIGHT);
     m_Fence.Wait(m_FenceFrameSlots[m_FrameSlot]);
 
     ShaderServer::Tick();
@@ -90,7 +93,7 @@ void Renderer::Render()
     renderPassCreateInfo.colorAttachments[0].renderTarget = renderTarget;
     renderPassCreateInfo.colorAttachments[0].loadOp = AGFX_LOAD_OPERATION_CLEAR;
     renderPassCreateInfo.colorAttachments[0].storeOp = AGFX_STORE_OPERATION_STORE;
-    renderPassCreateInfo.colorAttachments[0].clearColor[0] = 0.8f;
+    renderPassCreateInfo.colorAttachments[0].clearColor[0] = 0.1f;
     renderPassCreateInfo.colorAttachments[0].clearColor[1] = 0.1f;
     renderPassCreateInfo.colorAttachments[0].clearColor[2] = 0.1f;
     renderPassCreateInfo.colorAttachments[0].clearColor[3] = 1.0f;

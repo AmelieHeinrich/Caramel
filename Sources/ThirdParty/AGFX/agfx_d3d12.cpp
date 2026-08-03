@@ -2111,11 +2111,11 @@ void agfxComputePassCopyTextureToBuffer(agfxComputePass* computePass, agfxTextur
     computePass->commandBuffer->d3d12CommandList->CopyTextureRegion(&dstLoc, 0, 0, 0, &srcLoc, &srcBox);
 }
 
-void agfxComputePassCopyBufferToTexture(agfxComputePass* computePass, agfxBuffer* buffer, agfxTexture* texture, const agfxTextureRegion* region, uint32_t mipLevel, uint32_t layer, uint32_t bytesPerRow, uint32_t bytesPerImage) {
+void agfxComputePassCopyBufferToTexture(agfxComputePass* computePass, agfxBuffer* buffer, uint64_t sourceOffset, agfxTexture* texture, const agfxTextureRegion* region, uint32_t mipLevel, uint32_t layer, uint32_t bytesPerRow, uint32_t bytesPerImage) {
     UINT subresourceIndex = D3D12CalcSubresource(mipLevel, layer, 0, texture->createInfo.mipLevels, texture->createInfo.depthOrArrayLayers);
 
     D3D12_PLACED_SUBRESOURCE_FOOTPRINT footprint = {};
-    footprint.Offset = 0; // Assuming bufferOffset is 0 for simplicity; adjust as needed
+    footprint.Offset = sourceOffset;
     footprint.Footprint.Format = agfxTextureFormatToDXGIFormat(texture->createInfo.format);
     footprint.Footprint.Width = region->width;
     footprint.Footprint.Height = region->height;

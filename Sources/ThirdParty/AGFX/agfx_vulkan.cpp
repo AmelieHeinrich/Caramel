@@ -2181,9 +2181,9 @@ void agfxComputePassCopyTextureToBuffer(agfxComputePass* computePass, agfxTextur
     vkCmdCopyImageToBuffer(computePass->commandBuffer->commandBuffer, texture->vkImage, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, buffer->vkBuffer, 1, &copy);
 }
 
-void agfxComputePassCopyBufferToTexture(agfxComputePass* computePass, agfxBuffer* buffer, agfxTexture* texture, const agfxTextureRegion* region, uint32_t mipLevel, uint32_t layer, uint32_t bytesPerRow, uint32_t bytesPerImage)
+void agfxComputePassCopyBufferToTexture(agfxComputePass* computePass, agfxBuffer* buffer, uint64_t sourceOffset, agfxTexture* texture, const agfxTextureRegion* region, uint32_t mipLevel, uint32_t layer, uint32_t bytesPerRow, uint32_t bytesPerImage)
 {
-    VkBufferImageCopy copy = agfxVkBufferImageCopy(texture, 0, region, mipLevel, layer, bytesPerRow, bytesPerImage);
+    VkBufferImageCopy copy = agfxVkBufferImageCopy(texture, sourceOffset, region, mipLevel, layer, bytesPerRow, bytesPerImage);
     vkCmdCopyBufferToImage(computePass->commandBuffer->commandBuffer, buffer->vkBuffer, texture->vkImage, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &copy);
 }
 

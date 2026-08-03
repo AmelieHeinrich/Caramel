@@ -478,7 +478,7 @@ namespace agfx::ez
                 mCommandBuffer.TextureBarrier(dst, agfx::ResourceState::Common, agfx::ResourceState::CopyDest,
                                               mipLevel, layer, false);
                 EnsurePass();
-                mComputePass->CopyBufferToTexture(staging, dst, region, mipLevel, layer, bytesPerRow, bytesPerImage);
+                mComputePass->CopyBufferToTexture(staging, 0, dst, region, mipLevel, layer, bytesPerRow, bytesPerImage);
                 mComputePass.reset();
                 mCommandBuffer.TextureBarrier(dst, agfx::ResourceState::CopyDest, agfx::ResourceState::Common,
                                               mipLevel, layer, false);
@@ -1319,12 +1319,12 @@ namespace agfx::ez
             pass.CopyTextureToTexture(src.Raw(), dst.Raw(), region, mipLevel, layer);
         }
 
-        void CopyBufferToTexture(Buffer& src, detail::TextureBase& dst, const agfxTextureRegion& region,
+        void CopyBufferToTexture(Buffer& src, uint64_t sourceOffset, detail::TextureBase& dst, const agfxTextureRegion& region,
                                  uint32_t mipLevel, uint32_t layer, uint32_t bytesPerRow, uint32_t bytesPerImage = 0)
         {
             assert(mFrameActive);
             agfx::ComputePass pass = mCommandBuffers[mFrameSlot].BeginComputePass("ez copy buffer to texture");
-            pass.CopyBufferToTexture(src.Raw(), dst.Raw(), region, mipLevel, layer, bytesPerRow,
+            pass.CopyBufferToTexture(src.Raw(), sourceOffset, dst.Raw(), region, mipLevel, layer, bytesPerRow,
                                      bytesPerImage ? bytesPerImage : bytesPerRow * region.height);
         }
 

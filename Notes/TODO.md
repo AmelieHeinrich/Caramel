@@ -1,9 +1,8 @@
 Basics
-- Asset compressor
+- Streaming
 - Scene hierarchy
 - Render graph
-- Job system (enkits)
-- GPU debug tooling (shader printf, debug renderer)
+- GPU debug tooling (debug renderer)
 - GPU scene representation
 - BLAS/TLAS building (async compute)
 - Material bucketing (render queues)

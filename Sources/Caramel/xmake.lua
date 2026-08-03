@@ -9,4 +9,4 @@ target("Caramel")
     add_files("**.cpp")
 
     add_deps("agfx", "agfx_shader")
-    add_packages("libsdl3", "glm", "spdlog", "imgui")
+    add_packages("libsdl3", "glm", "spdlog", "imgui", "enkits", "nlohmann_json")

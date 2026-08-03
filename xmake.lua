@@ -5,7 +5,7 @@
 -- 
 
 add_rules("mode.debug", "mode.release", "mode.releasedbg")
-add_requires("libsdl3", "spdlog", "glm", "meshoptimizer", "nlohmann_json", "stb", "cgltf")
+add_requires("libsdl3", "spdlog", "glm", "meshoptimizer", "nlohmann_json", "stb", "cgltf", "enkits")
 add_requires("imgui", { configs = { docking = true, sdl3 = true } })
 
 -- General defines

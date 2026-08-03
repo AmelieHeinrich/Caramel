@@ -8,6 +8,8 @@
 
 #include <Caramel/Core/Common.hpp>
 #include <Caramel/Renderer/NativeHandle.hpp>
+#include <Caramel/Renderer/Common.hpp>
+#include <Caramel/Renderer/UploadQueue.hpp>
 
 #include <AGFX/agfx.hpp>
 #include <SDL3/SDL.h>
@@ -22,16 +24,16 @@ public:
 
     void Render();
     void Resize();
-
-    // Blocks until the GPU has retired every frame submitted so far (across all FrameCount slots),
-    // unlike the per-frame-slot wait in Render(). Only safe/necessary point to destroy a pipeline
-    // that might still be bound by an in-flight command buffer from another slot -- used by
-    // ShaderServer::Tick() when applying a hot-reloaded pipeline swap.
     void WaitIdle() { m_Fence.Wait(m_FenceValue); }
-public:
-    static constexpr uint64 FrameCount = 3;
+
+    agfx::Device& GetDevice() { return m_Device; }
+    agfxDeviceInfo GetDeviceInfo() const { return m_Device.GetInfo(); }
+
+    static Renderer& Get() { return *s_Instance; }
 
 private:
+    static Renderer* s_Instance;
+
     SDL_Window* m_Window;
     TUnique<NativeHandle> m_NativeHandle;
     bool m_ResizeNextFrame = false;
@@ -42,8 +44,8 @@ private:
     agfx::SwapChain m_SwapChain;
     uint64 m_FenceValue;
     uint64 m_FrameSlot;
-    uint64 m_FenceFrameSlots[FrameCount];
-    agfx::CommandBuffer m_CommandBuffers[FrameCount];
+    uint64 m_FenceFrameSlots[FRAMES_IN_FLIGHT];
+    agfx::CommandBuffer m_CommandBuffers[FRAMES_IN_FLIGHT];
 
     TUnique<ImGuiRenderer> m_ImGuiRenderer;
 

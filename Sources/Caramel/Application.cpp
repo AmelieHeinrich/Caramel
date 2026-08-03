@@ -8,6 +8,8 @@
 
 #include <Caramel/Core/Logger.hpp>
 #include <Caramel/Core/Input.hpp>
+#include <Caramel/Core/JobSystem.hpp>
+#include <Caramel/Asset/Model.hpp>
 
 #include <imgui.h>
 #include <imgui_impl_sdl3.h>
@@ -50,12 +52,19 @@ Application::Application(const ApplicationInfo& info)
     ImGui_ImplSDL3_InitForOther(m_Window);
 
     m_Renderer = MakeUnique<Renderer>(m_Window);
+    m_DeviceInfo = m_Renderer->GetDeviceInfo();
+
+    JobSystem::Initialize();
+    m_StreamingManager = MakeUnique<StreamingManager>();
+    m_StreamingManager->Init(m_Renderer->GetDevice());
 }
 
 Application::~Application()
 {
-    // Renderer owns the ImGuiRenderer (and ShaderServer's cached GPU objects) -- must be torn down
-    // while the ImGui context and window are still alive.
+    JobSystem::Get().WaitAll();
+    JobSystem::Shutdown();
+
+    m_StreamingManager.reset();
     m_Renderer.reset();
 
     ImGui_ImplSDL3_Shutdown();
@@ -81,12 +90,98 @@ void Application::Run()
             }
         }
 
+        m_StreamingManager->Update();
+
         ImGui_ImplSDL3_NewFrame();
         Input::NewFrame();
         ImGui::NewFrame();
-        ImGui::ShowDemoWindow();
+        ShowOverlay();
+        ShowContentViewer();
         ImGui::Render();
 
         m_Renderer->Render();
     }
+}
+
+void Application::ShowOverlay()
+{
+    ImGui::SetNextWindowPos(ImVec2(30, 20));
+    ImGui::SetNextWindowBgAlpha(0.35f);
+    ImGui::Begin("Overlay", nullptr, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoNav);
+    ImGui::Text("FPS: %.1f", ImGui::GetIO().Framerate);
+    ImGui::Separator();
+    ImGui::Text("Caramel : a modern renderer built by Amélie Heinrich");
+#if defined(CARAMEL_WINDOWS)
+    ImGui::Text("Backend: D3D12");
+#elif defined(CARAMEL_LINUX)
+    ImGui::Text("Backend: Vulkan 1.4");
+#elif defined(CARAMEL_MAC)
+    ImGui::Text("Backend: Metal 4");
+#endif
+    ImGui::Separator();
+    ImGui::Text("Device: %s", m_DeviceInfo.name);
+    ImGui::Text("Driver: %s", m_DeviceInfo.driverVersion);
+    ImGui::Text("Raytracing: %s - Mesh Shaders: %s", m_DeviceInfo.supportsRayTracing ? "Yes" : "No", m_DeviceInfo.supportsMeshShaders ? "Yes" : "No");
+    ImGui::End();
+}
+
+void Application::ShowContentViewer()
+{
+    ImGui::SetNextWindowSize(ImVec2(640, 520), ImGuiCond_FirstUseEver);
+    ImGui::Begin("Content Viewer");
+
+    if (!m_ContentViewerLoaded) {
+        if (ImGui::Button("Load Sponza Textures")) {
+            m_StreamingManager->LoadDirectory("Content/Cache/Sponza/Textures");
+            m_ContentViewerLoaded = true;
+        }
+    } else {
+        ImGui::Text("%d textures loaded", (int)m_StreamingManager->GetTextures().Size());
+    }
+
+    ImGui::Separator();
+
+    ImGui::Checkbox("Automatic streaming", &m_ContentViewerAutoStream);
+    if (m_ContentViewerAutoStream) {
+        ImGui::SliderFloat("Interval (s)", &m_ContentViewerStreamInterval, 0.1f, 2.0f);
+
+        m_ContentViewerStreamTimer += ImGui::GetIO().DeltaTime;
+        if (m_ContentViewerStreamTimer >= m_ContentViewerStreamInterval) {
+            m_ContentViewerStreamTimer = 0.0f;
+            for (const TShared<StreamingTexture>& texture : m_StreamingManager->GetTextures())
+                texture->RequestNextMip(*m_StreamingManager);
+        }
+    } else if (ImGui::Button("Advance All")) {
+        for (const TShared<StreamingTexture>& texture : m_StreamingManager->GetTextures())
+            texture->RequestNextMip(*m_StreamingManager);
+    }
+
+    ImGui::Separator();
+
+    const float thumbSize = 128.0f;
+    float availWidth = ImGui::GetContentRegionAvail().x;
+    int columnCount = (int)(availWidth / (thumbSize + 8.0f));
+    if (columnCount < 1)
+        columnCount = 1;
+
+    int index = 0;
+    for (const TShared<StreamingTexture>& texture : m_StreamingManager->GetTextures()) {
+        ImGui::BeginGroup();
+        uint32 residentMip = texture->SnapshotResidentMip();
+        if (residentMip != StreamingTexture::kNoResidentMip) {
+            ImGui::Image(texture->GetDisplayTexID(), ImVec2(thumbSize, thumbSize));
+            ImGui::Text("%ux%u", texture->GetWidth(), texture->GetHeight());
+            ImGui::Text("mip %u/%u", residentMip, texture->GetMipCount() - 1);
+        } else {
+            ImGui::Dummy(ImVec2(thumbSize, thumbSize));
+            ImGui::Text("Loading...");
+        }
+        ImGui::EndGroup();
+
+        index++;
+        if (index % columnCount != 0)
+            ImGui::SameLine();
+    }
+
+    ImGui::End();
 }

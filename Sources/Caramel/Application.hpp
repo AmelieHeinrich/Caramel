@@ -8,6 +8,7 @@
 
 #include <Caramel/Core/Common.hpp>
 #include <Caramel/Renderer/Renderer.hpp>
+#include <Caramel/Asset/StreamingManager.hpp>
 
 #include <SDL3/SDL.h>
 
@@ -28,9 +29,25 @@ public:
 
     void Run();
 private:
+    void ShowOverlay();
+    void ShowContentViewer();
+    void ShowViewport();
+    void ShowInspector();
+    void ShowRendererSettings();
+
+private:
     ApplicationInfo m_Info;
     bool m_Running = true;
 
     SDL_Window* m_Window;
     TUnique<Renderer> m_Renderer;
+    TUnique<StreamingManager> m_StreamingManager;
+
+    agfxDeviceInfo m_DeviceInfo;
+
+    // Content Viewer state.
+    bool m_ContentViewerLoaded = false;
+    bool m_ContentViewerAutoStream = true;
+    float m_ContentViewerStreamInterval = 0.5f;
+    float m_ContentViewerStreamTimer = 0.0f;
 };

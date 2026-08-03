@@ -218,7 +218,7 @@ void ImGuiRenderer::UploadTexture(agfx::Texture& dstTexture, const agfxTextureRe
 
     if (!m_ActiveUploadPass)
         m_ActiveUploadPass = m_UploadCmdBuffer.BeginComputePass("ImGui Texture Upload");
-    m_ActiveUploadPass.CopyBufferToTexture(staging, dstTexture, region, 0, 0, bytesPerRow, bytesPerImage);
+    m_ActiveUploadPass.CopyBufferToTexture(staging, 0, dstTexture, region, 0, 0, bytesPerRow, bytesPerImage);
 
     m_PendingStagingBuffers.PushBack(std::move(staging));
 }

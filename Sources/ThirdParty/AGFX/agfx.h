@@ -892,6 +892,7 @@ void agfxComputePassCopyTextureToBuffer(agfxComputePass* computePass, agfxTextur
 /// @brief Records a copy from a buffer into a texture region.
 /// @param computePass A pointer to the agfxComputePass to record the copy in.
 /// @param buffer A pointer to the source agfxBuffer.
+/// @param sourceOffset The byte offset into the source buffer to copy from.
 /// @param texture A pointer to the destination agfxTexture.
 /// @param region A pointer to an agfxTextureRegion describing the destination region.
 /// @param mipLevel The destination mip level.
@@ -900,7 +901,7 @@ void agfxComputePassCopyTextureToBuffer(agfxComputePass* computePass, agfxTextur
 /// @param bytesPerImage The number of bytes per image (slice) in the source buffer.
 /// @note This is the standard way to upload CPU texture data on the D3D12 backend: write into a CPU-mappable
 ///       staging agfxBuffer (see agfxBufferMap), then copy from the staging buffer to the destination texture here.
-void agfxComputePassCopyBufferToTexture(agfxComputePass* computePass, agfxBuffer* buffer, agfxTexture* texture, const agfxTextureRegion* region, uint32_t mipLevel, uint32_t layer, uint32_t bytesPerRow, uint32_t bytesPerImage);
+void agfxComputePassCopyBufferToTexture(agfxComputePass* computePass, agfxBuffer* buffer, uint64_t sourceOffset, agfxTexture* texture, const agfxTextureRegion* region, uint32_t mipLevel, uint32_t layer, uint32_t bytesPerRow, uint32_t bytesPerImage);
 
 /// @brief Records a copy between two buffer regions.
 /// @param computePass A pointer to the agfxComputePass to record the copy in.
