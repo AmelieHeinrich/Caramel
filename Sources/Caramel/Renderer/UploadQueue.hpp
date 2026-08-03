@@ -19,6 +19,14 @@ public:
     void Init(agfx::Device& device);
 
     uint64 EnqueueTextureUpload(agfx::Texture& texture, uint32 mipLevel, const void* data, size_t dataSize, uint32 width, uint32 height, uint32 bytesPerRow);
+
+    // Buffer-to-buffer sibling of EnqueueTextureUpload -- e.g. mesh LOD streaming, where the
+    // destination is a plain agfx::Buffer (meshlet/meshlet-vertex/meshlet-triangle data) rather
+    // than a texture mip. No barrier is recorded: unlike a texture mip (which must reach
+    // PixelShaderResource before it can be sampled) a ShaderRead buffer needs no layout transition,
+    // so the upload fence alone gates when the caller may consider the data resident.
+    uint64 EnqueueBufferUpload(agfx::Buffer& dst, uint64 dstOffset, const void* data, size_t dataSize);
+
     uint64 Flush();
 
     agfx::Fence& GetFence() { return m_Fence; }

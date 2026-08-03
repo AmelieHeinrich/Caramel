@@ -10,11 +10,14 @@
 #include <Caramel/Renderer/NativeHandle.hpp>
 #include <Caramel/Renderer/Common.hpp>
 #include <Caramel/Renderer/UploadQueue.hpp>
+#include <Caramel/Renderer/Camera.hpp>
 
 #include <AGFX/agfx.hpp>
 #include <SDL3/SDL.h>
 
 class ImGuiRenderer;
+class SponzaRenderer;
+class StreamingManager;
 
 class Renderer
 {
@@ -22,7 +25,7 @@ public:
     Renderer(SDL_Window* window);
     ~Renderer();
 
-    void Render();
+    void Render(const Camera& camera, StreamingManager& streamingManager);
     void Resize();
     void WaitIdle() { m_Fence.Wait(m_FenceValue); }
 
@@ -53,7 +56,12 @@ private:
     uint64 m_FenceFrameSlots[FRAMES_IN_FLIGHT];
     agfx::CommandBuffer m_CommandBuffers[FRAMES_IN_FLIGHT];
 
+    agfx::Texture m_DepthTexture;
+    bool m_DepthNeedsInitialTransition = true;
+    void CreateDepthTexture(uint32 width, uint32 height);
+
     TUnique<ImGuiRenderer> m_ImGuiRenderer;
+    TUnique<SponzaRenderer> m_SponzaRenderer;
 
     struct PendingMipTransition
     {

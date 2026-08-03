@@ -8,6 +8,7 @@
 
 #include <Caramel/Core/Common.hpp>
 #include <Caramel/Renderer/Renderer.hpp>
+#include <Caramel/Renderer/Camera.hpp>
 #include <Caramel/Asset/StreamingManager.hpp>
 
 #include <SDL3/SDL.h>
@@ -31,6 +32,7 @@ public:
 private:
     void ShowOverlay();
     void ShowContentViewer();
+    void ShowModelViewer();
     void ShowViewport();
     void ShowInspector();
     void ShowRendererSettings();
@@ -42,6 +44,7 @@ private:
     SDL_Window* m_Window;
     TUnique<Renderer> m_Renderer;
     TUnique<StreamingManager> m_StreamingManager;
+    Camera m_Camera;
 
     agfxDeviceInfo m_DeviceInfo;
 
@@ -50,4 +53,10 @@ private:
     bool m_ContentViewerAutoStream = true;
     float m_ContentViewerStreamInterval = 0.5f;
     float m_ContentViewerStreamTimer = 0.0f;
+
+    // Model Viewer state.
+    bool m_ModelViewerLoaded = false;
+    bool m_ModelViewerAutoStream = true;
+    float m_ModelViewerStreamInterval = 0.5f;
+    float m_ModelViewerStreamTimer = 0.0f;
 };

@@ -98,12 +98,14 @@ void Application::Run()
 
         ImGui_ImplSDL3_NewFrame();
         Input::NewFrame();
+        m_Camera.Update(ImGui::GetIO().DeltaTime);
         ImGui::NewFrame();
         ShowOverlay();
         ShowContentViewer();
+        ShowModelViewer();
         ImGui::Render();
 
-        m_Renderer->Render();
+        m_Renderer->Render(m_Camera, *m_StreamingManager);
     }
 }
 
@@ -185,6 +187,74 @@ void Application::ShowContentViewer()
         index++;
         if (index % columnCount != 0)
             ImGui::SameLine();
+    }
+
+    ImGui::End();
+}
+
+void Application::ShowModelViewer()
+{
+    ImGui::SetNextWindowSize(ImVec2(640, 480), ImGuiCond_FirstUseEver);
+    ImGui::Begin("Model Viewer");
+
+    if (!m_ModelViewerLoaded) {
+        if (ImGui::Button("Load Sponza Model")) {
+            if (!m_ContentViewerLoaded) {
+                m_StreamingManager->LoadDirectory("Content/Cache/Sponza/Textures");
+                m_ContentViewerLoaded = true;
+            }
+            m_StreamingManager->LoadModel("Content/Cache/Sponza/Sponza.cmdl");
+            m_ModelViewerLoaded = true;
+        }
+    } else {
+        ImGui::Text("%d meshes loaded", (int)m_StreamingManager->GetModels().Size());
+    }
+
+    ImGui::Separator();
+
+    ImGui::Checkbox("Automatic streaming##Model", &m_ModelViewerAutoStream);
+    if (m_ModelViewerAutoStream) {
+        ImGui::SliderFloat("Interval (s)##Model", &m_ModelViewerStreamInterval, 0.1f, 2.0f);
+
+        m_ModelViewerStreamTimer += ImGui::GetIO().DeltaTime;
+        if (m_ModelViewerStreamTimer >= m_ModelViewerStreamInterval) {
+            m_ModelViewerStreamTimer = 0.0f;
+            for (const TShared<StreamingModel>& model : m_StreamingManager->GetModels())
+                model->RequestNextLOD(*m_StreamingManager);
+        }
+    } else if (ImGui::Button("Advance All##Model")) {
+        for (const TShared<StreamingModel>& model : m_StreamingManager->GetModels())
+            model->RequestNextLOD(*m_StreamingManager);
+    }
+
+    ImGui::Separator();
+
+    if (ImGui::BeginTable("ModelStreamingTable", 3, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_ScrollY, ImGui::GetContentRegionAvail())) {
+        ImGui::TableSetupColumn("Mesh");
+        ImGui::TableSetupColumn("Resident LOD");
+        ImGui::TableSetupColumn("Meshlets");
+        ImGui::TableHeadersRow();
+
+        for (const TShared<StreamingModel>& model : m_StreamingManager->GetModels()) {
+            ImGui::TableNextRow();
+            ImGui::TableSetColumnIndex(0);
+            ImGui::TextUnformatted(model->GetMesh().name.CStr());
+
+            ImGui::TableSetColumnIndex(1);
+            uint32 residentLOD = model->SnapshotResidentLOD();
+            if (residentLOD != StreamingModel::kNoResidentLOD)
+                ImGui::Text("%u/%u", residentLOD, (uint32)CaramelAsset::kLodCount - 1);
+            else
+                ImGui::TextUnformatted("Loading...");
+
+            ImGui::TableSetColumnIndex(2);
+            if (residentLOD != StreamingModel::kNoResidentLOD)
+                ImGui::Text("%u", model->GetMeshletCount(residentLOD));
+            else
+                ImGui::TextUnformatted("-");
+        }
+
+        ImGui::EndTable();
     }
 
     ImGui::End();

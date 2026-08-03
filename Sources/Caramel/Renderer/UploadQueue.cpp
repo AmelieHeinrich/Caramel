@@ -64,6 +64,36 @@ uint64 UploadQueue::EnqueueTextureUpload(agfx::Texture& texture, uint32 mipLevel
     return m_NextFenceValue;
 }
 
+uint64 UploadQueue::EnqueueBufferUpload(agfx::Buffer& dst, uint64 dstOffset, const void* data, size_t dataSize)
+{
+    assert(dataSize <= kStagingBufferSize && "Upload larger than a single staging buffer");
+
+    std::lock_guard lock(m_RecordMutex);
+
+    if (m_Frames[m_CurrentFrameIndex].writeOffset + dataSize > kStagingBufferSize)
+        FlushLocked();
+
+    UploadFrame& frame = m_Frames[m_CurrentFrameIndex];
+    if (!frame.recording)
+    {
+        frame.commandBuffer.Begin();
+        frame.recording = true;
+    }
+
+    {
+        agfx::MappedBuffer mapped(frame.stagingBuffer);
+        std::memcpy(mapped.As<uint8_t>() + frame.writeOffset, data, dataSize);
+    }
+
+    auto pass = frame.commandBuffer.BeginComputePass("Upload buffer");
+    pass.CopyBufferToBuffer(frame.stagingBuffer, dst, frame.writeOffset, dstOffset, dataSize);
+    pass.End();
+
+    frame.writeOffset += dataSize;
+
+    return m_NextFenceValue;
+}
+
 uint64 UploadQueue::Flush()
 {
     std::lock_guard lock(m_RecordMutex);

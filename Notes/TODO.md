@@ -1,5 +1,4 @@
 Basics
-- Streaming
 - Scene hierarchy
 - Render graph
 - GPU debug tooling (debug renderer)

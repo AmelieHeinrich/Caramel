@@ -9,8 +9,14 @@
 #include <Caramel/Core/Logger.hpp>
 #include <Caramel/Renderer/Shader/ShaderServer.hpp>
 #include <Caramel/Renderer/ImGuiRenderer.hpp>
+#include <Caramel/Renderer/SponzaRenderer.hpp>
 
 #include <imgui.h>
+
+namespace
+{
+    constexpr agfx::TextureFormat kDepthFormat = agfx::TextureFormat::Depth32F;
+}
 
 Renderer* Renderer::s_Instance = nullptr;
 
@@ -57,8 +63,24 @@ Renderer::Renderer(SDL_Window* window)
         m_CommandBuffers[i] = m_Device.CreateCommandBuffer(m_CommandQueue);
     }
 
+    CreateDepthTexture((uint32)width, (uint32)height);
+
     ShaderServer::Initialize(m_Device, *this);
     m_ImGuiRenderer = MakeUnique<ImGuiRenderer>(m_Device, m_CommandQueue, m_SwapChain.GetFormat(), (uint32)FRAMES_IN_FLIGHT);
+    m_SponzaRenderer = MakeUnique<SponzaRenderer>(m_Device, m_SwapChain.GetFormat(), kDepthFormat, (uint32)FRAMES_IN_FLIGHT);
+}
+
+void Renderer::CreateDepthTexture(uint32 width, uint32 height)
+{
+    agfx::TextureCreateInfo depthInfo;
+    depthInfo.SetSize(width, height)
+             .SetFormat(kDepthFormat)
+             .SetType(agfx::TextureType::Texture2D)
+             .SetUsage(agfx::TextureUsage::DepthStencilAttachment)
+             .SetMipLevels(1);
+    m_DepthTexture = m_Device.CreateTexture(depthInfo);
+    m_DepthTexture.SetName("Scene Depth Buffer");
+    m_DepthNeedsInitialTransition = true;
 }
 
 Renderer::~Renderer()
@@ -67,7 +89,7 @@ Renderer::~Renderer()
     ShaderServer::Shutdown();
 }
 
-void Renderer::Render()
+void Renderer::Render(const Camera& camera, StreamingManager& streamingManager)
 {
     m_FrameSlot = (uint32_t)(m_FenceValue % FRAMES_IN_FLIGHT);
     m_Fence.Wait(m_FenceFrameSlots[m_FrameSlot]);
@@ -79,6 +101,7 @@ void Renderer::Render()
     if (m_ResizeNextFrame) {
         m_Device.WaitIdle();
         m_SwapChain.Resize(width, height);
+        CreateDepthTexture((uint32)width, (uint32)height);
         m_ResizeNextFrame = false;
     }
 
@@ -98,16 +121,49 @@ void Renderer::Render()
     agfx::RenderTargetCreateInfo renderTargetCreateInfo{};
     renderTargetCreateInfo.texture = backBuffer;
     agfx::RenderTarget renderTarget = m_Device.CreateRenderTarget(renderTargetCreateInfo);
-    
+
+    agfx::RenderTargetCreateInfo depthTargetCreateInfo{};
+    depthTargetCreateInfo.texture = m_DepthTexture;
+    depthTargetCreateInfo.SetIsDepth(true);
+    agfx::RenderTarget depthTarget = m_Device.CreateRenderTarget(depthTargetCreateInfo);
+
+    // The depth buffer is cleared and written every frame and never sampled elsewhere, so it stays
+    // in DepthWrite for its whole lifetime -- only the one-time Common -> DepthWrite transition
+    // after (re)creation is needed, not a transition every frame.
+    if (m_DepthNeedsInitialTransition) {
+        commandBuffer.TextureBarrier(m_DepthTexture, agfx::ResourceState::Common, agfx::ResourceState::DepthWrite);
+        m_DepthNeedsInitialTransition = false;
+    }
+
+    {
+        agfx::RenderPassCreateInfo scenePassInfo{};
+        scenePassInfo.colorAttachmentCount = 1;
+        scenePassInfo.colorAttachments[0].renderTarget = renderTarget;
+        scenePassInfo.colorAttachments[0].loadOp = AGFX_LOAD_OPERATION_CLEAR;
+        scenePassInfo.colorAttachments[0].storeOp = AGFX_STORE_OPERATION_STORE;
+        scenePassInfo.colorAttachments[0].clearColor[0] = 0.1f;
+        scenePassInfo.colorAttachments[0].clearColor[1] = 0.1f;
+        scenePassInfo.colorAttachments[0].clearColor[2] = 0.1f;
+        scenePassInfo.colorAttachments[0].clearColor[3] = 1.0f;
+        scenePassInfo.hasDepthAttachment = 1;
+        scenePassInfo.depthAttachment.renderTarget = depthTarget;
+        scenePassInfo.depthAttachment.loadOp = AGFX_LOAD_OPERATION_CLEAR;
+        scenePassInfo.depthAttachment.storeOp = AGFX_STORE_OPERATION_DONT_CARE;
+        scenePassInfo.depthAttachment.clearDepth = 1.0f;
+        scenePassInfo.name = "Scene Pass";
+        scenePassInfo.width = width;
+        scenePassInfo.height = height;
+
+        agfx::RenderPass scenePass = commandBuffer.BeginRenderPass(scenePassInfo);
+        m_SponzaRenderer->Render(scenePass, streamingManager, camera, (uint32)width, (uint32)height, (uint32)m_FrameSlot);
+        scenePass.End();
+    }
+
     agfx::RenderPassCreateInfo renderPassCreateInfo{};
     renderPassCreateInfo.colorAttachmentCount = 1;
     renderPassCreateInfo.colorAttachments[0].renderTarget = renderTarget;
-    renderPassCreateInfo.colorAttachments[0].loadOp = AGFX_LOAD_OPERATION_CLEAR;
+    renderPassCreateInfo.colorAttachments[0].loadOp = AGFX_LOAD_OPERATION_LOAD;
     renderPassCreateInfo.colorAttachments[0].storeOp = AGFX_STORE_OPERATION_STORE;
-    renderPassCreateInfo.colorAttachments[0].clearColor[0] = 0.1f;
-    renderPassCreateInfo.colorAttachments[0].clearColor[1] = 0.1f;
-    renderPassCreateInfo.colorAttachments[0].clearColor[2] = 0.1f;
-    renderPassCreateInfo.colorAttachments[0].clearColor[3] = 1.0f;
     renderPassCreateInfo.name = "Main Render Pass";
     renderPassCreateInfo.width = width;
     renderPassCreateInfo.height = height;

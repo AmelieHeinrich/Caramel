@@ -22,9 +22,17 @@ void StreamingManager::Update()
 
     uint64 completed = m_UploadQueue.GetFence().GetCompletedValue();
 
-    std::lock_guard lock(m_TexturesMutex);
-    for (TShared<StreamingTexture>& texture : m_Textures)
-        texture->PollCompletion(completed);
+    {
+        std::lock_guard lock(m_TexturesMutex);
+        for (TShared<StreamingTexture>& texture : m_Textures)
+            texture->PollCompletion(completed);
+    }
+
+    {
+        std::lock_guard lock(m_ModelsMutex);
+        for (TShared<StreamingModel>& model : m_Models)
+            model->PollCompletion(completed);
+    }
 }
 
 TShared<StreamingTexture> StreamingManager::LoadTexture(const String& path)
@@ -42,6 +50,41 @@ TShared<StreamingTexture> StreamingManager::LoadTexture(const String& path)
     std::lock_guard lock(m_TexturesMutex);
     m_Textures.PushBack(texture);
     return texture;
+}
+
+void StreamingManager::LoadModel(const String& path)
+{
+    TShared<CPUModel> model = MakeShared<CPUModel>(path);
+    if (!model->IsValid())
+    {
+        CARAMEL_ERROR("StreamingManager: failed to load model '{}'", path.CStr());
+        return;
+    }
+
+    for (int32 materialIndex = 0; materialIndex < (int32)model->GetMaterials().Size(); ++materialIndex)
+    {
+        const ModelMaterial& material = model->GetMaterials()[materialIndex];
+        if (material.baseColorTexture.Empty())
+            continue;
+
+        TShared<StreamingTexture> texture = LoadTexture(material.baseColorTexture);
+        if (texture)
+            m_MaterialTextures[materialIndex] = texture;
+    }
+
+    std::lock_guard lock(m_ModelsMutex);
+    for (uint32 meshIndex = 0; meshIndex < model->GetMeshes().Size(); ++meshIndex)
+    {
+        TShared<StreamingModel> streamingModel = MakeShared<StreamingModel>();
+        streamingModel->BeginLoad(model, meshIndex, *this);
+        m_Models.PushBack(streamingModel);
+    }
+}
+
+TShared<StreamingTexture> StreamingManager::GetMaterialTexture(int32 materialIndex) const
+{
+    auto it = m_MaterialTextures.find(materialIndex);
+    return it != m_MaterialTextures.end() ? it->second : nullptr;
 }
 
 void StreamingManager::LoadDirectory(const String& directory)
