@@ -9,7 +9,9 @@
 #include <Caramel/Core/Common.hpp>
 
 #include <glm/glm.hpp>
-#include <agfx/agfx.hpp>
+#include <AGFX/agfx.hpp>
+
+#include <algorithm>
 
 namespace CaramelAsset
 {
@@ -141,14 +143,19 @@ namespace CaramelAsset
         return blocksPerRow * block.bytesPerBlock;
     }
 
-    // Below a certain mip level a block-compressed texture's logical size (e.g. 1x1 or 2x2) is
-    // still physically backed by one full block -- GPU copy regions must be sized in whole
-    // blocks, so round the extent up to the block dimensions before issuing a copy.
+    // Extent to use for a full-mip buffer->texture copy of a block-compressed format.
+    //
+    // Below a certain mip level the logical size (e.g. 1x1 or 2x2) is smaller than one block, and
+    // the source bytes still hold a whole block -- but the copy region is expressed in texels of
+    // the *destination* mip, so it must never exceed that mip's logical size. Rounding up to the
+    // block dimensions asks to write a 4x4 region into a 1x1 mip and trips copy validation; the
+    // driver handles the partial trailing block itself. The round-up is therefore clamped, which
+    // for a full-mip copy leaves the logical extent as-is.
     inline void GetBlockAlignedExtent(ECompressedTextureFormat format, uint32 width, uint32 height, uint32& outWidth, uint32& outHeight)
     {
         BlockInfo block = GetBlockInfo(format);
-        outWidth = ((width + block.width - 1) / block.width) * block.width;
-        outHeight = ((height + block.height - 1) / block.height) * block.height;
+        outWidth = std::min(((width + block.width - 1) / block.width) * block.width, width);
+        outHeight = std::min(((height + block.height - 1) / block.height) * block.height, height);
     }
 
     enum ECtexFlags : uint32

@@ -14,6 +14,8 @@ GPUTexture::GPUTexture(const agfx::TextureCreateInfo& info)
     m_Texture = device.CreateTexture(info);
 
     agfx::TextureViewCreateInfo textureViewCreateInfo = agfx::TextureViewCreateInfo().SetTexture(m_Texture)
+                                                                                     .SetFormat(static_cast<agfx::TextureFormat>(info.format))
+                                                                                     .SetMipRange(0, info.mipLevels)
                                                                                      .SetWriteable(false);
     m_TextureView = device.CreateTextureView(textureViewCreateInfo);
 }

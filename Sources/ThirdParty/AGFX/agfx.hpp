@@ -11,7 +11,7 @@
 
 #pragma once
 
-#include <agfx/agfx.h>
+#include <AGFX/agfx.h>
 
 #include <cfloat>
 #include <cstring>

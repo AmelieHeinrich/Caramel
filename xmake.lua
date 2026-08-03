@@ -28,6 +28,7 @@ elseif is_plat("macosx") then
     add_linkdirs("Content/Binaries/Mac", { public = true })
     add_cxxflags("-fobjc-arc", "-x objective-c++", { public = true })
     add_requires("astc-encoder 5.3.0")
+    add_rpathdirs("Content/Binaries/Mac")
 end
 
 includes("Sources")

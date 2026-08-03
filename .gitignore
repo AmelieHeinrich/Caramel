@@ -17,3 +17,6 @@ imgui.ini
 # Compiled assets (CaramelAssetCompiler output, tracked separately via Content/Cache/cache.json)
 Content/Cache
 Content/Meshes
+
+# OS
+.DS_Store

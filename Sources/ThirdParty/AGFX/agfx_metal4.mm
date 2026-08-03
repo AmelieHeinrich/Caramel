@@ -1459,7 +1459,9 @@ agfxTextureView* agfxTextureViewCreate(agfxDevice* device, const agfxTextureView
 
     MTLTextureViewDescriptor* descriptor = [MTLTextureViewDescriptor new];
     descriptor.textureType = agfxTextureTypeToMTL(createInfo->type);
-    descriptor.pixelFormat = agfxPixelFormatToMTL(createInfo->format);
+    descriptor.pixelFormat = agfxPixelFormatToMTL(createInfo->format == AGFX_TEXTURE_FORMAT_UNKNOWN
+                                                      ? createInfo->texture->createInfo.format
+                                                      : createInfo->format);
     descriptor.levelRange = NSMakeRange(createInfo->baseMipLevel, createInfo->mipLevelCount);
     descriptor.sliceRange = NSMakeRange(createInfo->baseArrayLayer, createInfo->arrayLayerCount);
 

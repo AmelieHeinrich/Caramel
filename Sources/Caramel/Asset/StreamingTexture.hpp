@@ -61,6 +61,10 @@ private:
     std::atomic<uint64> m_PendingFenceValue{ 0 }; // 0 == nothing in flight
     std::atomic<uint32> m_PendingMip{ kNoResidentMip };
 
-    agfx::TextureView m_DisplayView;
+    // One view per mip level, each covering [level, mipCount), all created up front. Creating them
+    // lazily and dropping the previous one on every promotion would recycle the bindless slot
+    // while frames referencing it are still in flight -- harmless on D3D12, but on Metal the
+    // texture view pool entry is rewritten under the GPU and the texture flickers for a frame.
+    TArray<agfx::TextureView> m_MipViews;
     ImTextureID m_DisplayTexID = ImTextureID_Invalid;
 };

@@ -41,6 +41,10 @@ private:
         agfx::CommandBuffer commandBuffer;
         uint64 writeOffset = 0;
         uint64 fenceValue = 0;
+        // Whether Begin() has been called without a matching End(). A command allocator may only
+        // have one open command buffer, so the buffer is only opened once work is actually
+        // recorded into the slot.
+        bool recording = false;
     };
     UploadFrame m_Frames[FRAMES_IN_FLIGHT];
     uint32 m_CurrentFrameIndex = 0;

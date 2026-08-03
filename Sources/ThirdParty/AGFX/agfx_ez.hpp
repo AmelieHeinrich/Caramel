@@ -23,7 +23,7 @@
 
 #pragma once
 
-#include <agfx/agfx.hpp>
+#include <AGFX/agfx.hpp>
 
 #include <array>
 #include <cassert>

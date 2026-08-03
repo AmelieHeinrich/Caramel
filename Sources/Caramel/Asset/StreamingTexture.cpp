@@ -22,6 +22,18 @@ TShared<GPUTexture> StreamingTexture::BeginLoad(CPUTexture source, StreamingMana
                                                                    .SetUsage(agfx::TextureUsage::Sampled);
     m_Destination = MakeShared<GPUTexture>(textureInfo);
 
+    // A view is just a descriptor, so every mip's view can be built before its data lands.
+    const uint32 mipCount = m_Source.GetMipCount();
+    m_MipViews.reserve(mipCount);
+    for (uint32 mip = 0; mip < mipCount; ++mip)
+    {
+        agfx::TextureViewCreateInfo viewInfo = agfx::TextureViewCreateInfo().SetTexture(m_Destination->GetTexture())
+                                                                            .SetFormat(CaramelAsset::ToAgfxFormat(m_Source.GetFormat()))
+                                                                            .SetMipRange(mip, mipCount - mip)
+                                                                            .SetWriteable(false);
+        m_MipViews.push_back(Renderer::Get().GetDevice().CreateTextureView(viewInfo));
+    }
+
     m_NextMipToLoad = m_Source.GetMipCount() - 1;
     RequestNextMip(manager);
 
@@ -76,11 +88,7 @@ void StreamingTexture::PollCompletion(uint64 completedFenceValue)
 
 void StreamingTexture::OnMipResident(uint32 mipIndex)
 {
-    agfx::TextureViewCreateInfo viewInfo = agfx::TextureViewCreateInfo().SetTexture(m_Destination->GetTexture())
-                                                                        .SetMipRange(mipIndex, 1)
-                                                                        .SetWriteable(false);
-    m_DisplayView = Renderer::Get().GetDevice().CreateTextureView(viewInfo);
-    m_DisplayTexID = (ImTextureID)(intptr_t)m_DisplayView.GetHandle();
+    m_DisplayTexID = (ImTextureID)(intptr_t)m_MipViews[mipIndex].GetHandle();
 
     m_HighestResidentMip.store(mipIndex, std::memory_order_release);
 }

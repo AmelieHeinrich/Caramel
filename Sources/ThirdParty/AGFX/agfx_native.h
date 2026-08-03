@@ -5,7 +5,7 @@
 
 #pragma once
 
-#include <agfx/agfx.h>
+#include <AGFX/agfx.h>
 
 /**
  * @file agfx_native.h

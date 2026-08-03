@@ -17,7 +17,6 @@ void UploadQueue::Init(agfx::Device& device)
         stagingInfo.SetSize(kStagingBufferSize).SetUsage(agfx::BufferUsage::ShaderRead).SetMemoryType(agfx::BufferMemoryType::CPUToGPU);
         frame.stagingBuffer = device.CreateBuffer(stagingInfo);
         frame.commandBuffer = device.CreateCommandBuffer(m_CopyQueue);
-        frame.commandBuffer.Begin();
     }
 }
 
@@ -34,6 +33,11 @@ uint64 UploadQueue::EnqueueTextureUpload(agfx::Texture& texture, uint32 mipLevel
         FlushLocked();
 
     UploadFrame& frame = m_Frames[m_CurrentFrameIndex];
+    if (!frame.recording)
+    {
+        frame.commandBuffer.Begin();
+        frame.recording = true;
+    }
 
     // Copy into this frame's staging buffer at the current write offset.
     {
@@ -63,7 +67,13 @@ uint64 UploadQueue::FlushLocked()
 {
     UploadFrame& frame = m_Frames[m_CurrentFrameIndex];
 
+    // Nothing was recorded into this slot -- there is no command buffer to close and submitting
+    // would burn a fence value for no work.
+    if (!frame.recording)
+        return m_NextFenceValue - 1;
+
     frame.commandBuffer.End();
+    frame.recording = false;
     m_CopyQueue.Submit(frame.commandBuffer);
 
     uint64_t signalValue = m_NextFenceValue++;
@@ -73,10 +83,10 @@ uint64 UploadQueue::FlushLocked()
     m_CurrentFrameIndex = (m_CurrentFrameIndex + 1) % FRAMES_IN_FLIGHT;
     UploadFrame& next = m_Frames[m_CurrentFrameIndex];
 
-    // Before reusing this frame slot, make sure its last submission actually finished.
+    // Before reusing this frame slot, make sure its last submission actually finished. The
+    // command buffer is left closed; the next Enqueue reopens it.
     m_Fence.Wait(next.fenceValue);
     next.commandBuffer.Reset();
-    next.commandBuffer.Begin();
     next.writeOffset = 0;
 
     return signalValue;
