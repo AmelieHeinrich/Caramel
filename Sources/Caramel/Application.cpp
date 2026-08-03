@@ -64,6 +64,10 @@ Application::~Application()
     JobSystem::Get().WaitAll();
     JobSystem::Shutdown();
 
+    // Drain the GPU before tearing anything down: in-flight frames and uploads still reference
+    // the staging buffers, swapchain semaphores, pipelines and command buffers destroyed below.
+    m_Renderer->GetDevice().WaitIdle();
+
     m_StreamingManager.reset();
     m_Renderer.reset();
 

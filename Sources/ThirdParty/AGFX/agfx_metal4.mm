@@ -777,6 +777,11 @@ struct agfxDevice {
 
     id<MTLLibrary> internalLibrary;
     id<MTLComputePipelineState> icbConvertPipelines[4]; // indexed by agfxIndirectBundleType
+
+    // Live queues, tracked so agfxDeviceWaitIdle can drain each one (Metal has no device-wide wait).
+    // __unsafe_unretained: the agfxCommandQueue owns the reference; entries are removed on queue destroy.
+    __unsafe_unretained id<MTL4CommandQueue> liveQueues[16];
+    uint32_t liveQueueCount;
 };
 
 static void agfxLog(agfxDevice* device, agfxLogSeverity severity, const char* fmt, ...) {
@@ -794,6 +799,7 @@ static void agfxLog(agfxDevice* device, agfxLogSeverity severity, const char* fm
 agfxDevice* agfxDeviceCreate(const agfxDeviceCreateInfo* createInfo) {
     agfxDevice* device = (agfxDevice*)createInfo->allocate(sizeof(agfxDevice));
     memcpy(&device->createInfo, createInfo, sizeof(agfxDeviceCreateInfo));
+    device->liveQueueCount = 0; // The allocator hands back raw memory; default member initializers do not run.
     device->device = MTLCreateSystemDefaultDevice();
     if (!device->device) {
         agfxLog(device, AGFX_LOG_SEVERITY_ERROR, "agfxDeviceCreate: MTLCreateSystemDefaultDevice returned nil, no Metal-capable GPU found");
@@ -875,6 +881,21 @@ void agfxDeviceGetInfo(agfxDevice* device, agfxDeviceInfo* info) {
 
 void agfxDeviceMakeResourcesResident(agfxDevice* device) {
     [device->residencySet commit];
+}
+
+void agfxDeviceWaitIdle(agfxDevice* device) {
+    id<MTLSharedEvent> event = [device->device newSharedEvent];
+    if (!event) {
+        agfxLog(device, AGFX_LOG_SEVERITY_ERROR, "agfxDeviceWaitIdle: newSharedEvent failed");
+        return;
+    }
+
+    uint64_t value = 0;
+    for (uint32_t i = 0; i < device->liveQueueCount; ++i) {
+        ++value;
+        [device->liveQueues[i] signalEvent:event value:value];
+        [event waitUntilSignaledValue:value timeoutMS:UINT64_MAX];
+    }
 }
 
 // Fence
@@ -968,10 +989,22 @@ agfxCommandQueue* agfxCommandQueueCreate(agfxDevice* device, const agfxCommandQu
         return nullptr;
     }
     [queue->commandQueue addResidencySet:device->residencySet];
+
+    if (device->liveQueueCount < sizeof(device->liveQueues) / sizeof(device->liveQueues[0])) {
+        device->liveQueues[device->liveQueueCount++] = queue->commandQueue;
+    } else {
+        agfxLog(device, AGFX_LOG_SEVERITY_WARNING, "agfxCommandQueueCreate: live queue tracking is full, agfxDeviceWaitIdle will not cover this queue");
+    }
     return queue;
 }
 
 void agfxCommandQueueDestroy(agfxDevice* device, agfxCommandQueue* queue) {
+    for (uint32_t i = 0; i < device->liveQueueCount; ++i) {
+        if (device->liveQueues[i] == queue->commandQueue) {
+            device->liveQueues[i] = device->liveQueues[--device->liveQueueCount];
+            break;
+        }
+    }
     queue->commandQueue = nil;
     device->createInfo.free(queue);
 }

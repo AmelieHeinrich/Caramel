@@ -1288,6 +1288,8 @@ namespace agfx
 
         void MakeResourcesResident() { agfxDeviceMakeResourcesResident(mDevice); }
 
+        void WaitIdle() { agfxDeviceWaitIdle(mDevice); }
+
         Fence CreateFence() { return Fence(mDevice, agfxFenceCreate(mDevice)); }
 
         QueryPool CreateQueryPool(CommandQueue& queue, const agfxQueryPoolCreateInfo& info)

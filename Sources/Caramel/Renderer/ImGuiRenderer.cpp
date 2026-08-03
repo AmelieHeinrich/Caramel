@@ -201,7 +201,7 @@ ImGuiRenderer::~ImGuiRenderer()
     io.BackendFlags &= ~(ImGuiBackendFlags_RendererHasVtxOffset | ImGuiBackendFlags_RendererHasTextures);
 }
 
-void ImGuiRenderer::UploadTexture(agfx::Texture& dstTexture, const agfxTextureRegion& region, const void* data, uint32 dataSize, uint32 bytesPerRow, uint32 bytesPerImage)
+void ImGuiRenderer::UploadTexture(agfx::Texture& dstTexture, const agfxTextureRegion& region, const void* data, uint32 dataSize, uint32 bytesPerRow, uint32 bytesPerImage, agfx::ResourceState oldState)
 {
     if (dataSize == 0)
         return;
@@ -216,9 +216,12 @@ void ImGuiRenderer::UploadTexture(agfx::Texture& dstTexture, const agfxTextureRe
         memcpy(mapped.Get(), data, dataSize);
     }
 
-    if (!m_ActiveUploadPass)
-        m_ActiveUploadPass = m_UploadCmdBuffer.BeginComputePass("ImGui Texture Upload");
-    m_ActiveUploadPass.CopyBufferToTexture(staging, 0, dstTexture, region, 0, 0, bytesPerRow, bytesPerImage);
+    // Barriers are command-buffer-level, so each upload gets its own short pass around the copy.
+    m_UploadCmdBuffer.TextureBarrier(dstTexture, oldState, agfx::ResourceState::CopyDest);
+    agfx::ComputePass pass = m_UploadCmdBuffer.BeginComputePass("ImGui Texture Upload");
+    pass.CopyBufferToTexture(staging, 0, dstTexture, region, 0, 0, bytesPerRow, bytesPerImage);
+    pass.End();
+    m_UploadCmdBuffer.TextureBarrier(dstTexture, agfx::ResourceState::CopyDest, agfx::ResourceState::PixelShaderResource);
 
     m_PendingStagingBuffers.PushBack(std::move(staging));
 }
@@ -229,9 +232,6 @@ void ImGuiRenderer::FlushUploads()
         return;
 
     m_Device->MakeResourcesResident();
-
-    if (m_ActiveUploadPass)
-        m_ActiveUploadPass.End();
 
     m_UploadCmdBuffer.End();
     m_Queue->Submit(m_UploadCmdBuffer);
@@ -270,7 +270,7 @@ void ImGuiRenderer::UpdateTexture(ImTextureData* tex)
 
         uint32 bytesPerRow = (uint32)tex->Width * 4;
         uint32 dataSize = bytesPerRow * (uint32)tex->Height;
-        UploadTexture(backendTex->Texture, region, tex->Pixels, dataSize, bytesPerRow, dataSize);
+        UploadTexture(backendTex->Texture, region, tex->Pixels, dataSize, bytesPerRow, dataSize, agfx::ResourceState::Common);
 
         agfx::TextureViewCreateInfo viewInfo;
         viewInfo.SetTexture(backendTex->Texture.Get())
@@ -304,7 +304,7 @@ void ImGuiRenderer::UpdateTexture(ImTextureData* tex)
 
             uint32 bytesPerRow = (uint32)r.w * 4;
             uint32 dataSize = (uint32)packed.Size();
-            UploadTexture(backendTex->Texture, region, packed.Data(), dataSize, bytesPerRow, dataSize);
+            UploadTexture(backendTex->Texture, region, packed.Data(), dataSize, bytesPerRow, dataSize, agfx::ResourceState::PixelShaderResource);
         }
         tex->SetStatus(ImTextureStatus_OK);
     } else if (tex->Status == ImTextureStatus_WantDestroy && tex->UnusedFrames > 0) {

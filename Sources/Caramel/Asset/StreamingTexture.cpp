@@ -88,6 +88,10 @@ void StreamingTexture::PollCompletion(uint64 completedFenceValue)
 
 void StreamingTexture::OnMipResident(uint32 mipIndex)
 {
+    // The transfer queue left this mip in CopyDest; the graphics queue transitions it for sampling
+    // at the top of the frame, before the ImGui pass that may now reference it through m_DisplayTexID.
+    Renderer::Get().EnqueueMipTransition(m_Destination->GetTexture(), mipIndex);
+
     m_DisplayTexID = (ImTextureID)(intptr_t)m_MipViews[mipIndex].GetHandle();
 
     m_HighestResidentMip.store(mipIndex, std::memory_order_release);

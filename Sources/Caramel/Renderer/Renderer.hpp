@@ -26,6 +26,12 @@ public:
     void Resize();
     void WaitIdle() { m_Fence.Wait(m_FenceValue); }
 
+    /// Queues a CopyDest -> PixelShaderResource transition for one mip, recorded on the graphics
+    /// queue at the start of the next frame. Used by texture streaming: the transfer queue leaves
+    /// each uploaded mip in CopyDest (shader stages are not valid barrier targets there), so the
+    /// graphics queue takes it the rest of the way before anything samples it.
+    void EnqueueMipTransition(agfx::Texture& texture, uint32 mip);
+
     agfx::Device& GetDevice() { return m_Device; }
     agfxDeviceInfo GetDeviceInfo() const { return m_Device.GetInfo(); }
 
@@ -48,6 +54,13 @@ private:
     agfx::CommandBuffer m_CommandBuffers[FRAMES_IN_FLIGHT];
 
     TUnique<ImGuiRenderer> m_ImGuiRenderer;
+
+    struct PendingMipTransition
+    {
+        agfxTexture* texture;
+        uint32 mip;
+    };
+    TArray<PendingMipTransition> m_PendingMipTransitions;
 
     static void* Allocate(uint64 size);
     static void Free(void* ptr);

@@ -335,6 +335,10 @@ struct agfxDevice {
     // still works for everything except placement heaps -- so agfxHeapCreate is the one that fails
     // loudly if this is false.
     bool supportsPlacementHeaps;
+
+    // Live queues, tracked so agfxDeviceWaitIdle can drain each one (D3D12 has no device-wide wait).
+    ID3D12CommandQueue* liveQueues[16];
+    uint32_t liveQueueCount;
 };
 
 static uint32_t agfxIndirectBundleTypeStride(agfxIndirectBundleType type) {
@@ -623,6 +627,28 @@ void agfxDeviceGetInfo(agfxDevice* device, agfxDeviceInfo* info) {
 
 void agfxDeviceMakeResourcesResident(agfxDevice* device) {} // Nothing to do here
 
+void agfxDeviceWaitIdle(agfxDevice* device) {
+    ID3D12Fence* fence = nullptr;
+    if (FAILED(device->d3d12Device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&fence)))) {
+        agfxLog(device, AGFX_LOG_SEVERITY_ERROR, "agfxDeviceWaitIdle: CreateFence failed");
+        return;
+    }
+    HANDLE event = CreateEventA(nullptr, FALSE, FALSE, nullptr);
+
+    uint64_t value = 0;
+    for (uint32_t i = 0; i < device->liveQueueCount; ++i) {
+        ++value;
+        device->liveQueues[i]->Signal(fence, value);
+        if (fence->GetCompletedValue() < value) {
+            fence->SetEventOnCompletion(value, event);
+            WaitForSingleObject(event, INFINITE);
+        }
+    }
+
+    CloseHandle(event);
+    fence->Release();
+}
+
 // Fence
 
 struct agfxFence {
@@ -765,10 +791,22 @@ agfxCommandQueue* agfxCommandQueueCreate(agfxDevice* device, const agfxCommandQu
         device->createInfo.free(queue);
         return NULL;
     }
+
+    if (device->liveQueueCount < _countof(device->liveQueues)) {
+        device->liveQueues[device->liveQueueCount++] = queue->d3d12CommandQueue;
+    } else {
+        agfxLog(device, AGFX_LOG_SEVERITY_WARNING, "agfxCommandQueueCreate: live queue tracking is full, agfxDeviceWaitIdle will not cover this queue");
+    }
     return queue;
 }
 
 void agfxCommandQueueDestroy(agfxDevice* device, agfxCommandQueue* queue) {
+    for (uint32_t i = 0; i < device->liveQueueCount; ++i) {
+        if (device->liveQueues[i] == queue->d3d12CommandQueue) {
+            device->liveQueues[i] = device->liveQueues[--device->liveQueueCount];
+            break;
+        }
+    }
     if (queue->d3d12CommandQueue) queue->d3d12CommandQueue->Release();
     device->createInfo.free(queue);
 }

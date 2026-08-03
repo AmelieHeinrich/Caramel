@@ -454,7 +454,8 @@ agfxDevice* agfxDeviceCreate(const agfxDeviceCreateInfo* createInfo)
         if (!features13.synchronization2) return false; // Barriers are recorded as vkCmdPipelineBarrier2.
         if (!features12.descriptorIndexing || !features12.shaderSampledImageArrayNonUniformIndexing ||
             !features12.descriptorBindingPartiallyBound || !features12.descriptorBindingVariableDescriptorCount ||
-            !features12.runtimeDescriptorArray || !features12.descriptorBindingUpdateUnusedWhilePending) return false;
+            !features12.runtimeDescriptorArray || !features12.descriptorBindingUpdateUnusedWhilePending ||
+            !features12.descriptorBindingSampledImageUpdateAfterBind) return false; // The global set's sampler binding is UPDATE_AFTER_BIND.
         if (!features12.bufferDeviceAddress) return false;
         if (!features12.timelineSemaphore) return false; // agfxFence is a timeline semaphore.
         if (!mutableFeatures.mutableDescriptorType) return false;
@@ -477,6 +478,16 @@ agfxDevice* agfxDeviceCreate(const agfxDeviceCreateInfo* createInfo)
         rayTracingSupported = agfxVkHasExtension(extensions, VK_KHR_ACCELERATION_STRUCTURE_EXTENSION_NAME) &&
                                agfxVkHasExtension(extensions, VK_KHR_RAY_QUERY_EXTENSION_NAME) &&
                                agfxVkHasExtension(extensions, VK_KHR_DEFERRED_HOST_OPERATIONS_EXTENSION_NAME);
+        if (rayTracingSupported) {
+            // Binding 2 of the global set is UPDATE_AFTER_BIND, so extension presence alone isn't
+            // enough -- the optional UAB feature must be there too or the binding flag is invalid.
+            VkPhysicalDeviceAccelerationStructureFeaturesKHR accelFeatures = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ACCELERATION_STRUCTURE_FEATURES_KHR };
+            VkPhysicalDeviceFeatures2 accelQuery = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2 };
+            accelQuery.pNext = &accelFeatures;
+            vkGetPhysicalDeviceFeatures2(candidate, &accelQuery);
+            rayTracingSupported = accelFeatures.accelerationStructure &&
+                                  accelFeatures.descriptorBindingAccelerationStructureUpdateAfterBind;
+        }
         meshShadersSupported = agfxVkHasExtension(extensions, VK_EXT_MESH_SHADER_EXTENSION_NAME);
         return true;
     };
@@ -520,6 +531,7 @@ agfxDevice* agfxDeviceCreate(const agfxDeviceCreateInfo* createInfo)
     enabledRayQueryFeatures.rayQuery = VK_TRUE;
     VkPhysicalDeviceAccelerationStructureFeaturesKHR enabledAccelFeatures = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ACCELERATION_STRUCTURE_FEATURES_KHR };
     enabledAccelFeatures.accelerationStructure = VK_TRUE;
+    enabledAccelFeatures.descriptorBindingAccelerationStructureUpdateAfterBind = VK_TRUE;
     enabledAccelFeatures.pNext = &enabledRayQueryFeatures;
     VkPhysicalDeviceMeshShaderFeaturesEXT enabledMeshFeatures = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MESH_SHADER_FEATURES_EXT };
     enabledMeshFeatures.meshShader = VK_TRUE;
@@ -547,6 +559,7 @@ agfxDevice* agfxDeviceCreate(const agfxDeviceCreateInfo* createInfo)
     enabledFeatures12.descriptorBindingVariableDescriptorCount = VK_TRUE;
     enabledFeatures12.runtimeDescriptorArray = VK_TRUE;
     enabledFeatures12.descriptorBindingUpdateUnusedWhilePending = VK_TRUE;
+    enabledFeatures12.descriptorBindingSampledImageUpdateAfterBind = VK_TRUE;
     enabledFeatures12.bufferDeviceAddress = VK_TRUE;
     enabledFeatures12.timelineSemaphore = VK_TRUE;
     enabledFeatures12.drawIndirectCount = device->supportsMultiDrawIndirect ? VK_TRUE : VK_FALSE;
@@ -730,6 +743,12 @@ void agfxDeviceGetInfo(agfxDevice* device, agfxDeviceInfo* info)
 
 void agfxDeviceMakeResourcesResident(agfxDevice* device)
 {
+}
+
+void agfxDeviceWaitIdle(agfxDevice* device)
+{
+    // Also retires swapchain acquire/present semaphores, which a per-queue fence wait would not.
+    vkDeviceWaitIdle(device->device);
 }
 
 VkInstance agfxNativeGetVkInstance(agfxDevice* device) { return device->instance; }
@@ -1514,7 +1533,12 @@ void agfxCommandBufferTextureBarrier(agfxCommandBuffer* commandBuffer, agfxTextu
     // Transitioning OUT of PRESENT uses UNDEFINED rather than PRESENT_SRC_KHR: a freshly acquired
     // swap chain image has never been presented and is actually in UNDEFINED (claiming otherwise is
     // invalid), and a back buffer's prior contents at the start of a frame are discardable anyway.
-    imageBarrier.oldLayout = (oldState == AGFX_RESOURCE_STATE_PRESENT) ? VK_IMAGE_LAYOUT_UNDEFINED : agfxResourceStateToVkImageLayout(oldState);
+    // COMMON gets the same treatment: the public contract is that textures start in COMMON, but the
+    // VkImage underneath is created in UNDEFINED, and COMMON's GENERAL mapping would claim a layout
+    // the image was never in. The cost is that COMMON -> X discards contents, which is fine as long
+    // as COMMON only ever appears as a texture's initial, never-written state.
+    imageBarrier.oldLayout = (oldState == AGFX_RESOURCE_STATE_PRESENT || oldState == AGFX_RESOURCE_STATE_COMMON)
+        ? VK_IMAGE_LAYOUT_UNDEFINED : agfxResourceStateToVkImageLayout(oldState);
     imageBarrier.newLayout = agfxResourceStateToVkImageLayout(newState);
     imageBarrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
     imageBarrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;

@@ -48,6 +48,13 @@ uint64 UploadQueue::EnqueueTextureUpload(agfx::Texture& texture, uint32 mipLevel
     agfx::TextureRegion region;
     region.SetSize(width, height);
 
+    // The copy contract wants the destination mip in CopyDest; until its first transition a fresh
+    // texture's mips sit in Common. The matching CopyDest -> PixelShaderResource transition happens
+    // on the graphics queue once the upload fence signals (Renderer::EnqueueMipTransition): shader
+    // stages are not valid barrier targets on a transfer queue, and the graphics-side barrier
+    // doubles as the cross-queue visibility sync for the copied data.
+    frame.commandBuffer.TextureBarrier(texture, agfx::ResourceState::Common, agfx::ResourceState::CopyDest, mipLevel, 0);
+
     auto pass = frame.commandBuffer.BeginComputePass("Upload mip");
     pass.CopyBufferToTexture(frame.stagingBuffer, frame.writeOffset, texture, region, mipLevel, 0, bytesPerRow, dataSize);
     pass.End();

@@ -184,6 +184,12 @@ void agfxDeviceGetInfo(agfxDevice* device, agfxDeviceInfo* info);
 /// @note Equivalent of MTLResidencySet.commit. Call to make resources GPU resident
 void agfxDeviceMakeResourcesResident(agfxDevice* device);
 
+/// @brief Blocks until every queue on the device has finished all submitted work.
+/// @param device A pointer to the agfxDevice to drain.
+/// @note Call before destroying resources that may still be referenced by in-flight GPU work,
+///       typically once at shutdown before tearing anything down.
+void agfxDeviceWaitIdle(agfxDevice* device);
+
 /// @brief Creates a new agfxFence for GPU-CPU synchronization.
 /// @param device A pointer to the agfxDevice to create the fence on.
 /// @return A pointer to the newly created agfxFence, or nullptr on failure.

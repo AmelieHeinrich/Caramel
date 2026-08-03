@@ -36,6 +36,7 @@ bool CompileStage(const ParsedShaderSource& source, EShaderStage stage, const St
     // exposes a const pointer, so this cast is safe but required.
     options.sourceCode = const_cast<char*>(source.InlinedSource.CStr());
     options.sourceCodeSize = (uint32)source.InlinedSource.Size();
+    options.dxCompilerPath = "Content/Binaries/Linux/libdxcompiler.so";
 
 #if defined(NDEBUG)
     options.addDebugSymbols = 0;

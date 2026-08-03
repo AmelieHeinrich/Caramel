@@ -35,7 +35,10 @@ private:
     void UpdateTextures(ImDrawData* drawData);
     void UpdateTexture(ImTextureData* tex);
     void DestroyTexture(ImTextureData* tex);
-    void UploadTexture(agfx::Texture& dstTexture, const agfxTextureRegion& region, const void* data, uint32 dataSize, uint32 bytesPerRow, uint32 bytesPerImage);
+    // oldState is the texture's state before the copy: Common for a first upload into a fresh
+    // texture, PixelShaderResource when updating one that is already being sampled. The texture is
+    // left in PixelShaderResource either way.
+    void UploadTexture(agfx::Texture& dstTexture, const agfxTextureRegion& region, const void* data, uint32 dataSize, uint32 bytesPerRow, uint32 bytesPerImage, agfx::ResourceState oldState);
     void FlushUploads();
 
     agfx::Device* m_Device;
@@ -55,6 +58,5 @@ private:
     agfx::CommandBuffer m_UploadCmdBuffer;
     agfx::Fence m_UploadFence;
     uint64 m_UploadFenceValue = 0;
-    agfx::ComputePass m_ActiveUploadPass;
     TArray<agfx::Buffer> m_PendingStagingBuffers;
 };

@@ -25,8 +25,14 @@ agfx::SwapChain NativeHandle::CreateSwapChain(agfx::Device& device,agfxSwapChain
 {
 #if defined(CARAMEL_LINUX)
     agfxLinuxWindowHandle linuxWindowHandle = {};
-    linuxWindowHandle.display = SDL_GetPointerProperty(SDL_GetWindowProperties(m_Window), SDL_PROP_WINDOW_WAYLAND_DISPLAY_POINTER, NULL);
-    linuxWindowHandle.window = (uint64_t)(uintptr_t)SDL_GetPointerProperty(SDL_GetWindowProperties(m_Window), SDL_PROP_WINDOW_WAYLAND_SURFACE_POINTER, NULL);
+    SDL_PropertiesID windowProperties = SDL_GetWindowProperties(m_Window);
+    if (SDL_strcmp(SDL_GetCurrentVideoDriver(), "wayland") == 0) {
+        linuxWindowHandle.display = SDL_GetPointerProperty(windowProperties, SDL_PROP_WINDOW_WAYLAND_DISPLAY_POINTER, NULL);
+        linuxWindowHandle.window = (uint64_t)(uintptr_t)SDL_GetPointerProperty(windowProperties, SDL_PROP_WINDOW_WAYLAND_SURFACE_POINTER, NULL);
+    } else {
+        linuxWindowHandle.display = SDL_GetPointerProperty(windowProperties, SDL_PROP_WINDOW_X11_DISPLAY_POINTER, NULL);
+        linuxWindowHandle.window = (uint64_t)SDL_GetNumberProperty(windowProperties, SDL_PROP_WINDOW_X11_WINDOW_NUMBER, 0);
+    }
     createInfo.handle = &linuxWindowHandle;
 #elif defined(CARAMEL_WINDOWS)
     createInfo.handle = SDL_GetPointerProperty(SDL_GetWindowProperties(m_Window), SDL_PROP_WINDOW_WIN32_HWND_POINTER, NULL);

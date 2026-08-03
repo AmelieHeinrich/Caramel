@@ -22,7 +22,11 @@ Renderer::Renderer(SDL_Window* window)
     s_Instance = this;
 
     agfxDeviceCreateInfo deviceCreateInfo{};
-    deviceCreateInfo.displayServerProtocol = AGFX_DISPLAY_SERVER_PROTOCOL_WAYLAND;
+#if defined(CARAMEL_LINUX)
+    deviceCreateInfo.displayServerProtocol = SDL_strcmp(SDL_GetCurrentVideoDriver(), "wayland") == 0
+        ? AGFX_DISPLAY_SERVER_PROTOCOL_WAYLAND
+        : AGFX_DISPLAY_SERVER_PROTOCOL_X11;
+#endif
     deviceCreateInfo.enableValidation = true;
     deviceCreateInfo.allocate = Allocate;
     deviceCreateInfo.free = Free;
@@ -59,6 +63,7 @@ Renderer::Renderer(SDL_Window* window)
 
 Renderer::~Renderer()
 {
+    m_Device.WaitIdle();
     ShaderServer::Shutdown();
 }
 
@@ -69,10 +74,10 @@ void Renderer::Render()
 
     ShaderServer::Tick();
 
+    int32 width, height;
+    SDL_GetWindowSizeInPixels(m_Window, &width, &height);
     if (m_ResizeNextFrame) {
-        int32 width, height;
-        SDL_GetWindowSizeInPixels(m_Window, &width, &height);
-
+        m_Device.WaitIdle();
         m_SwapChain.Resize(width, height);
         m_ResizeNextFrame = false;
     }
@@ -80,6 +85,12 @@ void Renderer::Render()
     agfx::CommandBuffer& commandBuffer = m_CommandBuffers[m_FrameSlot];
     commandBuffer.Reset();
     commandBuffer.Begin();
+
+    // Mips whose streaming upload finished since last frame: take them from CopyDest to sampleable
+    // before anything in this frame reads them.
+    for (const PendingMipTransition& transition : m_PendingMipTransitions)
+        agfxCommandBufferTextureBarrier(commandBuffer, transition.texture, AGFX_RESOURCE_STATE_COPY_DEST, AGFX_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, transition.mip, 0, 1);
+    m_PendingMipTransitions.Clear();
 
     agfx::Texture backBuffer = m_SwapChain.AcquireNextTexture();
     commandBuffer.TextureBarrier(backBuffer, agfx::ResourceState::Present, agfx::ResourceState::RenderTarget);
@@ -98,11 +109,11 @@ void Renderer::Render()
     renderPassCreateInfo.colorAttachments[0].clearColor[2] = 0.1f;
     renderPassCreateInfo.colorAttachments[0].clearColor[3] = 1.0f;
     renderPassCreateInfo.name = "Main Render Pass";
+    renderPassCreateInfo.width = width;
+    renderPassCreateInfo.height = height;
 
     agfx::RenderPass renderPass = commandBuffer.BeginRenderPass(renderPassCreateInfo);
 
-    int32 width, height;
-    SDL_GetWindowSizeInPixels(m_Window, &width, &height);
     m_ImGuiRenderer->RenderDrawData(ImGui::GetDrawData(), renderPass, (uint32)width, (uint32)height, (uint32)m_FrameSlot);
 
     renderPass.End();
@@ -119,6 +130,11 @@ void Renderer::Render()
 void Renderer::Resize()
 {
     m_ResizeNextFrame = true;
+}
+
+void Renderer::EnqueueMipTransition(agfx::Texture& texture, uint32 mip)
+{
+    m_PendingMipTransitions.PushBack({ texture, mip });
 }
 
 void* Renderer::Allocate(uint64 size)
