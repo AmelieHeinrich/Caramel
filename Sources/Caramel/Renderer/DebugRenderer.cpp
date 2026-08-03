@@ -126,14 +126,15 @@ DebugRenderer::DebugRenderer(agfx::Device& device, agfx::TextureFormat colorForm
     s_Instance = this;
 
     // Two templates, identical apart from depth state. Nothing is culled (debug shapes are viewed
-    // from every side) and everything alpha blends. Depth writes stay off even in the depth-tested
-    // pass: debug geometry should never affect anything drawn after it, and translucent fills
-    // overlapping each other look far worse with writes on.
+    // from every side) and everything alpha blends. The depth-tested pass writes depth too, so
+    // overlapping debug shapes occlude each other correctly instead of just painting in draw
+    // order; nothing runs after this pass that reads the depth buffer, so there's nothing for the
+    // writes to corrupt.
     agfx::RenderPipelineCreateInfo depthPipelineInfo;
     depthPipelineInfo.SetName("Debug Draw Pipeline (Depth Tested)")
                      .SetCullMode(agfx::CullMode::None)
                      .SetTopology(agfx::Topology::Triangles)
-                     .SetDepthState(true, false, agfx::ComparisonFunction::Less)
+                     .SetDepthState(true, true, agfx::ComparisonFunction::Less)
                      .SetDepthFormat(depthFormat)
                      .AddColorAttachment(colorFormat)
                      .SetAlphaBlend();
