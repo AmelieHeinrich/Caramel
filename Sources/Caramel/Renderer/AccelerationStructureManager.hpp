@@ -8,6 +8,7 @@
 
 #include <Caramel/Core/Common.hpp>
 #include <Caramel/Renderer/Common.hpp>
+#include <Caramel/Renderer/RenderGraph/RenderGraph.hpp>
 #include <Caramel/Scene/RenderInstance.hpp>
 
 #include <AGFX/agfx.hpp>
@@ -24,9 +25,22 @@ public:
 
     bool IsSupported() const { return m_RayTracingSupported; }
 
+    // Also reads back frameSlot's timing query pool from its last use, if any -- see
+    // RenderGraph::Execute's computeQueryPool param and SetLastTimedPassNames below. Safe here
+    // because the fence wait this performs is exactly what proves that prior ResolveQueryPool is done.
     void WaitForFrameSlot(uint64 frameSlot);
     agfx::CommandBuffer& GetFrameCommandBuffer(uint64 frameSlot);
     void Submit(agfx::CommandBuffer& commandBuffer, uint64 frameSlot);
+
+    agfx::QueryPool& GetTimingQueryPool(uint64 frameSlot) { return m_TimingQueryPools[frameSlot]; }
+    // Called after RenderGraph::Execute() records this frame's compute-queue timestamps into
+    // frameSlot's pool, so the next WaitForFrameSlot(frameSlot) knows which pass produced which query.
+    void SetLastTimedPassNames(uint64 frameSlot, const TArray<String>& names)
+    {
+        m_TimingSlotNames[frameSlot] = names;
+        m_TimingSlotHasData[frameSlot] = true;
+    }
+    const TArray<RGPassTiming>& GetLastPassTimings() const { return m_LastPassTimings; }
 
     // CPU-only: decides which models need a BLAS this frame. Call before recording anything.
     void ScanForNewlyResidentModels(const TArray<RenderInstance>& renderInstances);
@@ -59,6 +73,11 @@ private:
     uint64 m_FenceValue = 0;
     uint64 m_FenceFrameSlots[FRAMES_IN_FLIGHT] = {};
     agfx::CommandBuffer m_CommandBuffers[FRAMES_IN_FLIGHT];
+
+    agfx::QueryPool m_TimingQueryPools[FRAMES_IN_FLIGHT];
+    TArray<String> m_TimingSlotNames[FRAMES_IN_FLIGHT];
+    bool m_TimingSlotHasData[FRAMES_IN_FLIGHT] = {};
+    TArray<RGPassTiming> m_LastPassTimings;
 
     TDictionary<StreamingModel*, BLASEntry> m_BLASEntries;
 

@@ -22,6 +22,7 @@
 #include <Caramel/Editor/InspectorPanel.hpp>
 #include <Caramel/Editor/ContentDrawerPanel.hpp>
 #include <Caramel/Editor/RenderGraphPanel.hpp>
+#include <Caramel/Editor/GpuTimingPanel.hpp>
 
 #include <SDL3/SDL.h>
 #include <imgui.h>
@@ -91,11 +92,13 @@ private:
     InspectorPanel m_InspectorPanel;
     ContentDrawerPanel m_ContentDrawerPanel;
     RenderGraphPanel m_RenderGraphPanel;
+    GpuTimingPanel m_GpuTimingPanel;
 
     agfxDeviceInfo m_DeviceInfo;
 
     bool m_ShowColliders = false;
     bool m_ShowRenderGraphPanel = false;
+    bool m_ShowGpuTimingPanel = false;
 
     std::mutex m_FileDialogMutex;
     String m_PendingDialogPath;

@@ -9,7 +9,6 @@
 #include <Caramel/Core/Common.hpp>
 #include <Caramel/Renderer/Common.hpp>
 #include <Caramel/Renderer/Camera.hpp>
-#include <Caramel/Renderer/MaterialScheme.hpp>
 #include <Caramel/Scene/GPUScene.hpp>
 
 #include <AGFX/agfx.hpp>
@@ -17,9 +16,9 @@
 class SceneRenderer
 {
 public:
-    SceneRenderer(agfx::Device& device, uint32 framesInFlight);
+    SceneRenderer(agfx::Device& device, agfx::TextureFormat colorFormat, agfx::TextureFormat depthFormat, uint32 framesInFlight);
 
-    void Render(agfx::RenderPass& renderPass, GPUScene& gpuScene, const SchemeRegistry& schemes,
+    void Render(agfx::RenderPass& renderPass, GPUScene& gpuScene,
                 const Camera& camera, uint32 width, uint32 height, uint32 frameIndex);
 
 private:

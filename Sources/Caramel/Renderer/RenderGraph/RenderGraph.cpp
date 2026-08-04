@@ -404,12 +404,14 @@ agfx::RenderTarget& RenderGraph::ResolveRenderTargetInternal(uint32 textureIndex
     return inserted->second;
 }
 
-void RenderGraph::Execute(agfx::CommandBuffer& commandBuffer)
+void RenderGraph::Execute(agfx::CommandBuffer& commandBuffer, agfx::QueryPool* graphicsQueryPool, agfx::QueryPool* computeQueryPool)
 {
     // The Graphics queue always uses the caller's directly-passed command buffer, whether or not it
     // was also registered via SetQueueCommandBuffer -- keeps every single-queue caller (every real
     // pass today) unaffected by the multi-queue plumbing below.
     m_QueueCommandBuffers[(uint8)RGQueue::Graphics] = &commandBuffer;
+    m_TimedPassNames.Clear();
+    m_TimedComputePassNames.Clear();
 
     for (uint32 i = 0; i < m_Passes.Size(); ++i) {
         RGPass& pass = m_Passes[i];
@@ -422,6 +424,17 @@ void RenderGraph::Execute(agfx::CommandBuffer& commandBuffer)
             EmitBarrier(queueCommandBuffer, op);
 
         RGResolveContext ctx(*this, i);
+
+        // Each QueryPool's timestamp frequency is pinned to the queue it was created against (see
+        // agfx::Device::CreateQueryPool), so a pass can only be timed by the pool matching its own
+        // queue -- Transfer passes have no pool today and are never timed.
+        agfx::QueryPool* queryPool = pass.queue == RGQueue::Graphics ? graphicsQueryPool
+            : pass.queue == RGQueue::Compute ? computeQueryPool : nullptr;
+        TArray<String>& timedNames = pass.queue == RGQueue::Compute ? m_TimedComputePassNames : m_TimedPassNames;
+        bool timed = queryPool && timedNames.Size() < kMaxTimedPasses;
+        uint32 queryIndex = (uint32)timedNames.Size();
+        if (timed)
+            queueCommandBuffer.WriteTimestamp(*queryPool, queryIndex * 2);
 
         if (pass.isAttachmentPass) {
             agfx::RenderPassCreateInfo passInfo{};
@@ -456,6 +469,11 @@ void RenderGraph::Execute(agfx::CommandBuffer& commandBuffer)
         } else {
             pass.genericExecute(queueCommandBuffer, ctx);
         }
+
+        if (timed) {
+            queueCommandBuffer.WriteTimestamp(*queryPool, queryIndex * 2 + 1);
+            timedNames.PushBack(pass.name);
+        }
     }
 
     // Trailing barriers (externally-read resources, e.g. scene-color/backbuffer) always run on the
@@ -463,6 +481,11 @@ void RenderGraph::Execute(agfx::CommandBuffer& commandBuffer)
     // graphics timeline (ImGui next frame, present), and dormant multi-queue passes don't change that.
     for (const RGBarrierOp& op : m_TrailingBarriers)
         EmitBarrier(commandBuffer, op);
+
+    if (graphicsQueryPool && !m_TimedPassNames.IsEmpty())
+        commandBuffer.ResolveQueryPool(*graphicsQueryPool, 0, (uint32)m_TimedPassNames.Size() * 2);
+    if (computeQueryPool && !m_TimedComputePassNames.IsEmpty())
+        ResolveQueueCommandBuffer(RGQueue::Compute).ResolveQueryPool(*computeQueryPool, 0, (uint32)m_TimedComputePassNames.Size() * 2);
 }
 
 void RenderGraph::PopulateDebugInfo()

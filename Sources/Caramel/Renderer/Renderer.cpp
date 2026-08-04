@@ -61,9 +61,11 @@ Renderer::Renderer(SDL_Window* window, bool vsync)
 
     m_SwapChain = m_NativeHandle->CreateSwapChain(m_Device, swapChainCreateInfo);
 
+    agfx::QueryPoolCreateInfo timingQueryPoolInfo = agfx::QueryPoolCreateInfo().SetCount(RenderGraph::kMaxTimedPasses * 2);
     for (uint64 i = 0; i < FRAMES_IN_FLIGHT; ++i) {
         m_FenceFrameSlots[i] = 0;
         m_CommandBuffers[i] = m_Device.CreateCommandBuffer(m_CommandQueue);
+        m_TimingQueryPools[i] = m_Device.CreateQueryPool(m_CommandQueue, timingQueryPoolInfo);
     }
 
     CreateDepthTexture(m_ViewportWidth, m_ViewportHeight);
@@ -77,7 +79,7 @@ Renderer::Renderer(SDL_Window* window, bool vsync)
 
     m_GPUScene.Init(m_Device, m_SchemeRegistry, (uint32)FRAMES_IN_FLIGHT);
     m_ImGuiRenderer = MakeUnique<ImGuiRenderer>(m_Device, m_CommandQueue, m_SwapChain.GetFormat(), (uint32)FRAMES_IN_FLIGHT);
-    m_SceneRenderer = MakeUnique<SceneRenderer>(m_Device, (uint32)FRAMES_IN_FLIGHT);
+    m_SceneRenderer = MakeUnique<SceneRenderer>(m_Device, m_SwapChain.GetFormat(), kDepthFormat, (uint32)FRAMES_IN_FLIGHT);
     m_DebugRenderer = MakeUnique<DebugRenderer>(m_Device, m_SwapChain.GetFormat(), kDepthFormat, (uint32)FRAMES_IN_FLIGHT);
     m_AccelStructManager = MakeUnique<AccelerationStructureManager>(m_Device);
 
@@ -162,6 +164,20 @@ void Renderer::Render(const Camera& camera, StreamingManager& streamingManager, 
     m_FrameSlot = (uint32_t)(m_FenceValue % FRAMES_IN_FLIGHT);
     m_Fence.Wait(m_FenceFrameSlots[m_FrameSlot]);
 
+    // The wait above already proves this slot's last Execute() (including its ResolveQueryPool) is
+    // done, so it's safe to read the timestamps it wrote before this frame overwrites them below.
+    if (m_TimingSlotHasData[m_FrameSlot] && !m_TimingSlotNames[m_FrameSlot].IsEmpty()) {
+        uint32 count = (uint32)m_TimingSlotNames[m_FrameSlot].Size();
+        uint64 timestamps[RenderGraph::kMaxTimedPasses * 2];
+        m_TimingQueryPools[m_FrameSlot].Readback(0, count * 2, timestamps);
+
+        m_LastPassTimings.Clear();
+        for (uint32 i = 0; i < count; ++i) {
+            float gpuTimeMs = (float)(timestamps[i * 2 + 1] - timestamps[i * 2]) / 1000000.0f;
+            m_LastPassTimings.PushBack({ m_TimingSlotNames[m_FrameSlot][i], gpuTimeMs });
+        }
+    }
+
     ShaderServer::Tick();
 
     m_GPUScene.Build(streamingManager, renderInstances, (uint32)m_FrameSlot);
@@ -213,7 +229,7 @@ void Renderer::Render(const Camera& camera, StreamingManager& streamingManager, 
             builder.SetDepthAttachment(depthAttachment);
         },
         [&](agfx::RenderPass& pass, RGResolveContext&) {
-            m_SceneRenderer->Render(pass, m_GPUScene, m_SchemeRegistry, camera, m_ViewportWidth, m_ViewportHeight, (uint32)m_FrameSlot);
+            m_SceneRenderer->Render(pass, m_GPUScene, camera, m_ViewportWidth, m_ViewportHeight, (uint32)m_FrameSlot);
         });
 
     graph.AddPass("Debug Draw",
@@ -250,9 +266,11 @@ void Renderer::Render(const Camera& camera, StreamingManager& streamingManager, 
         });
 
     agfx::CommandBuffer* computeCommandBuffer = nullptr;
+    agfx::QueryPool* computeQueryPool = nullptr;
     if (m_AccelStructManager->IsSupported()) {
         m_AccelStructManager->WaitForFrameSlot(m_FrameSlot);
         computeCommandBuffer = &m_AccelStructManager->GetFrameCommandBuffer(m_FrameSlot);
+        computeQueryPool = &m_AccelStructManager->GetTimingQueryPool(m_FrameSlot);
         computeCommandBuffer->Reset();
         computeCommandBuffer->Begin();
         graph.SetQueueCommandBuffer(RGQueue::Compute, computeCommandBuffer);
@@ -268,11 +286,15 @@ void Renderer::Render(const Camera& camera, StreamingManager& streamingManager, 
     }
 
     graph.Compile();
-    graph.Execute(commandBuffer);
+    graph.Execute(commandBuffer, &m_TimingQueryPools[m_FrameSlot], computeQueryPool);
 
     SetImportedState(m_SceneColorTexture.Get(), graph.GetFinalState(sceneColorHandle));
     SetImportedState(m_DepthTexture.Get(), graph.GetFinalState(depthHandle));
     m_LastGraphDebugInfo = graph.GetDebugInfo();
+    m_TimingSlotNames[m_FrameSlot] = graph.GetTimedPassNames();
+    m_TimingSlotHasData[m_FrameSlot] = true;
+    if (computeCommandBuffer)
+        m_AccelStructManager->SetLastTimedPassNames(m_FrameSlot, graph.GetTimedComputePassNames());
 
     if (computeCommandBuffer) {
         computeCommandBuffer->End();

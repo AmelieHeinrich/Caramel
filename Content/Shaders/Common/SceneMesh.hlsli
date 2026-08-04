@@ -64,6 +64,7 @@ struct VSOut {
     nointerpolation uint uMaterialSlot : TEXCOORD1;
     float3 vWorldPosition : TEXCOORD2;
     float4 vWorldTangent : TEXCOORD3; // xyz = world-space tangent, w = handedness (passthrough)
+    nointerpolation uint uMeshletID : TEXCOORD4; // index into the instance's meshlet buffer (SV_GroupID.x)
 };
 
 // Loads the material of the pixel being shaded. Every scheme's pixel shader starts with this.
@@ -126,6 +127,7 @@ void SceneMS(
         o.uMaterialSlot = instance.uMaterialSlot;
         o.vWorldPosition = worldPosition.xyz;
         o.vWorldTangent = float4(mul((float3x3)mModel, vertex.vTangent.xyz), vertex.vTangent.w);
+        o.uMeshletID = uGroupID.x;
         outVertices[v] = o;
     }
 

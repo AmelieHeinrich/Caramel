@@ -30,10 +30,12 @@ AccelerationStructureManager::AccelerationStructureManager(agfx::Device& device)
     m_ComputeQueue = device.CreateCommandQueue(agfx::CommandQueueType::Compute);
     m_Fence = device.CreateFence();
 
+    agfx::QueryPoolCreateInfo timingQueryPoolInfo = agfx::QueryPoolCreateInfo().SetCount(RenderGraph::kMaxTimedPasses * 2);
     for (uint64 i = 0; i < FRAMES_IN_FLIGHT; ++i)
     {
         m_FenceFrameSlots[i] = 0;
         m_CommandBuffers[i] = device.CreateCommandBuffer(m_ComputeQueue);
+        m_TimingQueryPools[i] = device.CreateQueryPool(m_ComputeQueue, timingQueryPoolInfo);
     }
 
     EnsureTLASCapacity(m_MaxInstanceCount);
@@ -61,6 +63,20 @@ void AccelerationStructureManager::WaitForFrameSlot(uint64 frameSlot)
     if (!m_RayTracingSupported)
         return;
     m_Fence.Wait(m_FenceFrameSlots[frameSlot]);
+
+    if (m_TimingSlotHasData[frameSlot] && !m_TimingSlotNames[frameSlot].IsEmpty())
+    {
+        uint32 count = (uint32)m_TimingSlotNames[frameSlot].Size();
+        uint64 timestamps[RenderGraph::kMaxTimedPasses * 2];
+        m_TimingQueryPools[frameSlot].Readback(0, count * 2, timestamps);
+
+        m_LastPassTimings.Clear();
+        for (uint32 i = 0; i < count; ++i)
+        {
+            float gpuTimeMs = (float)(timestamps[i * 2 + 1] - timestamps[i * 2]) / 1000000.0f;
+            m_LastPassTimings.PushBack({ m_TimingSlotNames[frameSlot][i], gpuTimeMs });
+        }
+    }
 }
 
 agfx::CommandBuffer& AccelerationStructureManager::GetFrameCommandBuffer(uint64 frameSlot)

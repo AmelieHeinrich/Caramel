@@ -49,6 +49,17 @@ public:
     const GPUScene& GetGPUScene() const { return m_GPUScene; }
 
     const RenderGraphDebugInfo& GetLastGraphDebugInfo() const { return m_LastGraphDebugInfo; }
+    const TArray<RGPassTiming>& GetLastPassTimings() const { return m_LastPassTimings; }
+    // Graphics-queue total only -- Compute runs async on its own timeline (see
+    // AccelerationStructureManager::GetLastPassTimings) and doesn't block presentation the same way,
+    // so summing it in here would overstate what actually gates frame pacing.
+    float GetLastGpuFrameTimeMs() const
+    {
+        float total = 0.0f;
+        for (const RGPassTiming& timing : m_LastPassTimings)
+            total += timing.gpuTimeMs;
+        return total;
+    }
     const AccelerationStructureManager& GetAccelStructManager() const { return *m_AccelStructManager; }
 
     static Renderer& Get() { return *s_Instance; }
@@ -72,6 +83,14 @@ private:
     uint64 m_FrameSlot;
     uint64 m_FenceFrameSlots[FRAMES_IN_FLIGHT];
     agfx::CommandBuffer m_CommandBuffers[FRAMES_IN_FLIGHT];
+
+    // One QueryPool per frame-in-flight slot so a slot's in-flight GPU writes never overlap with its
+    // own CPU-side readback -- readback for slot S is safe exactly when the fence wait at the top of
+    // Render() for slot S has passed, since that's the same wait guarding m_CommandBuffers[S] reuse.
+    agfx::QueryPool m_TimingQueryPools[FRAMES_IN_FLIGHT];
+    TArray<String> m_TimingSlotNames[FRAMES_IN_FLIGHT];
+    bool m_TimingSlotHasData[FRAMES_IN_FLIGHT] = {};
+    TArray<RGPassTiming> m_LastPassTimings;
 
     // A single shared set is correct across frames in flight: AGFX's Metal barriers are queue-scoped
     // (barrierAfterQueueStages), so the PixelShaderResource -> RenderTarget transition below orders

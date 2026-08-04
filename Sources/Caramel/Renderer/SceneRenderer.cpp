@@ -12,6 +12,8 @@
 
 namespace
 {
+    constexpr const char* kDebugMeshletIDShaderPath = "Content/Shaders/DebugMeshletID.hlsl";
+
     struct FrameConstants
     {
         glm::mat4 viewProj;
@@ -19,7 +21,9 @@ namespace
         float pad;
     };
 
-    // Mirrors ScenePushConstants in Content/Shaders/Common/SceneMesh.hlsli.
+    // Mirrors ScenePushConstants in Content/Shaders/Common/SceneMesh.hlsli. The material/scheme
+    // fields are unused by the debug pipeline but kept so the struct still matches the shared
+    // shader header used by the (currently unwired) material schemes.
     struct ScenePushConstants
     {
         uint32 rFrameConstants;
@@ -32,7 +36,7 @@ namespace
     };
 }
 
-SceneRenderer::SceneRenderer(agfx::Device& device, uint32 framesInFlight)
+SceneRenderer::SceneRenderer(agfx::Device& device, agfx::TextureFormat colorFormat, agfx::TextureFormat depthFormat, uint32 framesInFlight)
     : m_Device(&device)
 {
     agfx::SamplerCreateInfo samplerInfo;
@@ -41,6 +45,16 @@ SceneRenderer::SceneRenderer(agfx::Device& device, uint32 framesInFlight)
                .SetComparisonFunction(agfx::ComparisonFunction::Always)
                .SetLodRange(0.0f, 16.0f);
     m_Sampler = m_Device->CreateSampler(samplerInfo);
+
+    agfx::RenderPipelineCreateInfo debugPipelineInfo;
+    debugPipelineInfo.SetName("Scene Debug Meshlet ID Pipeline")
+                     .SetCullMode(agfx::CullMode::None)
+                     .SetFrontFace(agfx::FrontFace::CounterClockwise)
+                     .SetTopology(agfx::Topology::Triangles)
+                     .SetDepthState(true, true, agfx::ComparisonFunction::Less)
+                     .SetDepthFormat(depthFormat)
+                     .AddColorAttachment(colorFormat);
+    ShaderServer::RegisterRenderPipeline(debugPipelineInfo, kDebugMeshletIDShaderPath);
 
     for (uint32 i = 0; i < framesInFlight; ++i)
     {
@@ -55,11 +69,15 @@ SceneRenderer::SceneRenderer(agfx::Device& device, uint32 framesInFlight)
     }
 }
 
-void SceneRenderer::Render(agfx::RenderPass& renderPass, GPUScene& gpuScene, const SchemeRegistry& schemes,
+void SceneRenderer::Render(agfx::RenderPass& renderPass, GPUScene& gpuScene,
                            const Camera& camera, uint32 width, uint32 height, uint32 frameIndex)
 {
-    const TArray<SchemeBucket>& buckets = gpuScene.GetBuckets();
-    if (buckets.IsEmpty())
+    const TArray<GPUDraw>& draws = gpuScene.GetDraws();
+    if (draws.IsEmpty())
+        return;
+
+    agfx::RenderPipeline* pipeline = ShaderServer::GetPipeline(kDebugMeshletIDShaderPath, {});
+    if (!pipeline)
         return;
 
     {
@@ -72,41 +90,20 @@ void SceneRenderer::Render(agfx::RenderPass& renderPass, GPUScene& gpuScene, con
 
     renderPass.SetViewport(0.0f, 0.0f, (float)width, (float)height);
     renderPass.SetScissor(0, 0, width, height);
+    renderPass.SetPipeline(*pipeline);
 
     ScenePushConstants pc{};
     pc.rFrameConstants = (uint32)m_CameraBufferViews[frameIndex].GetHandle();
     pc.rInstanceBuffer = (uint32)gpuScene.GetInstanceBufferView(frameIndex).GetHandle();
     pc.rMaterialBuffer = (uint32)gpuScene.GetMaterialBufferView(frameIndex).GetHandle();
+    pc.rSchemeParams = 0u;
     pc.rSampler = (uint32)m_Sampler.GetHandle();
     pc.rFallbackTexture = gpuScene.GetFallbackTextureHandle();
 
-    const TArray<MaterialBatch>& batches = gpuScene.GetBatches();
-    const TArray<GPUDraw>& draws = gpuScene.GetDraws();
-
-    for (const SchemeBucket& bucket : buckets)
+    for (const GPUDraw& draw : draws)
     {
-        const MaterialScheme& scheme = schemes.Get(bucket.schemeId);
-
-        agfx::RenderPipeline* pipeline = ShaderServer::GetPipeline(scheme.shaderPath, {});
-        if (!pipeline)
-            continue;
-
-        renderPass.SetPipeline(*pipeline);
-
-        pc.rSchemeParams = scheme.paramStride > 0
-            ? (uint32)gpuScene.GetSchemeParamBufferView(bucket.schemeId, frameIndex).GetHandle()
-            : 0u;
-
-        for (uint32 b = bucket.firstBatch; b < bucket.firstBatch + bucket.batchCount; ++b)
-        {
-            const MaterialBatch& batch = batches[b];
-
-            for (uint32 d = batch.firstDraw; d < batch.firstDraw + batch.drawCount; ++d)
-            {
-                pc.uInstanceIndex = draws[d].instanceIndex;
-                renderPass.PushConstants(pc);
-                renderPass.DrawMesh(draws[d].meshletCount, 1, 1);
-            }
-        }
+        pc.uInstanceIndex = draw.instanceIndex;
+        renderPass.PushConstants(pc);
+        renderPass.DrawMesh(draw.meshletCount, 1, 1);
     }
 }

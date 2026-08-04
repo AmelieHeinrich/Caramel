@@ -181,6 +181,8 @@ void Application::Run()
         m_ContentDrawerPanel.Draw();
         if (m_ShowRenderGraphPanel)
             m_RenderGraphPanel.Draw(m_EditorContext, *m_Renderer);
+        if (m_ShowGpuTimingPanel)
+            m_GpuTimingPanel.Draw(*m_Renderer);
         ImGui::Render();
 
         renderInstances = m_Scene.BuildRenderInstances(*m_StreamingManager);
@@ -238,6 +240,7 @@ void Application::DrawMainMenuBar()
 
         ImGui::Separator();
         ImGui::MenuItem(ICON_FA_DIAGRAM_PROJECT " Resource Dependency Viewer", nullptr, &m_ShowRenderGraphPanel);
+        ImGui::MenuItem(ICON_FA_STOPWATCH " GPU Timings", nullptr, &m_ShowGpuTimingPanel);
 
         ImGui::EndMenu();
     }

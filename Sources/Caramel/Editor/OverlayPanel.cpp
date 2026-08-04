@@ -70,6 +70,12 @@ void OverlayPanel::Draw(EditorContext& context, StreamingManager& streaming, SDL
 
     EditorTheme::SectionHeader("Frame");
     if (BeginStatBlock("OverlayFrame")) {
+        // CPU is the wall-clock time of the last full Application::Run() iteration (ImGui's own
+        // per-frame delta, includes any GPU fence wait) -- GPU is the graphics-queue render graph
+        // total from RenderGraph's timestamp queries, see Renderer::GetLastGpuFrameTimeMs.
+        EditorTheme::StatRow("CPU Frame", "%.2f ms", ImGui::GetIO().DeltaTime * 1000.0f);
+        EditorTheme::StatRow("GPU Frame", "%.2f ms", Renderer::Get().GetLastGpuFrameTimeMs());
+
         EditorTheme::StatRow("Viewport", "%dx%d", (int)context.ViewportRectSize.x, (int)context.ViewportRectSize.y);
 
         int windowWidth = 0, windowHeight = 0;

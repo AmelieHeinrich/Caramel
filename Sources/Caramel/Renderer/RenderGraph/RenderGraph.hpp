@@ -112,6 +112,11 @@ public:
     // omit it to force every transient resource to committed allocation, e.g. for isolated tests.
     explicit RenderGraph(agfx::Device& device, RenderGraphAllocator* allocator = nullptr);
 
+    // Graphics-queue passes only, timestamped in a caller-owned, frame-in-flight-sized QueryPool --
+    // see Renderer::m_TimingQueryPools for why the pool itself can't live here (it must persist
+    // across frames, RenderGraph doesn't).
+    static constexpr uint32 kMaxTimedPasses = 32;
+
     RGTextureHandle ImportTexture(const char* name, agfx::Texture& texture, agfx::ResourceState currentState, RGQueue currentQueue = RGQueue::Graphics);
     RGTextureHandle CreateTexture(const char* name, const agfx::TextureCreateInfo& info);
     RGBufferHandle ImportBuffer(const char* name, agfx::Buffer& buffer, agfx::ResourceState currentState, RGQueue currentQueue = RGQueue::Graphics);
@@ -142,7 +147,17 @@ public:
     const TArray<RGCrossQueueEdge>& GetCrossQueueEdges() const { return m_CrossQueueEdges; }
 
     void Compile();
-    void Execute(agfx::CommandBuffer& commandBuffer);
+    // Both query pools are optional and independent: pass one to bracket every kept pass on that
+    // queue with GPU timestamps (resolved into the pool once, after all passes on that queue) --
+    // omit either to skip timing that queue. Each pool must have been created against that queue
+    // (its timestamp frequency is queue-pinned, see agfx::Device::CreateQueryPool) and sized at least
+    // kMaxTimedPasses * 2.
+    void Execute(agfx::CommandBuffer& commandBuffer, agfx::QueryPool* graphicsQueryPool = nullptr, agfx::QueryPool* computeQueryPool = nullptr);
+
+    // Names of the passes actually timestamped this Execute(), in query-pair order (pass N's
+    // timestamps are at indices 2N/2N+1) -- empty if Execute() was called without that queue's pool.
+    const TArray<String>& GetTimedPassNames() const { return m_TimedPassNames; }
+    const TArray<String>& GetTimedComputePassNames() const { return m_TimedComputePassNames; }
 
     // Final state of an imported resource after Execute(), for the caller's cross-frame state cache
     // (imported resources are re-declared fresh every frame, but their physical GPU state persists).
@@ -165,6 +180,8 @@ private:
     TArray<RGPass> m_Passes;
     TArray<RGBarrierOp> m_TrailingBarriers;
     TArray<RGCrossQueueEdge> m_CrossQueueEdges;
+    TArray<String> m_TimedPassNames;
+    TArray<String> m_TimedComputePassNames;
 
     TDictionary<uint8, agfx::CommandBuffer*> m_QueueCommandBuffers;
 

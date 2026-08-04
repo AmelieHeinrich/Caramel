@@ -56,3 +56,12 @@ struct RenderGraphDebugInfo
     TArray<RGDebugResourceInfo> resources;
     TArray<RGDebugEdgeInfo> edges;
 };
+
+// One entry per pass timed by RenderGraph::Execute() last time its queue's frame-in-flight slot was
+// read back -- see Renderer::GetLastPassTimings() (Graphics) and
+// AccelerationStructureManager::GetLastPassTimings() (Compute).
+struct RGPassTiming
+{
+    String name;
+    float gpuTimeMs = 0.0f;
+};
