@@ -8,3 +8,7 @@ target("Jolt")
     set_kind("static")
     add_files("**.cpp")
     add_defines("JPH_DEBUG_RENDERER", { public = true })
+
+    if is_plat("macosx") then
+        add_frameworks("Foundation")
+    end

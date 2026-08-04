@@ -169,6 +169,9 @@ ImGuiRenderer::ImGuiRenderer(agfx::Device& device, agfx::CommandQueue& queue, ag
     io.BackendFlags |= ImGuiBackendFlags_RendererHasTextures;
 
     io.FontDefault = io.Fonts->AddFontFromFileTTF("Content/Fonts/Ubuntu-Regular.ttf", 17.0f);
+#if defined(CARAMEL_MACOS)
+    io.FontGlobalScale = 0.75f;
+#endif
 
     static const ImWchar kIconRanges[] = { ICON_MIN_FA, ICON_MAX_FA, 0 };
     ImFontConfig iconConfig;

@@ -48,7 +48,7 @@ Semaphore::~Semaphore()
 #elif defined(JPH_USE_PTHREADS)
 	sem_destroy(&mSemaphore);
 #elif defined(JPH_USE_GRAND_CENTRAL_DISPATCH)
-	dispatch_release(mSemaphore);
+	// ARC
 #elif defined(JPH_PLATFORM_BLUE)
 	JPH_PLATFORM_BLUE_SEMAPHORE_DESTROY(mSemaphore);
 #endif
@@ -70,8 +70,7 @@ void Semaphore::Release(uint inNumber)
 		for (int i = 0; i < num_to_release; ++i)
 			sem_post(&mSemaphore);
 	#elif defined(JPH_USE_GRAND_CENTRAL_DISPATCH)
-		for (int i = 0; i < num_to_release; ++i)
-			dispatch_semaphore_signal(mSemaphore);
+		// ARC
 	#elif defined(JPH_PLATFORM_BLUE)
 		JPH_PLATFORM_BLUE_SEMAPHORE_SIGNAL(mSemaphore, num_to_release);
 	#endif
@@ -103,8 +102,7 @@ void Semaphore::Acquire(uint inNumber)
 		for (int i = 0; i < num_to_acquire; ++i)
 			sem_wait(&mSemaphore);
 	#elif defined(JPH_USE_GRAND_CENTRAL_DISPATCH)
-		for (int i = 0; i < num_to_acquire; ++i)
-			dispatch_semaphore_wait(mSemaphore, DISPATCH_TIME_FOREVER);
+		// ARC
 	#elif defined(JPH_PLATFORM_BLUE)
 		JPH_PLATFORM_BLUE_SEMAPHORE_WAIT(mSemaphore, num_to_acquire);
 	#endif

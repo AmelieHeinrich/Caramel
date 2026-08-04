@@ -1,4 +1,5 @@
 Basics
+- Simple scripting
 - Render graph
 - BLAS/TLAS building (async compute)
 
