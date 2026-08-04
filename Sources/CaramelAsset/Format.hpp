@@ -17,7 +17,7 @@ namespace CaramelAsset
 {
     constexpr uint32 kCmdlMagic = 0x4C444D43;
     constexpr uint32 kCtexMagic = 0x58455443;
-    constexpr uint32 kFormatVersion = 1;
+    constexpr uint32 kFormatVersion = 2;
 
     constexpr uint32 kLodCount = 5;
     constexpr uint32 kMeshletMaxVertices = 64;

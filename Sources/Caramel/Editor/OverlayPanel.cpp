@@ -10,6 +10,7 @@
 #include <Caramel/Editor/EditorTheme.hpp>
 #include <Caramel/Asset/StreamingManager.hpp>
 #include <Caramel/Renderer/Renderer.hpp>
+#include <Caramel/Renderer/AccelerationStructureManager.hpp>
 
 #include <AGFX/agfx.hpp>
 
@@ -55,6 +56,16 @@ void OverlayPanel::Draw(EditorContext& context, StreamingManager& streaming, SDL
         EditorTheme::StatRow("Raytracing", "%s", deviceInfo.supportsRayTracing ? "Yes" : "No");
         EditorTheme::StatRow("Mesh shaders", "%s", deviceInfo.supportsMeshShaders ? "Yes" : "No");
         ImGui::EndTable();
+    }
+
+    if (deviceInfo.supportsRayTracing) {
+        const AccelerationStructureManager& accel = Renderer::Get().GetAccelStructManager();
+        EditorTheme::SectionHeader("Acceleration Structures");
+        if (BeginStatBlock("OverlayAccelStruct")) {
+            EditorTheme::StatRow("BLAS built", "%d / %d", (int)accel.GetReadyBLASCount(), (int)accel.GetTrackedModelCount());
+            EditorTheme::StatRow("TLAS instances", "%d", (int)accel.GetLastTLASInstanceCount());
+            ImGui::EndTable();
+        }
     }
 
     EditorTheme::SectionHeader("Frame");

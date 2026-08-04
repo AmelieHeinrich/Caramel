@@ -18,6 +18,7 @@ namespace CaramelAsset
         TArray<uint32> meshletVertices;
         TArray<uint8> meshletTriangles;
         TArray<MeshletCullData> bounds;
+        TArray<uint32> flatIndices;
         float32 maxError = 0.0f;
     };
 

@@ -8,6 +8,7 @@
 
 #include <Caramel/Core/Logger.hpp>
 #include <Caramel/Renderer/Shader/ShaderServer.hpp>
+#include <Caramel/Renderer/AccelerationStructureManager.hpp>
 #include <Caramel/Renderer/DebugRenderer.hpp>
 #include <Caramel/Renderer/ImGuiRenderer.hpp>
 #include <Caramel/Renderer/SceneRenderer.hpp>
@@ -78,6 +79,7 @@ Renderer::Renderer(SDL_Window* window, bool vsync)
     m_ImGuiRenderer = MakeUnique<ImGuiRenderer>(m_Device, m_CommandQueue, m_SwapChain.GetFormat(), (uint32)FRAMES_IN_FLIGHT);
     m_SceneRenderer = MakeUnique<SceneRenderer>(m_Device, (uint32)FRAMES_IN_FLIGHT);
     m_DebugRenderer = MakeUnique<DebugRenderer>(m_Device, m_SwapChain.GetFormat(), kDepthFormat, (uint32)FRAMES_IN_FLIGHT);
+    m_AccelStructManager = MakeUnique<AccelerationStructureManager>(m_Device);
 
     m_Device.MakeResourcesResident();
 }
@@ -163,6 +165,7 @@ void Renderer::Render(const Camera& camera, StreamingManager& streamingManager, 
     ShaderServer::Tick();
 
     m_GPUScene.Build(streamingManager, renderInstances, (uint32)m_FrameSlot);
+    m_AccelStructManager->ScanForNewlyResidentModels(renderInstances);
 
     int32 width, height;
     SDL_GetWindowSizeInPixels(m_Window, &width, &height);
@@ -246,12 +249,35 @@ void Renderer::Render(const Camera& camera, StreamingManager& streamingManager, 
             m_ImGuiRenderer->RenderDrawData(ImGui::GetDrawData(), pass, (uint32)width, (uint32)height, (uint32)m_FrameSlot);
         });
 
+    agfx::CommandBuffer* computeCommandBuffer = nullptr;
+    if (m_AccelStructManager->IsSupported()) {
+        m_AccelStructManager->WaitForFrameSlot(m_FrameSlot);
+        computeCommandBuffer = &m_AccelStructManager->GetFrameCommandBuffer(m_FrameSlot);
+        computeCommandBuffer->Reset();
+        computeCommandBuffer->Begin();
+        graph.SetQueueCommandBuffer(RGQueue::Compute, computeCommandBuffer);
+
+        graph.AddPass("Acceleration Structure Build",
+            [&](RGPassBuilder& builder) {
+                builder.SetQueue(RGQueue::Compute);
+                builder.AlwaysExecute();
+            },
+            [&](agfx::CommandBuffer& cmd, RGResolveContext&) {
+                m_AccelStructManager->RecordBuilds(cmd, renderInstances);
+            });
+    }
+
     graph.Compile();
     graph.Execute(commandBuffer);
 
     SetImportedState(m_SceneColorTexture.Get(), graph.GetFinalState(sceneColorHandle));
     SetImportedState(m_DepthTexture.Get(), graph.GetFinalState(depthHandle));
     m_LastGraphDebugInfo = graph.GetDebugInfo();
+
+    if (computeCommandBuffer) {
+        computeCommandBuffer->End();
+        m_AccelStructManager->Submit(*computeCommandBuffer, m_FrameSlot);
+    }
 
     commandBuffer.End();
     m_CommandQueue.Submit(commandBuffer);

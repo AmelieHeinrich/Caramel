@@ -21,6 +21,7 @@
 
 #include <imgui.h>
 
+class AccelerationStructureManager;
 class DebugRenderer;
 class ImGuiRenderer;
 class SceneRenderer;
@@ -48,6 +49,7 @@ public:
     const GPUScene& GetGPUScene() const { return m_GPUScene; }
 
     const RenderGraphDebugInfo& GetLastGraphDebugInfo() const { return m_LastGraphDebugInfo; }
+    const AccelerationStructureManager& GetAccelStructManager() const { return *m_AccelStructManager; }
 
     static Renderer& Get() { return *s_Instance; }
 
@@ -109,6 +111,7 @@ private:
     TUnique<ImGuiRenderer> m_ImGuiRenderer;
     TUnique<SceneRenderer> m_SceneRenderer;
     TUnique<DebugRenderer> m_DebugRenderer;
+    TUnique<AccelerationStructureManager> m_AccelStructManager;
 
     struct PendingMipTransition
     {

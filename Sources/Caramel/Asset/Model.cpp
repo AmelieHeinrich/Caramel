@@ -29,6 +29,8 @@ namespace
         lod.meshletTriangleBufferLength = j.value("meshletTriangleBufferLength", uint64(0));
         lod.meshletBoundsOffset = j.value("meshletBoundsOffset", uint64(0));
         lod.meshletBoundsLength = j.value("meshletBoundsLength", uint64(0));
+        lod.flatIndexBufferOffset = j.value("flatIndexBufferOffset", uint64(0));
+        lod.flatIndexBufferLength = j.value("flatIndexBufferLength", uint64(0));
         return lod;
     }
 

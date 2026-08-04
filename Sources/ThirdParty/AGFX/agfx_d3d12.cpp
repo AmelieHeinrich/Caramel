@@ -22,7 +22,7 @@
 #define AGFX_NATIVE_NO_INCLUDES
 #include "agfx_native.h"
 
-#ifdef ENABLE_PIX
+#ifdef USE_PIX
     #include "WinPixEventRuntime/pix3.h"
 #endif
 
@@ -2004,7 +2004,7 @@ agfxRenderPass* agfxRenderPassBegin(agfxCommandBuffer* cmdBuffer, const agfxRend
     renderPass->commandBuffer = cmdBuffer;
 
     ID3D12GraphicsCommandList* commandList = cmdBuffer->d3d12CommandList;
-#ifdef ENABLE_PIX
+#ifdef USE_PIX
     PIXBeginEvent(commandList, PIX_COLOR_DEFAULT, createInfo->name);
 #endif
 
@@ -2080,7 +2080,7 @@ void agfxRenderPassDrawMesh(agfxRenderPass* renderPass, uint32_t groupCountX, ui
 }
 
 void agfxRenderPassEnd(agfxRenderPass* renderPass) {
-#ifdef ENABLE_PIX
+#ifdef USE_PIX
     PIXEndEvent(renderPass->commandBuffer->d3d12CommandList);
 #endif
     renderPass->commandBuffer->device->createInfo.tempFree(renderPass);
@@ -2096,7 +2096,7 @@ agfxComputePass* agfxComputePassBegin(agfxCommandBuffer* commandBuffer, const ch
     agfxComputePass* computePass = (agfxComputePass*)commandBuffer->device->createInfo.tempAllocate(sizeof(agfxComputePass));
     computePass->commandBuffer = commandBuffer;
     computePass->device = commandBuffer->device;
-#ifdef ENABLE_PIX
+#ifdef USE_PIX
     PIXBeginEvent(commandBuffer->d3d12CommandList, PIX_COLOR_DEFAULT, name);
 #endif
     return computePass;
@@ -2305,7 +2305,7 @@ void agfxComputePassDispatch(agfxComputePass* computePass, uint32_t groupCountX,
 }
 
 void agfxComputePassEnd(agfxComputePass* computePass) {
-#ifdef ENABLE_PIX
+#ifdef USE_PIX
     PIXEndEvent(computePass->commandBuffer->d3d12CommandList);
 #endif
     computePass->device->createInfo.tempFree(computePass);

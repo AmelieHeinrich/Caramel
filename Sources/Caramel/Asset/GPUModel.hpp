@@ -22,6 +22,7 @@ public:
     agfx::Buffer& GetMeshletBuffer(uint32 lod) { return m_MeshletBuffers[lod]; }
     agfx::Buffer& GetMeshletVertexBuffer(uint32 lod) { return m_MeshletVertexBuffers[lod]; }
     agfx::Buffer& GetMeshletTriangleBuffer(uint32 lod) { return m_MeshletTriangleBuffers[lod]; }
+    agfx::Buffer& GetFlatIndexBuffer(uint32 lod) { return m_FlatIndexBuffers[lod]; }
 
     agfx::BufferView& GetMeshletBufferView(uint32 lod) { return m_MeshletBufferViews[lod]; }
     agfx::BufferView& GetMeshletVertexBufferView(uint32 lod) { return m_MeshletVertexBufferViews[lod]; }
@@ -34,6 +35,7 @@ private:
     agfx::Buffer m_MeshletBuffers[CaramelAsset::kLodCount];
     agfx::Buffer m_MeshletVertexBuffers[CaramelAsset::kLodCount];
     agfx::Buffer m_MeshletTriangleBuffers[CaramelAsset::kLodCount];
+    agfx::Buffer m_FlatIndexBuffers[CaramelAsset::kLodCount];
 
     agfx::BufferView m_MeshletBufferViews[CaramelAsset::kLodCount];
     agfx::BufferView m_MeshletVertexBufferViews[CaramelAsset::kLodCount];

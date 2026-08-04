@@ -62,5 +62,11 @@ GPUModel::GPUModel(const ModelMesh& mesh)
                                                                                           .SetOffset(0)
                                                                                           .SetWriteable(false);
         m_MeshletTriangleBufferViews[lod] = device.CreateBufferView(meshletTriangleViewInfo);
+
+        agfx::BufferCreateInfo flatIndexInfo = agfx::BufferCreateInfo().SetSize(lodDesc.flatIndexBufferLength)
+                                                                         .SetStride(sizeof(uint32))
+                                                                         .SetUsage(agfx::BufferUsage::ShaderRead)
+                                                                         .SetMemoryType(agfx::BufferMemoryType::GPUOnly);
+        m_FlatIndexBuffers[lod] = device.CreateBuffer(flatIndexInfo);
     }
 }

@@ -44,6 +44,12 @@ public:
     // Marks the resource as the swap chain back buffer -- see RGTextureDesc::isSwapchainResource.
     void MarkSwapchainEdge(RGTextureHandle handle);
 
+    // Exempts this pass from culling even though it declares no reads/writes RG can see -- e.g. a
+    // pass whose side effects are on a resource type RG doesn't model at all (acceleration structure
+    // builds today: BLAS/TLAS are neither RGTextureHandle nor RGBufferHandle). Without this, Cull()
+    // has no reachable-sink evidence to keep the pass and silently drops it every frame.
+    void AlwaysExecute();
+
     // See RGTextureDesc::externallyRead.
     void MarkAsExternallyRead(RGTextureHandle handle, agfx::ResourceState state);
 

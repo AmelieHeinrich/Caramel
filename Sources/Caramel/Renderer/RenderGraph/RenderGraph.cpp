@@ -53,6 +53,11 @@ void RGPassBuilder::MarkSwapchainEdge(RGTextureHandle handle)
     m_Graph.m_Textures[handle.index].isSwapchainResource = true;
 }
 
+void RGPassBuilder::AlwaysExecute()
+{
+    m_Pass.forceKeep = true;
+}
+
 void RGPassBuilder::MarkAsExternallyRead(RGTextureHandle handle, agfx::ResourceState state)
 {
     RGTextureDesc& tex = m_Graph.m_Textures[handle.index];
@@ -214,7 +219,7 @@ void RenderGraph::Cull()
             }
         }
 
-        pass.kept = isSink;
+        pass.kept = isSink || pass.forceKeep;
         if (pass.kept) {
             for (const RGResourceAccess& access : pass.accesses) {
                 if (access.type == RGResourceType::Texture)

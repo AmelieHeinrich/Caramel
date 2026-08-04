@@ -19,8 +19,10 @@ namespace
 {
     void PrintUsage()
     {
-        spdlog::info("Usage: CaramelAssetCompiler <input.gltf> [-o <output_dir>] [--verbose]");
+        spdlog::info("Usage: CaramelAssetCompiler <input.gltf> [-o <output_dir>] [--verbose] [--skip-textures]");
         spdlog::info("  -o defaults to Content/Cache/<AssetName>/, tracked in Content/Cache/cache.json");
+        spdlog::info("  --skip-textures skips texture compression, reusing .ctex files from a prior full bake");
+        spdlog::info("    in the same cache folder -- fast mesh/collider-only rebake, not a first-bake mode");
     }
 }
 
@@ -45,6 +47,10 @@ int main(int argc, char** argv)
         else if (std::strcmp(arg, "--verbose") == 0)
         {
             options.verbose = true;
+        }
+        else if (std::strcmp(arg, "--skip-textures") == 0)
+        {
+            options.skipTextures = true;
         }
         else if (std::strcmp(arg, "-h") == 0 || std::strcmp(arg, "--help") == 0)
         {

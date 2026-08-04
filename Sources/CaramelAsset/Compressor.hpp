@@ -14,6 +14,7 @@ namespace CaramelAsset
     {
         String outputDirectory;
         bool verbose = false;
+        bool skipTextures = false;
     };
 
     class Compressor

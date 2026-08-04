@@ -22,9 +22,11 @@ struct ModelLOD
     uint64 meshletVertexBufferOffset = 0, meshletVertexBufferLength = 0;
     uint64 meshletTriangleBufferOffset = 0, meshletTriangleBufferLength = 0;
     uint64 meshletBoundsOffset = 0, meshletBoundsLength = 0;
+    uint64 flatIndexBufferOffset = 0, flatIndexBufferLength = 0;
 
     uint64 GetByteOffset() const { return meshletBufferOffset; }
-    uint64 GetByteLength() const { return (meshletBoundsOffset + meshletBoundsLength) - meshletBufferOffset; }
+    uint64 GetByteLength() const { return (flatIndexBufferOffset + flatIndexBufferLength) - meshletBufferOffset; }
+    uint32 GetFlatIndexCount() const { return (uint32)(flatIndexBufferLength / sizeof(uint32)); }
 };
 
 struct ModelMesh

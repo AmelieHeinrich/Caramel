@@ -49,6 +49,7 @@ namespace CaramelAsset
             std::string sourceDirectory;
             std::string outputDirectory;
             bool verbose = false;
+            bool skipTextures = false;
 
             nlohmann::json json;
             TArray<uint8> binary;
@@ -193,9 +194,18 @@ namespace CaramelAsset
 
         void CompileTextures(CompileContext& ctx)
         {
+            if (ctx.skipTextures && !ctx.textureJobs.IsEmpty())
+                spdlog::warn("CaramelAssetCompiler: --skip-textures set, reusing .ctex files from a prior full bake for {} texture(s)", ctx.textureJobs.Size());
+
             ParallelFor(ctx.textureJobs.Size(), [&ctx](size_t index)
             {
                 TextureJob& job = ctx.textureJobs[index];
+
+                if (ctx.skipTextures)
+                {
+                    job.succeeded = true;
+                    return;
+                }
 
                 TArray<uint8> pixels;
                 uint32 width = 0, height = 0;
@@ -414,6 +424,10 @@ namespace CaramelAsset
                 uint64 boundsOffset = AppendBinary(ctx, lod.bounds);
                 lj["meshletBoundsOffset"] = boundsOffset;
                 lj["meshletBoundsLength"] = lod.bounds.Size() * sizeof(MeshletCullData);
+
+                uint64 flatIndexOffset = AppendBinary(ctx, lod.flatIndices);
+                lj["flatIndexBufferOffset"] = flatIndexOffset;
+                lj["flatIndexBufferLength"] = lod.flatIndices.Size() * sizeof(uint32);
 
                 lodsJson.push_back(lj);
             }
@@ -748,6 +762,7 @@ namespace CaramelAsset
         CompileContext ctx;
         ctx.sourceDirectory = inputPath.parent_path().string();
         ctx.verbose = options.verbose;
+        ctx.skipTextures = options.skipTextures;
 
         const bool useCache = options.outputDirectory.Empty();
         std::filesystem::path manifestPath = std::filesystem::path("Content") / "Cache" / "cache.json";

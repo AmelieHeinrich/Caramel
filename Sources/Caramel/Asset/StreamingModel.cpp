@@ -109,10 +109,12 @@ bool StreamingModel::RequestNextLOD(StreamingManager& manager)
         const uint8* meshletBytes = lodBytes.Data();
         const uint8* meshletVertexBytes = meshletBytes + (lod.meshletVertexBufferOffset - lod.meshletBufferOffset);
         const uint8* meshletTriangleBytes = meshletBytes + (lod.meshletTriangleBufferOffset - lod.meshletBufferOffset);
+        const uint8* flatIndexBytes = meshletBytes + (lod.flatIndexBufferOffset - lod.meshletBufferOffset);
 
         UploadQueue& uploadQueue = manager.GetUploadQueue();
         uploadQueue.EnqueueBufferUpload(m_Gpu.GetMeshletBuffer(lodIndex), 0, meshletBytes, lod.meshletBufferLength);
         uploadQueue.EnqueueBufferUpload(m_Gpu.GetMeshletVertexBuffer(lodIndex), 0, meshletVertexBytes, lod.meshletVertexBufferLength);
+        uploadQueue.EnqueueBufferUpload(m_Gpu.GetFlatIndexBuffer(lodIndex), 0, flatIndexBytes, lod.flatIndexBufferLength);
         uint64 fenceValue = uploadQueue.EnqueueBufferUpload(m_Gpu.GetMeshletTriangleBuffer(lodIndex), 0, meshletTriangleBytes, lod.meshletTriangleBufferLength);
 
         m_PendingFenceValue.store(fenceValue, std::memory_order_release);

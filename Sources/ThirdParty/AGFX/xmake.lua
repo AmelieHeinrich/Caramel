@@ -14,6 +14,7 @@ target("agfx")
     elseif is_plat("windows") then
         add_files("agfx_d3d12.cpp")
         add_syslinks("d3d12", "dxgi", "dxguid", "WinPixEventRuntime", { public = true })
+        add_defines("USE_PIX")
     elseif is_plat("linux") then
         add_files("agfx_vulkan.cpp")
         add_includedirs("vk")

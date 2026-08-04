@@ -64,6 +64,7 @@ struct RGPass
     RGQueue queue = RGQueue::Graphics;
     bool isAttachmentPass = false;
     bool kept = true;
+    bool forceKeep = false;
 
     TArray<RGResourceAccess> accesses;
 

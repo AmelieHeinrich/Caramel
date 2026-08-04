@@ -337,6 +337,7 @@ namespace CaramelAsset
         static constexpr float32 kLodTargetErrors[kLodCount] = { 0.0f, 0.01f, 0.03f, 0.06f, 0.12f };
 
         mesh.lods[kLodCount - 1] = BuildMeshletLOD(mesh.vertices, lod0Indices, 0.0f);
+        mesh.lods[kLodCount - 1].flatIndices = lod0Indices;
 
         for (uint32 lodIndex = 1; lodIndex < kLodCount; lodIndex++)
         {
@@ -372,6 +373,7 @@ namespace CaramelAsset
             meshopt_optimizeVertexCache(lodIndices.Data(), lodIndices.Data(), lodIndices.Size(), mesh.vertices.Size());
 
             mesh.lods[kLodCount - 1 - lodIndex] = BuildMeshletLOD(mesh.vertices, lodIndices, resultError);
+            mesh.lods[kLodCount - 1 - lodIndex].flatIndices = std::move(lodIndices);
         }
 
         return mesh;

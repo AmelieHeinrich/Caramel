@@ -50,6 +50,10 @@ public:
     agfx::BufferView& GetMeshletVertexBufferView(uint32 lod) { return m_Gpu.GetMeshletVertexBufferView(lod); }
     agfx::BufferView& GetMeshletTriangleBufferView(uint32 lod) { return m_Gpu.GetMeshletTriangleBufferView(lod); }
 
+    agfx::Buffer& GetVertexBuffer() { return m_Gpu.GetVertexBuffer(); }
+    agfx::Buffer& GetFlatIndexBuffer(uint32 lod) { return m_Gpu.GetFlatIndexBuffer(lod); }
+    uint32 GetFlatIndexCount(uint32 lod) const { return GetMesh().lods[lod].GetFlatIndexCount(); }
+
 private:
     void OnLODResident(uint32 lodIndex);
 
