@@ -19,7 +19,7 @@
 void OverlayPanel::Draw(EditorContext& context, StreamingManager& streaming, SDL_Window* window, const agfxDeviceInfo& deviceInfo, bool& showColliders)
 {
     ImGui::SetNextWindowPos(ImVec2(context.ViewportRectMin.x + 12.0f, context.ViewportRectMin.y + 12.0f));
-    ImGui::SetNextWindowBgAlpha(0.35f);
+    ImGui::SetNextWindowBgAlpha(0.75f);
     ImGui::Begin("Overlay", nullptr, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoNav);
     ImGui::Text("FPS: %.1f", ImGui::GetIO().Framerate);
     ImGui::Separator();

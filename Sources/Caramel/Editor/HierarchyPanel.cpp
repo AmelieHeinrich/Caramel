@@ -13,6 +13,7 @@
 #include <Caramel/Asset/StreamingModel.hpp>
 #include <Caramel/Script/ScriptEngine.hpp>
 #include <Caramel/Script/ScriptSystem.hpp>
+#include <Caramel/Editor/ScriptMenu.hpp>
 
 #include <imgui.h>
 #include <FontAwesome/FA.h>
@@ -32,46 +33,16 @@ namespace
         }
     }
 
-    // Offers every class in every compiled module, then attaches it at the scope of the row the
-    // menu was opened on.
-    void DrawAddScriptMenu(EditorContext& context, SceneNode& node, EScriptScope scope, uint32 targetIndex)
+    bool SubtreeContains(const SceneNode& node, const SceneNode* target)
     {
-        if (!context.Scripts)
-            return;
+        if (&node == target)
+            return true;
 
-        if (!ImGui::BeginMenu(ICON_FA_SCROLL " Add Script"))
-            return;
-
-        ScriptEngine& engine = context.Scripts->GetEngine();
-        TArray<String> paths = engine.GetKnownScriptPaths();
-
-        if (paths.IsEmpty())
-            ImGui::TextDisabled("No scripts in Content/Scripts");
-
-        for (const String& path : paths) {
-            const ScriptModuleInfo* moduleInfo = engine.FindModule(path);
-            if (!moduleInfo || !moduleInfo->valid || moduleInfo->classes.IsEmpty())
-                continue;
-
-            for (const ScriptClassInfo& classInfo : moduleInfo->classes) {
-                char label[320];
-                std::snprintf(label, sizeof(label), "%s", classInfo.name.CStr());
-
-                if (!ImGui::MenuItem(label))
-                    continue;
-
-                ScriptComponent component;
-                component.scriptPath = path;
-                component.className = classInfo.name;
-                component.scope = scope;
-                component.targetIndex = targetIndex;
-                node.scripts.PushBack(component);
-
-                context.Scripts->OnComponentAdded(node, (uint32)node.scripts.Size() - 1);
-            }
+        for (const TUnique<SceneNode>& child : node.children) {
+            if (SubtreeContains(*child, target))
+                return true;
         }
-
-        ImGui::EndMenu();
+        return false;
     }
 }
 
@@ -81,6 +52,15 @@ void HierarchyPanel::Draw(EditorContext& context, StreamingManager& streaming)
 {
     ImGui::SetNextWindowSize(ImVec2(340, 480), ImGuiCond_FirstUseEver);
     ImGui::Begin(kTitle);
+
+    m_RevealSelection = context.SelectedEntity != nullptr
+        && (context.SelectedEntity != m_LastSelectedEntity
+            || context.SelectedInstance != m_LastSelectedInstance
+            || (void*)context.SelectedMesh != m_LastSelectedMesh);
+
+    m_LastSelectedEntity = context.SelectedEntity;
+    m_LastSelectedInstance = context.SelectedInstance;
+    m_LastSelectedMesh = (void*)context.SelectedMesh;
 
     if (ImGui::Button(ICON_FA_FOLDER " New Folder"))
         context.CurrentScene.CreateFolder(nullptr, "New Folder");
@@ -137,6 +117,10 @@ void HierarchyPanel::DrawSceneNode(EditorContext& context, StreamingManager& str
 
         char nodeLabel[300];
         std::snprintf(nodeLabel, sizeof(nodeLabel), "%s %s", NodeIcon(child.type), child.name.CStr());
+
+        bool onPathToSelection = m_RevealSelection && SubtreeContains(child, context.SelectedEntity);
+        if (onPathToSelection)
+            ImGui::SetNextItemOpen(true);
 
         bool open = ImGui::TreeNodeEx(renaming ? "##renaming" : nodeLabel,
                                        ImGuiTreeNodeFlags_OpenOnArrow | ImGuiTreeNodeFlags_SpanAvailWidth);
@@ -201,11 +185,21 @@ void HierarchyPanel::DrawSceneNode(EditorContext& context, StreamingManager& str
                     char instLabel[300];
                     std::snprintf(instLabel, sizeof(instLabel), "%s %s", ICON_FA_LOCATION_ARROW, child.instances[j].name.CStr());
 
+                    bool isSelectedInstance = context.SelectedEntity == &child && context.SelectedInstance == j;
+
                     ImGuiTreeNodeFlags instFlags = ImGuiTreeNodeFlags_OpenOnArrow | ImGuiTreeNodeFlags_SpanAvailWidth;
-                    if (context.SelectedEntity == &child && context.SelectedInstance == j && !context.SelectedMesh)
+                    if (isSelectedInstance && !context.SelectedMesh)
                         instFlags |= ImGuiTreeNodeFlags_Selected;
 
+                    // Expand so a picked mesh under this instance is visible too.
+                    if (m_RevealSelection && isSelectedInstance && context.SelectedMesh)
+                        ImGui::SetNextItemOpen(true);
+
                     bool instanceOpen = ImGui::TreeNodeEx(instLabel, instFlags);
+
+                    if (m_RevealSelection && isSelectedInstance && !context.SelectedMesh)
+                        ImGui::SetScrollHereY(0.5f);
+
                     if (ImGui::IsItemClicked() && !ImGui::IsItemToggledOpen()) {
                         context.SelectedEntity = &child;
                         context.SelectedInstance = j;
@@ -232,6 +226,10 @@ void HierarchyPanel::DrawSceneNode(EditorContext& context, StreamingManager& str
 
                             ImGui::PushID((int)meshIndex);
                             ImGui::TreeNodeEx(meshLabel, meshFlags);
+
+                            if (m_RevealSelection && isSelectedInstance && context.SelectedMesh == mesh)
+                                ImGui::SetScrollHereY(0.5f);
+
                             if (ImGui::IsItemClicked()) {
                                 context.SelectedEntity = &child;
                                 context.SelectedInstance = j;

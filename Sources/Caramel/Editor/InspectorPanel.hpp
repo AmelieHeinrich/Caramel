@@ -17,5 +17,5 @@ public:
     void Draw(EditorContext& context, StreamingManager& streaming);
 
 private:
-    void DrawScriptSection(EditorContext& context);
+    void DrawScriptSection(EditorContext& context, StreamingManager& streaming);
 };

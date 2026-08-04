@@ -15,6 +15,7 @@
 #include <Caramel/Renderer/Renderer.hpp>
 #include <Caramel/Script/ScriptEngine.hpp>
 #include <Caramel/Script/ScriptSystem.hpp>
+#include <Caramel/Editor/ScriptMenu.hpp>
 
 #include <imgui.h>
 #include <imgui_internal.h>
@@ -26,7 +27,7 @@
 
 const char* const InspectorPanel::kTitle = ICON_FA_CIRCLE " Inspector";
 
-void InspectorPanel::DrawScriptSection(EditorContext& context)
+void InspectorPanel::DrawScriptSection(EditorContext& context, StreamingManager& streaming)
 {
     if (!context.Scripts || !context.SelectedEntity)
         return;
@@ -37,8 +38,45 @@ void InspectorPanel::DrawScriptSection(EditorContext& context)
     ImGui::Separator();
     ImGui::TextUnformatted(ICON_FA_SCROLL " Scripts");
 
+    // Scope follows whatever the inspector is currently showing, so the button attaches to the same
+    // thing the panel above it is describing.
+    if (ImGui::Button(ICON_FA_PLUS " Add Script"))
+        ImGui::OpenPopup("AddScriptPopup");
+
+    if (ImGui::BeginPopup("AddScriptPopup")) {
+        if (ImGui::BeginMenu(ICON_FA_CUBES " On entity"))  {
+            DrawAddScriptMenuItems(context, node, EScriptScope::Node, 0);
+            ImGui::EndMenu();
+        }
+
+        if (SceneNodeTypeHasInstances(node.type) && ImGui::BeginMenu(ICON_FA_LOCATION_ARROW " On this instance")) {
+            DrawAddScriptMenuItems(context, node, EScriptScope::Instance, context.SelectedInstance);
+            ImGui::EndMenu();
+        }
+
+        if (context.SelectedMesh) {
+            const TArray<TShared<StreamingModel>>& models = streaming.GetModels();
+            uint32 meshSlot = 0;
+            bool foundSlot = false;
+            for (uint32 slot = 0; slot < (uint32)node.meshIndices.Size(); ++slot) {
+                if (models[node.meshIndices[slot]].get() == context.SelectedMesh) {
+                    meshSlot = slot;
+                    foundSlot = true;
+                    break;
+                }
+            }
+
+            if (foundSlot && ImGui::BeginMenu(ICON_FA_CUBE " On this mesh")) {
+                DrawAddScriptMenuItems(context, node, EScriptScope::Mesh, meshSlot);
+                ImGui::EndMenu();
+            }
+        }
+
+        ImGui::EndPopup();
+    }
+
     if (node.scripts.IsEmpty()) {
-        ImGui::TextDisabled("None -- right-click in the Hierarchy to add one");
+        ImGui::TextDisabled("None attached");
         return;
     }
 
@@ -51,9 +89,9 @@ void InspectorPanel::DrawScriptSection(EditorContext& context)
         if (component.scope == EScriptScope::Instance && component.targetIndex != context.SelectedInstance)
             continue;
         if (component.scope == EScriptScope::Mesh) {
-            if (!context.SelectedMesh)
+            if (!context.SelectedMesh || component.targetIndex >= node.meshIndices.Size())
                 continue;
-            if (component.targetIndex >= node.meshIndices.Size())
+            if (streaming.GetModels()[node.meshIndices[component.targetIndex]].get() != context.SelectedMesh)
                 continue;
         }
 
@@ -253,7 +291,7 @@ void InspectorPanel::Draw(EditorContext& context, StreamingManager& streaming)
         ImGui::TextDisabled(ICON_FA_SCROLL " Driven by script");
     }
 
-    DrawScriptSection(context);
+    DrawScriptSection(context, streaming);
 
     ImGui::Separator();
     ImGui::TextUnformatted(ICON_FA_PALETTE " Material");
