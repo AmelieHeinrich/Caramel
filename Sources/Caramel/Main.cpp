@@ -13,7 +13,7 @@ int main(void)
     info.Height = 720;
     info.Maximized = true;
     info.VSync = false;
-    info.DebugLayer = true;
+    info.DebugLayer = false;
 
     Application app(info);
     app.Run();

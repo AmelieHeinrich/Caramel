@@ -477,16 +477,23 @@ agfxDevice* agfxDeviceCreate(const agfxDeviceCreateInfo* createInfo)
         selectedDeviceExtensions = extensions;
         rayTracingSupported = agfxVkHasExtension(extensions, VK_KHR_ACCELERATION_STRUCTURE_EXTENSION_NAME) &&
                                agfxVkHasExtension(extensions, VK_KHR_RAY_QUERY_EXTENSION_NAME) &&
+                               agfxVkHasExtension(extensions, VK_KHR_RAY_TRACING_PIPELINE_EXTENSION_NAME) &&
                                agfxVkHasExtension(extensions, VK_KHR_DEFERRED_HOST_OPERATIONS_EXTENSION_NAME);
         if (rayTracingSupported) {
             // Binding 2 of the global set is UPDATE_AFTER_BIND, so extension presence alone isn't
             // enough -- the optional UAB feature must be there too or the binding flag is invalid.
+            // rayTracingPipeline is required as well: the AGFX_RESOURCE_STATE_RAYTRACING_ACCELERATION_STRUCTURE
+            // barrier mapping uses VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR, which is only
+            // valid with that feature enabled.
+            VkPhysicalDeviceRayTracingPipelineFeaturesKHR rtPipelineFeatures = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_TRACING_PIPELINE_FEATURES_KHR };
             VkPhysicalDeviceAccelerationStructureFeaturesKHR accelFeatures = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ACCELERATION_STRUCTURE_FEATURES_KHR };
+            accelFeatures.pNext = &rtPipelineFeatures;
             VkPhysicalDeviceFeatures2 accelQuery = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2 };
             accelQuery.pNext = &accelFeatures;
             vkGetPhysicalDeviceFeatures2(candidate, &accelQuery);
             rayTracingSupported = accelFeatures.accelerationStructure &&
-                                  accelFeatures.descriptorBindingAccelerationStructureUpdateAfterBind;
+                                  accelFeatures.descriptorBindingAccelerationStructureUpdateAfterBind &&
+                                  rtPipelineFeatures.rayTracingPipeline;
         }
         meshShadersSupported = agfxVkHasExtension(extensions, VK_EXT_MESH_SHADER_EXTENSION_NAME);
         return true;
@@ -527,8 +534,11 @@ agfxDevice* agfxDeviceCreate(const agfxDeviceCreateInfo* createInfo)
     // Enabling the RT/mesh extensions alone isn't enough -- their feature structs must also be
     // chained into vkCreateDevice or every vkCreateAccelerationStructureKHR/mesh pipeline use is
     // invalid, however tolerant a given driver happens to be.
+    VkPhysicalDeviceRayTracingPipelineFeaturesKHR enabledRtPipelineFeatures = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_TRACING_PIPELINE_FEATURES_KHR };
+    enabledRtPipelineFeatures.rayTracingPipeline = VK_TRUE;
     VkPhysicalDeviceRayQueryFeaturesKHR enabledRayQueryFeatures = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_QUERY_FEATURES_KHR };
     enabledRayQueryFeatures.rayQuery = VK_TRUE;
+    enabledRayQueryFeatures.pNext = &enabledRtPipelineFeatures;
     VkPhysicalDeviceAccelerationStructureFeaturesKHR enabledAccelFeatures = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ACCELERATION_STRUCTURE_FEATURES_KHR };
     enabledAccelFeatures.accelerationStructure = VK_TRUE;
     enabledAccelFeatures.descriptorBindingAccelerationStructureUpdateAfterBind = VK_TRUE;
@@ -551,6 +561,7 @@ agfxDevice* agfxDeviceCreate(const agfxDeviceCreateInfo* createInfo)
     enabledFeatures13.pNext = &enabledMutableFeatures;
     enabledFeatures13.dynamicRendering = VK_TRUE;
     enabledFeatures13.synchronization2 = VK_TRUE;
+    enabledFeatures13.shaderDemoteToHelperInvocation = VK_TRUE;
     VkPhysicalDeviceVulkan12Features enabledFeatures12 = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES };
     enabledFeatures12.pNext = &enabledFeatures13;
     enabledFeatures12.descriptorIndexing = VK_TRUE;
@@ -574,6 +585,7 @@ agfxDevice* agfxDeviceCreate(const agfxDeviceCreateInfo* createInfo)
         deviceExtensions.push_back(VK_KHR_DEFERRED_HOST_OPERATIONS_EXTENSION_NAME);
         deviceExtensions.push_back(VK_KHR_ACCELERATION_STRUCTURE_EXTENSION_NAME);
         deviceExtensions.push_back(VK_KHR_RAY_QUERY_EXTENSION_NAME);
+        deviceExtensions.push_back(VK_KHR_RAY_TRACING_PIPELINE_EXTENSION_NAME);
     }
     if (device->supportsMeshShaders) {
         deviceExtensions.push_back(VK_EXT_MESH_SHADER_EXTENSION_NAME);
