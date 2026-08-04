@@ -33,13 +33,8 @@ public:
     const glm::mat4& GetWorldTransform() const { return m_WorldTransform; }
     uint32 GetRequestId() const { return m_RequestId; }
 
-    // Guards materialIndex < 0 (unassigned) by returning a default-constructed material.
     const ModelMaterial& GetMaterial() const;
 
-    // Shared with every other StreamingModel that came from the same LoadModel() call (one CPUModel
-    // per call, one StreamingModel per mesh) -- used by Scene::ApplyMaterialOverrides to mutate an
-    // arbitrary materialIndex's factors in place, independent of which mesh's materialIndex this
-    // particular StreamingModel itself has.
     TShared<CPUModel> GetSourceModel() const { return m_Source; }
 
     uint32 SnapshotResidentLOD() const { return m_HighestResidentLOD.load(std::memory_order_acquire); }
@@ -74,8 +69,6 @@ private:
     std::atomic<uint64> m_PendingFenceValue{ 0 };
     std::atomic<uint32> m_PendingLOD{ kNoResidentLOD };
 
-    // Published once by the collider-load job started from BeginLoad(); read-only afterwards, so
-    // concurrent readers just copy the same immutable Ref once m_ColliderReady is observed true.
     JPH::RefConst<JPH::Shape> m_ColliderShape;
     std::atomic<bool> m_ColliderReady{ false };
 };

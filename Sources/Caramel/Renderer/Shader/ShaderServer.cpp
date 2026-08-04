@@ -30,10 +30,6 @@ std::atomic<bool> ShaderServer::s_WatcherRunning{ false };
 
 namespace {
 
-// Builds the shader modules + pipeline for one variant from already-compiled bytecode. Only ever
-// called on the render thread (either synchronously from GetPipeline's cache-miss path, or from
-// Tick() after WaitIdle()) -- this is the only code that touches agfx::Device::CreateShaderModule/
-// CreateRenderPipeline/CreateComputePipeline.
 bool CreatePipelineFromBytecode(agfx::Device& device, const RegisteredPipeline& owner,
     const TDictionary<EShaderStage, TArray<uint8>>& bytecode, const TDictionary<EShaderStage, String>& entryPoints,
     const uint32 groupSize[3], CompiledVariant& outVariant)
@@ -90,7 +86,7 @@ struct WatchEntry
     bool Seeded = false;
 };
 
-} // namespace
+}
 
 void ShaderServer::Initialize(agfx::Device& device, Renderer& renderer)
 {
@@ -329,7 +325,6 @@ void ShaderServer::Tick()
 
 void ShaderServer::WatcherThreadMain()
 {
-    // Watcher-thread-only state -- never touched by the render thread, so no locking needed here.
     TDictionary<String, WatchEntry> watchState;
 
     while (s_WatcherRunning) {
@@ -414,7 +409,7 @@ void ShaderServer::WatcherThreadMain()
 
         for (auto& w : work) {
             if (w.CachedMasks.IsEmpty())
-                continue; // never actually requested via GetPipeline yet -- nothing live to hot-swap
+                continue;
 
             auto freshSource = ParseShaderFile(w.ShaderPath);
             if (!freshSource) {
@@ -458,9 +453,6 @@ void ShaderServer::WatcherThreadMain()
                 s_PendingSwaps.PushBack(std::move(result));
             }
 
-            // Refresh the dependency graph in case #include lines changed (files added/removed) --
-            // harmless to do even if every variant above failed to compile, since this only affects
-            // which files are watched, not any live pipeline.
             std::lock_guard<std::mutex> lock(s_RegistryMutex);
             if (s_Pipelines.Contains(w.ShaderPath))
                 RegisterDependencies(w.ShaderPath, *freshSource);

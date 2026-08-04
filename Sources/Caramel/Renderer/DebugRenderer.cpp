@@ -20,15 +20,12 @@ namespace
 
     constexpr float kPi = 3.14159265358979323846f;
 
-    // glm::perspective's NDC depth range depends on this define, and Frustum() unprojects the NDC
-    // cube -- so read it here rather than assuming a convention.
 #if defined(GLM_FORCE_DEPTH_ZERO_TO_ONE)
     constexpr float kNdcNearZ = 0.0f;
 #else
     constexpr float kNdcNearZ = -1.0f;
 #endif
 
-    /// RGBA8 in the byte order Content/Shaders/Common/DebugDraw.hlsli unpacks (and ImGui packs).
     uint32 PackColor(const glm::vec4& color)
     {
         glm::vec4 c = glm::clamp(color, 0.0f, 1.0f) * 255.0f;
@@ -40,8 +37,6 @@ namespace
         return segments < 3 ? 3 : (segments > 128 ? 128 : segments);
     }
 
-    /// Rigid frame placing the canonical shape's local +Y along `axis`, with its origin at `origin`.
-    /// The remaining two basis vectors are arbitrary but stable for a given axis.
     glm::mat4 MakeAxisFrame(const glm::vec3& origin, const glm::vec3& axis)
     {
         float length = glm::length(axis);
@@ -57,8 +52,6 @@ namespace
         return glm::vec3(m * glm::vec4(p, 1.0f));
     }
 
-    // All frames here are rigid (or uniformly scaled), so the upper 3x3 rotates normals correctly
-    // without an inverse-transpose.
     glm::vec3 TransformNormal(const glm::mat4& m, const glm::vec3& n)
     {
         glm::vec3 result = glm::mat3(m) * n;
@@ -69,67 +62,11 @@ namespace
 
 DebugRenderer* DebugRenderer::s_Instance = nullptr;
 
-// ---------------------------------------------------------------------------------------------
-// StreamBuffer
-// ---------------------------------------------------------------------------------------------
-
-void DebugRenderer::StreamBuffer::Init(uint32 framesInFlight)
-{
-    buffers.Resize(framesInFlight);
-    views.Resize(framesInFlight);
-    capacities.Resize(framesInFlight, 0);
-}
-
-bool DebugRenderer::StreamBuffer::Upload(agfx::Device& device, uint32 frameIndex, const char* name, uint32 stride,
-                                         const void* first, uint64 firstBytes, const void* second, uint64 secondBytes)
-{
-    uint64 totalBytes = firstBytes + secondBytes;
-    if (totalBytes == 0)
-        return false;
-
-    if (totalBytes > capacities[frameIndex]) {
-        // Same over-allocate-and-keep policy as ImGuiRenderer: debug draw counts swing frame to
-        // frame, and recreating a bindless view every frame would churn descriptors.
-        uint64 newCapacity = totalBytes + totalBytes / 2 + (uint64)stride * 256;
-
-        agfx::BufferCreateInfo bufferInfo;
-        bufferInfo.SetSize(newCapacity).SetStride(stride).SetUsage(agfx::BufferUsage::ShaderRead).SetMemoryType(agfx::BufferMemoryType::CPUToGPU);
-        buffers[frameIndex] = device.CreateBuffer(bufferInfo);
-        buffers[frameIndex].SetName(name);
-
-        agfx::BufferViewCreateInfo viewInfo;
-        viewInfo.SetBuffer(buffers[frameIndex].Get()).SetType(agfx::BufferViewType::Structured).SetOffset(0).SetWriteable(false);
-        views[frameIndex] = device.CreateBufferView(viewInfo);
-
-        capacities[frameIndex] = newCapacity;
-        device.MakeResourcesResident();
-    }
-
-    // The depth-tested block is written first and the overlay block right behind it; the overlay
-    // draw reaches its half via the uBaseIndex push constant.
-    agfx::MappedBuffer mapped(buffers[frameIndex]);
-    uint8* dst = mapped.As<uint8>();
-    if (firstBytes > 0)
-        std::memcpy(dst, first, firstBytes);
-    if (secondBytes > 0)
-        std::memcpy(dst + firstBytes, second, secondBytes);
-    return true;
-}
-
-// ---------------------------------------------------------------------------------------------
-// Setup
-// ---------------------------------------------------------------------------------------------
-
 DebugRenderer::DebugRenderer(agfx::Device& device, agfx::TextureFormat colorFormat, agfx::TextureFormat depthFormat, uint32 framesInFlight)
     : m_Device(&device)
 {
     s_Instance = this;
 
-    // Two templates, identical apart from depth state. Nothing is culled (debug shapes are viewed
-    // from every side) and everything alpha blends. The depth-tested pass writes depth too, so
-    // overlapping debug shapes occlude each other correctly instead of just painting in draw
-    // order; nothing runs after this pass that reads the depth buffer, so there's nothing for the
-    // writes to corrupt.
     agfx::RenderPipelineCreateInfo depthPipelineInfo;
     depthPipelineInfo.SetName("Debug Draw Pipeline (Depth Tested)")
                      .SetCullMode(agfx::CullMode::None)
@@ -156,8 +93,6 @@ DebugRenderer::DebugRenderer(agfx::Device& device, agfx::TextureFormat colorForm
     m_FrameConstantBuffers.Resize(framesInFlight);
     m_FrameConstantViews.Resize(framesInFlight);
     for (uint32 i = 0; i < framesInFlight; ++i) {
-        // Read as a 1-element AGFXStructuredBuffer rather than a real cbuffer, matching the
-        // convention SponzaRenderer established (AGFX.hlsli has no bindless-cbuffer wrapper).
         agfx::BufferCreateInfo bufferInfo;
         bufferInfo.SetSize(sizeof(GPUFrameConstants)).SetStride(sizeof(GPUFrameConstants)).SetUsage(agfx::BufferUsage::ShaderRead).SetMemoryType(agfx::BufferMemoryType::CPUToGPU);
         m_FrameConstantBuffers[i] = m_Device->CreateBuffer(bufferInfo);
@@ -168,10 +103,6 @@ DebugRenderer::DebugRenderer(agfx::Device& device, agfx::TextureFormat colorForm
         m_FrameConstantViews[i] = m_Device->CreateBufferView(viewInfo);
     }
 }
-
-// ---------------------------------------------------------------------------------------------
-// Emitters
-// ---------------------------------------------------------------------------------------------
 
 void DebugRenderer::EmitLine(const glm::vec3& a, const glm::vec3& b, const DebugStyle& style)
 {
@@ -254,8 +185,6 @@ void DebugRenderer::EmitCylinderSurface(const glm::mat4& frame, float radius, fl
             glm::vec3 top0 = TransformPoint(frame, glm::vec3(radius * dir0.x, height, radius * dir0.y));
             glm::vec3 top1 = TransformPoint(frame, glm::vec3(radius * dir1.x, height, radius * dir1.y));
 
-            // Analytic side normals rather than face normals, so the headlight shading is smooth
-            // around the barrel instead of faceted.
             glm::vec3 normal0 = TransformNormal(frame, glm::vec3(dir0.x, 0.0f, dir0.y));
             glm::vec3 normal1 = TransformNormal(frame, glm::vec3(dir1.x, 0.0f, dir1.y));
 
@@ -279,7 +208,6 @@ void DebugRenderer::EmitCylinderSurface(const glm::mat4& frame, float radius, fl
 
 void DebugRenderer::EmitConeSurface(const glm::mat4& frame, float radius, float height, uint32 segments, uint32 wireMeridians, const DebugStyle& style)
 {
-    // Canonical cone: apex at the local origin, base ring at local y = height.
     glm::vec3 apex = TransformPoint(frame, glm::vec3(0.0f, 0.0f, 0.0f));
 
     if (style.filled) {
@@ -292,8 +220,6 @@ void DebugRenderer::EmitConeSurface(const glm::mat4& frame, float radius, float 
             glm::vec3 base0 = TransformPoint(frame, glm::vec3(radius * dir0.x, height, radius * dir0.y));
             glm::vec3 base1 = TransformPoint(frame, glm::vec3(radius * dir1.x, height, radius * dir1.y));
 
-            // Outward normal of the slanted surface: perpendicular to both the slant and the
-            // tangent, which works out to (cos*h, -r, sin*h).
             glm::vec3 normal0 = TransformNormal(frame, glm::vec3(dir0.x * height, -radius, dir0.y * height));
             glm::vec3 normal1 = TransformNormal(frame, glm::vec3(dir1.x * height, -radius, dir1.y * height));
 
@@ -312,7 +238,6 @@ void DebugRenderer::EmitConeSurface(const glm::mat4& frame, float radius, float 
 void DebugRenderer::EmitSphereSurface(const glm::mat4& frame, float radius, float yOffset, uint32 sectors, uint32 stacks,
                                       uint32 stackBegin, uint32 stackEnd, uint32 wireMeridians, const DebugStyle& style)
 {
-    // Unit direction on the sphere for stack/sector indices; stack 0 is +Y, stack `stacks` is -Y.
     auto direction = [&](uint32 stack, uint32 sector) {
         float phi = (kPi * (float)stack) / (float)stacks;
         float theta = (2.0f * kPi * (float)sector) / (float)sectors;
@@ -336,7 +261,6 @@ void DebugRenderer::EmitSphereSurface(const glm::mat4& frame, float radius, floa
                 glm::vec3 n10 = TransformNormal(frame, d10);
                 glm::vec3 n11 = TransformNormal(frame, d11);
 
-                // The two polar stacks degenerate to triangles -- skip the collapsed half.
                 if (stack != 0)
                     EmitTriangle(position(d00), position(d10), position(d11), n00, n10, n11, style);
                 if (stack + 1 != stacks)
@@ -346,7 +270,7 @@ void DebugRenderer::EmitSphereSurface(const glm::mat4& frame, float radius, floa
     } else {
         for (uint32 stack = stackBegin; stack <= stackEnd; ++stack) {
             if (stack == 0 || stack == stacks)
-                continue; // Pole: the "ring" is a single point.
+                continue;
             glm::vec3 previous = position(direction(stack, 0));
             for (uint32 sector = 1; sector <= sectors; ++sector) {
                 glm::vec3 current = position(direction(stack, sector));
@@ -355,7 +279,6 @@ void DebugRenderer::EmitSphereSurface(const glm::mat4& frame, float radius, floa
             }
         }
         for (uint32 i = 0; i < wireMeridians; ++i) {
-            // Meridians are sampled on the full sector grid so they line up with the rings above.
             uint32 sector = (i * sectors) / wireMeridians;
             glm::vec3 previous = position(direction(stackBegin, sector));
             for (uint32 stack = stackBegin + 1; stack <= stackEnd; ++stack) {
@@ -366,10 +289,6 @@ void DebugRenderer::EmitSphereSurface(const glm::mat4& frame, float radius, floa
         }
     }
 }
-
-// ---------------------------------------------------------------------------------------------
-// Public shape API
-// ---------------------------------------------------------------------------------------------
 
 void DebugRenderer::Line(const glm::vec3& a, const glm::vec3& b, const DebugStyle& style)
 {
@@ -421,12 +340,12 @@ void DebugRenderer::Box(const glm::vec3& boundsMin, const glm::vec3& boundsMax, 
     };
 
     if (style.filled) {
-        EmitQuad(corners[0], corners[3], corners[2], corners[1], style); // -Z
-        EmitQuad(corners[4], corners[5], corners[6], corners[7], style); // +Z
-        EmitQuad(corners[0], corners[1], corners[5], corners[4], style); // -Y
-        EmitQuad(corners[3], corners[7], corners[6], corners[2], style); // +Y
-        EmitQuad(corners[0], corners[4], corners[7], corners[3], style); // -X
-        EmitQuad(corners[1], corners[2], corners[6], corners[5], style); // +X
+        EmitQuad(corners[0], corners[3], corners[2], corners[1], style);
+        EmitQuad(corners[4], corners[5], corners[6], corners[7], style);
+        EmitQuad(corners[0], corners[1], corners[5], corners[4], style);
+        EmitQuad(corners[3], corners[7], corners[6], corners[2], style);
+        EmitQuad(corners[0], corners[4], corners[7], corners[3], style);
+        EmitQuad(corners[1], corners[2], corners[6], corners[5], style);
         return;
     }
 
@@ -460,7 +379,6 @@ void DebugRenderer::Arrow(const glm::vec3& from, const glm::vec3& to, const Debu
     else
         EmitLine(from, shaftEnd, style);
 
-    // The head is a cone with its tip at `to` opening backwards onto the end of the shaft.
     EmitConeSurface(MakeAxisFrame(to, -direction), headRadius, headLength, segments, 4, style);
 }
 
@@ -484,15 +402,13 @@ void DebugRenderer::Capsule(const glm::vec3& a, const glm::vec3& b, float radius
     glm::mat4 frame = MakeAxisFrame(a, height > 1e-6f ? axis : glm::vec3(0.0f, 1.0f, 0.0f));
 
     uint32 segments = ClampSegments(style.segments);
-    // Even stack count so the equator falls exactly on a stack boundary and the two hemispheres
-    // meet the barrel cleanly.
     uint32 stacks = glm::max(2u, (segments / 2u) & ~1u);
 
     if (height > 1e-6f)
         EmitCylinderSurface(frame, radius, height, segments, 4, false, style);
 
-    EmitSphereSurface(frame, radius, height, segments, stacks, 0, stacks / 2, 4, style);         // Top cap.
-    EmitSphereSurface(frame, radius, 0.0f, segments, stacks, stacks / 2, stacks, 4, style);      // Bottom cap.
+    EmitSphereSurface(frame, radius, height, segments, stacks, 0, stacks / 2, 4, style);
+    EmitSphereSurface(frame, radius, 0.0f, segments, stacks, stacks / 2, stacks, 4, style);
 }
 
 void DebugRenderer::Capsule(const glm::mat4& transform, float radius, float cylinderHeight, const DebugStyle& style)
@@ -515,15 +431,13 @@ void DebugRenderer::Cone(const glm::mat4& transform, float radius, float height,
 void DebugRenderer::SphereRings(const glm::vec3& center, float radius, const DebugStyle& style)
 {
     if (style.filled) {
-        Sphere(center, radius, style); // Three circles have nothing to fill.
+        Sphere(center, radius, style);
         return;
     }
 
     uint32 segments = ClampSegments(style.segments);
     glm::mat4 frame = glm::translate(glm::mat4(1.0f), center);
 
-    // Three great circles, one per basis plane: the XZ ring comes straight out of EmitRing, the
-    // other two are the same ring rotated onto the XY and YZ planes.
     EmitRing(frame, radius, 0.0f, segments, style);
     EmitRing(glm::rotate(frame, glm::radians(90.0f), glm::vec3(1.0f, 0.0f, 0.0f)), radius, 0.0f, segments, style);
     EmitRing(glm::rotate(frame, glm::radians(90.0f), glm::vec3(0.0f, 0.0f, 1.0f)), radius, 0.0f, segments, style);
@@ -533,7 +447,6 @@ void DebugRenderer::Sphere(const glm::vec3& center, float radius, const DebugSty
 {
     uint32 sectors = ClampSegments(style.segments);
     uint32 stacks = glm::max(2u, sectors / 2u);
-    // Wireframe draws the full tessellation -- that's what distinguishes this from SphereRings().
     EmitSphereSurface(glm::translate(glm::mat4(1.0f), center), radius, 0.0f, sectors, stacks, 0, stacks, sectors, style);
 }
 
@@ -546,8 +459,6 @@ void DebugRenderer::Axes(const glm::mat4& transform, float scale, const DebugSty
     const glm::vec4 kAxisColors[3] = { glm::vec4(1.0f, 0.2f, 0.2f, 1.0f), glm::vec4(0.2f, 1.0f, 0.2f, 1.0f), glm::vec4(0.3f, 0.45f, 1.0f, 1.0f) };
 
     for (int i = 0; i < 3; ++i) {
-        // Keep the caller's alpha so a gizmo can still be faded out, but the hue is fixed by
-        // convention -- an axis gizmo whose X isn't red is worse than useless.
         axisStyle.color = glm::vec4(glm::vec3(kAxisColors[i]), style.color.a);
         Arrow(origin, origin + TransformNormal(transform, kLocalAxes[i]) * scale, axisStyle);
     }
@@ -557,7 +468,6 @@ void DebugRenderer::Frustum(const glm::mat4& viewProj, const DebugStyle& style)
 {
     glm::mat4 inverseViewProj = glm::inverse(viewProj);
 
-    // Ring order around each cap, so consecutive indices share an edge.
     const glm::vec2 kCorners[4] = { { -1.0f, -1.0f }, { 1.0f, -1.0f }, { 1.0f, 1.0f }, { -1.0f, 1.0f } };
     glm::vec3 corners[8];
     for (int i = 0; i < 4; ++i) {
@@ -565,14 +475,14 @@ void DebugRenderer::Frustum(const glm::mat4& viewProj, const DebugStyle& style)
             glm::vec4 ndc(kCorners[i].x, kCorners[i].y, cap == 0 ? kNdcNearZ : 1.0f, 1.0f);
             glm::vec4 world = inverseViewProj * ndc;
             if (std::abs(world.w) < 1e-9f)
-                return; // Degenerate/non-invertible projection; nothing meaningful to draw.
+                return;
             corners[cap * 4 + i] = glm::vec3(world) / world.w;
         }
     }
 
     if (style.filled) {
-        EmitQuad(corners[0], corners[1], corners[2], corners[3], style); // Near.
-        EmitQuad(corners[4], corners[7], corners[6], corners[5], style); // Far.
+        EmitQuad(corners[0], corners[1], corners[2], corners[3], style);
+        EmitQuad(corners[4], corners[7], corners[6], corners[5], style);
         for (int i = 0; i < 4; ++i) {
             int next = (i + 1) % 4;
             EmitQuad(corners[i], corners[next], corners[4 + next], corners[4 + i], style);
@@ -586,10 +496,6 @@ void DebugRenderer::Frustum(const glm::mat4& viewProj, const DebugStyle& style)
         }
     }
 }
-
-// ---------------------------------------------------------------------------------------------
-// Flush
-// ---------------------------------------------------------------------------------------------
 
 void DebugRenderer::DrawBucket(agfx::RenderPass& pass, const char* shaderPath, std::initializer_list<const char*> variants,
                                const StreamBuffer& stream, uint32 frameIndex, uint32 baseIndex, uint32 vertexCount)
@@ -650,7 +556,6 @@ void DebugRenderer::Flush(agfx::CommandBuffer& commandBuffer, agfx::RenderTarget
                                              m_Vertices[0].Data(), m_Vertices[0].Size() * sizeof(GPUVertex),
                                              m_Vertices[1].Data(), m_Vertices[1].Size() * sizeof(GPUVertex));
 
-    // Solid first, then lines, then points -- so wireframe overlays read on top of its own fill.
     if (hasDepthWork) {
         agfx::RenderPassCreateInfo passInfo{};
         passInfo.colorAttachmentCount = 1;
@@ -687,7 +592,6 @@ void DebugRenderer::Flush(agfx::CommandBuffer& commandBuffer, agfx::RenderTarget
         agfx::RenderPass pass = commandBuffer.BeginRenderPass(passInfo);
         pass.SetViewport(0.0f, 0.0f, (float)width, (float)height);
         pass.SetScissor(0, 0, width, height);
-        // The overlay block sits behind the depth-tested block in the same buffer.
         if (hasVertices) DrawBucket(pass, kOverlayShaderPath, {}, m_VertexStream, frameIndex, depthVertices, overlayVertices);
         if (hasSegments) DrawBucket(pass, kOverlayShaderPath, { "DEBUG_LINE" }, m_SegmentStream, frameIndex, depthSegments, overlaySegments * 6);
         if (hasPoints)   DrawBucket(pass, kOverlayShaderPath, { "DEBUG_POINT" }, m_PointStream, frameIndex, depthPoints, overlayPoints * 6);

@@ -10,11 +10,6 @@
 
 #include <AGFX/agfx.hpp>
 
-// GPU-side resources for one ModelMesh: a shared vertex buffer (uploaded once, all LODs index into
-// it) plus, per LOD, a meshlet/meshlet-vertex/meshlet-triangle buffer trio. All buffers and views
-// are created up front from the CPU-side ModelMesh's byte lengths -- mirroring GPUTexture/
-// StreamingTexture's "create every mip's view before its data lands" pattern, since a view is just
-// a descriptor and can safely predate the bytes it will eventually describe.
 class GPUModel
 {
 public:

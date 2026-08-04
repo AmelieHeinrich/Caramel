@@ -13,6 +13,7 @@ compile_commands.json
 # Engine files
 Caramel.log
 imgui.ini
+CLAUDE.md
 
 # Compiled assets (CaramelAssetCompiler output, tracked separately via Content/Cache/cache.json)
 Content/Cache

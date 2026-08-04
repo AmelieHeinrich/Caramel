@@ -10,8 +10,6 @@
 
 #include <glm/glm.hpp>
 
-// One placement of a model entity's meshes. rotationEuler is degrees, XYZ order (GetTransform()
-// applies X, then Y, then Z).
 struct Instance
 {
     String name;
@@ -28,11 +26,6 @@ enum class ESceneNodeType
     Entity
 };
 
-// A scene-local edit to one of an entity's materials, keyed by materialIndex (the same raw index
-// used by ModelMesh::materialIndex, scoped to this entity's own .cmdl). Applied on top of the
-// asset's baked-in factors -- see Scene::ApplyMaterialOverrides -- so the same .cmdl loaded by a
-// different entity/scene is never affected. Each factor is independently toggleable so an override
-// can touch just e.g. metallic without also pinning base color to whatever it happened to be.
 struct MaterialOverride
 {
     int32 materialIndex = -1;
@@ -48,10 +41,28 @@ struct MaterialOverride
 
     bool overrideEmissive = false;
     glm::vec3 emissiveFactor{ 0.0f, 0.0f, 0.0f };
+
+    // Material scheme selection. Empty means the default scheme (DefaultPBR).
+    String schemeName;
+
+    // Scheme parameter values keyed by parameter name -- deliberately not a packed blob, so that
+    // reordering or adding a parameter in the scheme JSON cannot corrupt a saved scene. Scalars use
+    // .x. Parameters absent here fall back to the scheme's declared default.
+    TDictionary<String, glm::vec4> schemeParamValues;
+
+    // A scheme assignment counts as an override on its own: without this the derived material slot
+    // would never be allocated and the scheme would be ignored.
+    bool HasAnyOverride() const
+    {
+        return overrideBaseColor || overrideMetallic || overrideRoughness || overrideEmissive
+            || !schemeName.Empty() || schemeParamValues.Size() > 0;
+    }
+
+    // Runtime-only cache of this override's derived GPUScene material slot. Not serialized -- it is
+    // rebuilt on demand, so keep it out of Scene::SaveToFile/LoadFromFile.
+    uint32 gpuMaterialSlot = UINT32_MAX;
 };
 
-// A row in the scene hierarchy: either a pure grouping Folder, or a Model Entity (references one
-// .cmdl asset and owns a list of placements). Owned by Scene via TUnique in the parent's children.
 class SceneNode
 {
 public:
@@ -60,10 +71,9 @@ public:
     SceneNode* parent = nullptr;
     TArray<TUnique<SceneNode>> children;
 
-    // -- Entity-only fields (type == Entity) --
     String cmdlPath;
-    uint32 requestId = 0;          // StreamingManager::LoadModel request id for cmdlPath
-    TArray<uint32> meshIndices;    // indices into StreamingManager::GetModels(), discovered async
+    uint32 requestId = 0;
+    TArray<uint32> meshIndices;
     TArray<Instance> instances;
     TArray<MaterialOverride> materialOverrides;
 };

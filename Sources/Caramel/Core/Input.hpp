@@ -22,12 +22,10 @@ public:
     static void ProcessEvent(const SDL_Event& event);
     static void NewFrame();
 
-    // Keyboard
     static bool IsKeyDown(SDL_Scancode key);
     static bool IsKeyPressed(SDL_Scancode key);
     static bool IsKeyReleased(SDL_Scancode key);
 
-    // Mouse
     static glm::vec2 GetMousePosition();
     static glm::vec2 GetMouseDelta();
     static glm::vec2 GetMouseScrollDelta();
@@ -35,7 +33,6 @@ public:
     static bool IsMouseButtonPressed(uint8 button);
     static bool IsMouseButtonReleased(uint8 button);
 
-    // Gamepad (single primary controller)
     static bool IsGamepadConnected();
     static bool IsGamepadButtonDown(SDL_GamepadButton button);
     static bool IsGamepadButtonPressed(SDL_GamepadButton button);

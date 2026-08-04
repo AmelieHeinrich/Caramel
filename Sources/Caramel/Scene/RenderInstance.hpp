@@ -13,12 +13,10 @@
 class SceneNode;
 class StreamingModel;
 
-// One (entity mesh x instance) draw/pick entry, flattened by Scene::BuildRenderInstances(). Kept
-// standalone (no dependency on Scene.hpp) so the renderer only needs this small header.
 struct RenderInstance
 {
     StreamingModel* mesh = nullptr;
-    glm::mat4 transform{ 1.0f };  // instance transform * mesh's baked model-local transform
+    glm::mat4 transform{ 1.0f };
     SceneNode* owner = nullptr;
     uint32 instanceIndex = 0;
 };

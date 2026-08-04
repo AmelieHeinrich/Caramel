@@ -15,8 +15,8 @@
 
 namespace CaramelAsset
 {
-    constexpr uint32 kCmdlMagic = 0x4C444D43; // 'CMDL'
-    constexpr uint32 kCtexMagic = 0x58455443; // 'CTEX'
+    constexpr uint32 kCmdlMagic = 0x4C444D43;
+    constexpr uint32 kCtexMagic = 0x58455443;
     constexpr uint32 kFormatVersion = 1;
 
     constexpr uint32 kLodCount = 5;
@@ -24,11 +24,6 @@ namespace CaramelAsset
     constexpr uint32 kMeshletMaxTriangles = 124;
     constexpr float32 kMeshletConeWeight = 0.5f;
 
-    //
-    // .cmdl container: CmdlHeader, then `jsonChunkSize` bytes of UTF-8 JSON (space-padded to
-    // a 4-byte boundary), then `binChunkSize` bytes of raw binary (zero-padded to a 16-byte
-    // boundary so vertex/meshlet reads can be SIMD-aligned).
-    //
     struct CmdlHeader
     {
         uint32 magic = kCmdlMagic;
@@ -37,24 +32,20 @@ namespace CaramelAsset
         uint32 binChunkSize = 0;
     };
 
-    // Interleaved mesh vertex. Shared across all LODs of a mesh -- meshopt_simplify only
-    // reduces the index buffer, it never rebuilds the vertex buffer.
     struct Vertex
     {
         glm::vec3 position;
         glm::vec3 normal;
-        glm::vec4 tangent; // xyz = tangent, w = handedness (+1/-1)
+        glm::vec4 tangent;
         glm::vec2 uv;
     };
 
-    // Present only for skinned meshes, one entry per Vertex, same indexing.
     struct SkinVertex
     {
         uint16 jointIndices[4];
         float32 jointWeights[4];
     };
 
-    // Mirrors meshopt_Meshlet exactly so it can be memcpy'd straight from meshoptimizer output.
     struct MeshletDesc
     {
         uint32 vertexOffset;
@@ -63,7 +54,6 @@ namespace CaramelAsset
         uint32 triangleCount;
     };
 
-    // Mirrors meshopt_Bounds (the fields we use) so it can be memcpy'd straight from meshoptimizer output.
     struct MeshletCullData
     {
         glm::vec3 center;
@@ -73,10 +63,6 @@ namespace CaramelAsset
         float32 coneCutoff;
     };
 
-    //
-    // .ctex container: CtexHeader, then `mipCount` MipEntry records, then the raw compressed
-    // block data for each mip back-to-back (each mip start padded to a 4-byte boundary).
-    //
     enum class ECompressedTextureFormat : uint32
     {
         BC4Unorm,
@@ -108,8 +94,6 @@ namespace CaramelAsset
         }
     }
 
-    // Block dimensions (in texels) and compressed byte size of a single block, for computing
-    // bytesPerRow/bytesPerImage when uploading a mip's raw compressed bytes to the GPU.
     struct BlockInfo
     {
         uint32 width = 1;
@@ -135,7 +119,6 @@ namespace CaramelAsset
         }
     }
 
-    // Bytes spanned by one row of blocks for a mip of the given pixel width.
     inline uint32 GetBytesPerRow(ECompressedTextureFormat format, uint32 mipWidth)
     {
         BlockInfo block = GetBlockInfo(format);
@@ -155,7 +138,6 @@ namespace CaramelAsset
         kCtexFlagSRGB = 1 << 0,
     };
 
-    // How a source glTF texture is used -- determines target compressed format and color space.
     enum class ETextureRole
     {
         BaseColor,

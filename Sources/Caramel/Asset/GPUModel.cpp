@@ -52,11 +52,6 @@ GPUModel::GPUModel(const ModelMesh& mesh)
                                                                                         .SetWriteable(false);
         m_MeshletVertexBufferViews[lod] = device.CreateBufferView(meshletVertexViewInfo);
 
-        // Raw/ByteAddressBuffer: packed 3-bytes-per-triangle meshlet-local indices, unpacked in the
-        // mesh shader with a shift/mask (meshoptimizer's native packing, not stride-addressable).
-        // Padded by 4 bytes: the unpack reads a 4-byte-aligned Load2 (8 bytes) starting at the
-        // last triangle's byte offset, which can overshoot the true data end by up to 3 bytes --
-        // the padding keeps that read inside the buffer instead of past its allocation.
         agfx::BufferCreateInfo meshletTriangleInfo = agfx::BufferCreateInfo().SetSize(lodDesc.meshletTriangleBufferLength + 4)
                                                                               .SetStride(4)
                                                                               .SetUsage(agfx::BufferUsage::ShaderRead)

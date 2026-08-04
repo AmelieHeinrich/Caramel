@@ -10,9 +10,6 @@
 
 #include <glm/glm.hpp>
 
-// Minimal free-fly viewport camera: WASD to move, hold the right mouse button and move the mouse
-// to look around (mirrors common editor-viewport conventions so it doesn't fight ImGui's own use
-// of the left mouse button for widget interaction).
 class Camera
 {
 public:
@@ -24,14 +21,11 @@ public:
 
     const glm::vec3& GetPosition() const { return m_Position; }
 
-    /// Unprojects `screenPos` (pixel coordinates, origin top-left, matching Input::GetMousePosition())
-    /// into a world-space ray. `outOrigin` is the near-plane point; `outDir` is far-minus-near
-    /// (**not** normalized), so a ray parameter of 1.0 lands exactly on the far plane.
     void ScreenPointToRay(const glm::vec2& screenPos, uint32 width, uint32 height, float aspectRatio, glm::vec3& outOrigin, glm::vec3& outDir) const;
 
 private:
     glm::vec3 m_Position{ 0.0f, 2.0f, 5.0f };
-    float m_Yaw = -90.0f;   // Degrees; -90 faces down -Z.
+    float m_Yaw = -90.0f;
     float m_Pitch = 0.0f;
 
     float m_MoveSpeed = 5.0f;

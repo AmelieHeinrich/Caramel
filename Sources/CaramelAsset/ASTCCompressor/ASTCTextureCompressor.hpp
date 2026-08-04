@@ -6,6 +6,4 @@
 
 #pragma once
 
-// macOS texture backend: implements CaramelAsset::PlatformTextureBackend (declared in
-// TextureCompressor.hpp) on top of ARM astc-encoder, using a fixed 4x4 block size.
 #include "../TextureCompressor.hpp"

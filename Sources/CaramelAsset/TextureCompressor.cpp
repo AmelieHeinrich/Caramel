@@ -39,7 +39,6 @@ namespace CaramelAsset
 
             if (isNormalMap)
             {
-                // Filtering denormalizes tangent-space normals -- renormalize every texel after resampling.
                 for (size_t i = 0; i < static_cast<size_t>(nextWidth) * nextHeight; i++)
                 {
                     uint8* p = &next[i * 4];

@@ -98,7 +98,7 @@ namespace CaramelAsset
             }
             else
             {
-                vertex.tangent = glm::vec4(0.0f, 0.0f, 0.0f, 1.0f); // regenerated below by the caller
+                vertex.tangent = glm::vec4(0.0f, 0.0f, 0.0f, 1.0f);
             }
 
             if (outMesh.hasSkin)
@@ -285,7 +285,6 @@ namespace CaramelAsset
         if (mesh.vertices.IsEmpty() || rawIndices.IsEmpty())
             return mesh;
 
-        // Deduplicate binary-equivalent vertices (identity determined by position/normal/tangent/uv only).
         TArray<uint32> remap(mesh.vertices.Size());
         size_t uniqueCount = meshopt_generateVertexRemap(remap.Data(), rawIndices.Data(), rawIndices.Size(), mesh.vertices.Data(), mesh.vertices.Size(), sizeof(Vertex));
 
@@ -305,7 +304,6 @@ namespace CaramelAsset
         if (!mesh.hasTangent)
             GenerateTangents(vertices, indices);
 
-        // Vertex-cache-optimize LOD0, then fetch-optimize once to reorder the buffer *all* LODs will share.
         meshopt_optimizeVertexCache(indices.Data(), indices.Data(), indices.Size(), vertices.Size());
 
         TArray<uint32> fetchRemap(vertices.Size());
@@ -335,8 +333,6 @@ namespace CaramelAsset
 
         const float32* positions = reinterpret_cast<const float32*>(mesh.vertices.Data());
 
-        // Ratios/errors are indexed fine-to-coarse (generation always simplifies down from the full-res
-        // base); mesh.lods[] is stored coarse-to-fine (index 0 = coarsest) so streaming can load it in order.
         static constexpr float32 kLodRatios[kLodCount] = { 1.0f, 0.5f, 0.25f, 0.12f, 0.06f };
         static constexpr float32 kLodTargetErrors[kLodCount] = { 0.0f, 0.01f, 0.03f, 0.06f, 0.12f };
 
@@ -358,8 +354,6 @@ namespace CaramelAsset
 
             if (newIndexCount > targetIndexCount * 2 && newIndexCount < lod0Indices.Size())
             {
-                // meshopt_simplify couldn't hit the target ratio without exceeding the error bound;
-                // fall back to the sloppy simplifier which ignores topology to reach the target size.
                 TArray<uint32> sloppyIndices(lod0Indices.Size());
                 size_t sloppyCount = meshopt_simplifySloppy(
                     sloppyIndices.Data(), lod0Indices.Data(), lod0Indices.Size(),
@@ -372,9 +366,6 @@ namespace CaramelAsset
                 }
             }
 
-            // The collider is cooked from lodIndex 1 (ratio 0.12, stored at mesh.lods[kLodCount - 2] --
-            // the array slot the Model Viewer UI calls "LOD 1") before this level's index buffer gets
-            // reordered for GPU vertex-cache locality and split into meshlets.
             if (lodIndex == 1)
                 mesh.colliderData = CookCollider(mesh.vertices, lodIndices);
 

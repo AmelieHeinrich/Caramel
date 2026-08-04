@@ -19,12 +19,9 @@ void JoltDebugRenderer::DrawLine(JPH::RVec3Arg inFrom, JPH::RVec3Arg inTo, JPH::
     DebugStyle style;
     style.color = glm::vec4(inColor.r / 255.0f, inColor.g / 255.0f, inColor.b / 255.0f, inColor.a / 255.0f);
     style.depthTest = m_DepthTest;
-    // Qualified with :: -- JPH::DebugRenderer is a base of this class, so unqualified
-    // "DebugRenderer" resolves to it (injected-class-name) rather than the global ::DebugRenderer.
     ::DebugRenderer::Get().Line(Physics::ToGlm(inFrom), Physics::ToGlm(inTo), style);
 }
 
 void JoltDebugRenderer::DrawText3D(JPH::RVec3Arg, const std::string_view&, JPH::ColorArg, float)
 {
-    // Not needed for collider visualization -- Caramel's DebugRenderer has no text primitive.
 }

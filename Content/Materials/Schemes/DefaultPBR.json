@@ -1,0 +1,22 @@
+{
+    "name": "DefaultPBR",
+    "shader": "Content/Shaders/DefaultPBR.hlsl",
+    "renderState": {
+        "fillMode": "Solid",
+        "cullMode": "None",
+        "frontFace": "CounterClockwise",
+        "topology": "Triangles",
+        "depthTest": true,
+        "depthWrite": true,
+        "depthCompare": "Less",
+        "blend": "None"
+    },
+    "flags": {
+        "castsShadows": true,
+        "receivesShadows": true
+    },
+    "parameters": [
+        { "name": "ambientScale", "type": "float", "default": 0.25, "min": 0.0, "max": 2.0 },
+        { "name": "diffuseScale", "type": "float", "default": 0.85, "min": 0.0, "max": 4.0 }
+    ]
+}

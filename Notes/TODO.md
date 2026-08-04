@@ -1,8 +1,6 @@
 Basics
 - Render graph
-- GPU scene representation
 - BLAS/TLAS building (async compute)
-- Material bucketing (render queues)
 
 GPU driven rendering
 - Indirect mesh draw setup
@@ -16,6 +14,10 @@ Base lighting pass
 - Cook-torrance + burley
 - Clustered light culling
 - IES profiles
+
+Animation
+- Compute skinning
+- Very simple playback, no blend states or anything
 
 Temporal infrastructure
 - Camera jitter + 2.5D MVs

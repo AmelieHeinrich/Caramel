@@ -54,6 +54,20 @@ namespace
         j["roughnessFactor"] = matOverride.roughnessFactor;
         j["overrideEmissive"] = matOverride.overrideEmissive;
         j["emissiveFactor"] = { matOverride.emissiveFactor.x, matOverride.emissiveFactor.y, matOverride.emissiveFactor.z };
+
+        // Scheme params are written as a name -> [x,y,z,w] object rather than packed bytes, so that
+        // editing the scheme's parameter list later cannot silently misinterpret a saved scene.
+        if (!matOverride.schemeName.Empty())
+            j["scheme"] = matOverride.schemeName.CStr();
+
+        if (matOverride.schemeParamValues.Size() > 0)
+        {
+            nlohmann::json paramsJson = nlohmann::json::object();
+            for (const auto& entry : matOverride.schemeParamValues)
+                paramsJson[entry.first.CStr()] = { entry.second.x, entry.second.y, entry.second.z, entry.second.w };
+            j["schemeParams"] = paramsJson;
+        }
+
         return j;
     }
 
@@ -75,6 +89,27 @@ namespace
         matOverride.overrideEmissive = j.value("overrideEmissive", false);
         auto em = j.value("emissiveFactor", std::vector<float32>{ 0.0f, 0.0f, 0.0f });
         matOverride.emissiveFactor = glm::vec3(em[0], em[1], em[2]);
+
+        matOverride.schemeName = j.value("scheme", "");
+
+        if (j.contains("schemeParams") && j["schemeParams"].is_object())
+        {
+            for (auto it = j["schemeParams"].begin(); it != j["schemeParams"].end(); ++it)
+            {
+                glm::vec4 value{ 0.0f };
+                if (it.value().is_array())
+                {
+                    const nlohmann::json& arr = it.value();
+                    for (uint32 i = 0; i < 4 && i < arr.size(); ++i)
+                        value[i] = arr[i].get<float32>();
+                }
+                else if (it.value().is_number())
+                {
+                    value.x = it.value().get<float32>();
+                }
+                matOverride.schemeParamValues[String(it.key())] = value;
+            }
+        }
 
         return matOverride;
     }
@@ -215,7 +250,6 @@ void Scene::Reparent(SceneNode* node, SceneNode* newParent)
     if (node->parent == actualNewParent)
         return;
 
-    // Reject cycles: actualNewParent can't be node itself or one of node's own descendants.
     for (SceneNode* p = actualNewParent; p; p = p->parent)
         if (p == node)
             return;
@@ -242,14 +276,7 @@ void Scene::Update(StreamingManager& streamingManager)
         uint32 requestId = models[m_ScannedModelCount]->GetRequestId();
         auto it = m_PendingRequests.Find(requestId);
         if (it != m_PendingRequests.End())
-        {
             it->second->meshIndices.PushBack((uint32)m_ScannedModelCount);
-            // Re-applies (idempotent) on every new mesh discovered for this entity, since the first
-            // one to show up is what makes the shared CPUModel's material array reachable at all --
-            // needed for entities loaded from a saved scene, whose overrides are already known before
-            // any of their meshes have streamed in.
-            ApplyMaterialOverrides(*it->second, streamingManager);
-        }
     }
 }
 
@@ -298,36 +325,6 @@ MaterialOverride& Scene::GetOrCreateMaterialOverride(SceneNode& entity, int32 ma
     return entity.materialOverrides[entity.materialOverrides.Size() - 1];
 }
 
-void Scene::ApplyMaterialOverrides(SceneNode& entity, StreamingManager& streamingManager)
-{
-    if (entity.type != ESceneNodeType::Entity || entity.materialOverrides.IsEmpty() || entity.meshIndices.IsEmpty())
-        return;
-
-    // Any one of this entity's streamed meshes reaches the same shared CPUModel (one instance per
-    // LoadModel() call, shared by every mesh that call produced) -- its full materials array is
-    // available as soon as the model itself parsed, which happens before any mesh is queued, so the
-    // first mesh to show up in meshIndices is already enough regardless of which materialIndex it is.
-    const TArray<TShared<StreamingModel>>& models = streamingManager.GetModels();
-    TShared<CPUModel> model = models[entity.meshIndices[0]]->GetSourceModel();
-    TArray<ModelMaterial>& materials = model->GetMaterials();
-
-    for (const MaterialOverride& matOverride : entity.materialOverrides)
-    {
-        if (matOverride.materialIndex < 0 || matOverride.materialIndex >= (int32)materials.Size())
-            continue;
-
-        ModelMaterial& material = materials[matOverride.materialIndex];
-        if (matOverride.overrideBaseColor)
-            material.baseColorFactor = matOverride.baseColorFactor;
-        if (matOverride.overrideMetallic)
-            material.metallicFactor = matOverride.metallicFactor;
-        if (matOverride.overrideRoughness)
-            material.roughnessFactor = matOverride.roughnessFactor;
-        if (matOverride.overrideEmissive)
-            material.emissiveFactor = matOverride.emissiveFactor;
-    }
-}
-
 bool Scene::SaveToFile(const String& path) const
 {
     nlohmann::json j;
@@ -351,8 +348,6 @@ bool Scene::LoadFromFile(const String& path, StreamingManager& streamingManager)
     nlohmann::json j;
     file >> j;
 
-    // StreamingManager has no unload path -- previously-streamed meshes stay GPU-resident but
-    // become unreferenced (no longer in any entity's meshIndices, so no longer drawn/pickable).
     m_Root.children.Clear();
     m_PendingRequests.Clear();
 

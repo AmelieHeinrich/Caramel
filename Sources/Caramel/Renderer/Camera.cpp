@@ -54,7 +54,6 @@ glm::mat4 Camera::GetProjection(float aspectRatio) const
 
 void Camera::ScreenPointToRay(const glm::vec2& screenPos, uint32 width, uint32 height, float aspectRatio, glm::vec3& outOrigin, glm::vec3& outDir) const
 {
-    // Same NDC-depth convention as DebugRenderer::Frustum, which unprojects the same way.
 #if defined(GLM_FORCE_DEPTH_ZERO_TO_ONE)
     constexpr float kNdcNearZ = 0.0f;
 #else

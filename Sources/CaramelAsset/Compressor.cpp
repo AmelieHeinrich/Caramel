@@ -170,9 +170,6 @@ namespace CaramelAsset
             return file.good();
         }
 
-        // Reserves a .ctex for a texture slot, deduplicating by source image so a texture referenced
-        // by multiple materials is only compiled once. Returns the .ctex file name (relative to the
-        // output directory), or "" if the slot is unused.
         std::string ReserveTextureForRole(CompileContext& ctx, const cgltf_texture_view& view, ETextureRole role)
         {
             if (!view.texture || !view.texture->image)
@@ -187,8 +184,6 @@ namespace CaramelAsset
             TextureJob job;
             job.image = image;
             job.role = role;
-            // Stored/returned relative to the asset's cache folder (not to the referencing material
-            // file) so both the .cmdl and any Materials/*.json can resolve it the same way.
             job.fileName = "Textures/" + SanitizeFileName(image->name ? image->name : "Texture") + "_" + std::to_string(ctx.compiledTextures.Size()) + ".ctex";
 
             ctx.compiledTextures.Insert(image, ctx.textureJobs.Size());
@@ -213,7 +208,6 @@ namespace CaramelAsset
 
                 if (job.role == ETextureRole::MetallicRoughness)
                 {
-                    // glTF packs roughness in G and metalness in B -- repack into a synthetic (roughness, metal) RG image.
                     for (size_t i = 0; i < static_cast<size_t>(width) * height; i++)
                     {
                         uint8 g = pixels[i * 4 + 1];
@@ -236,9 +230,6 @@ namespace CaramelAsset
             });
         }
 
-        // Materials are written as standalone, hand-editable JSON files (rather than embedded in the
-        // .cmdl's JSON chunk) so the engine/content tools can tweak a material without touching mesh data.
-        // Returns the file's path relative to the asset's cache folder, e.g. "Materials/Foo_0.json".
         std::string WriteMaterialFile(const CompileContext& ctx, const nlohmann::json& materialJson, size_t index, const char* name)
         {
             std::string fileName = "Materials/" + SanitizeFileName(name && *name ? name : "Material") + "_" + std::to_string(index) + ".json";
@@ -400,8 +391,6 @@ namespace CaramelAsset
                 j["colliderLength"] = 0;
             }
 
-            // mesh.lods[] is coarse-to-fine (see MeshCompressor.hpp), so this also writes the binary
-            // chunk coarse-to-fine -- a streamer can load LOD entries from lods[0] onward in file order.
             nlohmann::json lodsJson = nlohmann::json::array();
             for (uint32 i = 0; i < kLodCount; i++)
             {
@@ -622,7 +611,7 @@ namespace CaramelAsset
                     if (channel.target_path != cgltf_animation_path_type_translation &&
                         channel.target_path != cgltf_animation_path_type_rotation &&
                         channel.target_path != cgltf_animation_path_type_scale)
-                        continue; // morph target weights are out of scope in v1
+                        continue;
 
                     const cgltf_animation_sampler& sampler = *channel.sampler;
                     cgltf_size keyCount = sampler.input->count;
@@ -698,9 +687,6 @@ namespace CaramelAsset
             return file.good();
         }
 
-        // Content/Cache/cache.json maps each source asset (by relative path) to the cache subfolder
-        // compiled from it, so recompiles land in the same place and Content/Cache/ as a whole stays a
-        // single, easy-to-gitignore, disposable directory instead of scattering output next to sources.
         nlohmann::json LoadCacheManifest(const std::filesystem::path& manifestPath)
         {
             if (std::filesystem::exists(manifestPath))
@@ -723,8 +709,6 @@ namespace CaramelAsset
             file << manifest.dump(4);
         }
 
-        // Reuses the folder already recorded for this source on a recompile; otherwise picks
-        // <stem>, disambiguating with a numeric suffix if another source already claimed that name.
         std::string ResolveCacheFolder(const nlohmann::json& manifest, const std::string& sourceKey, const std::string& stem)
         {
             const auto& entries = manifest["entries"];
@@ -765,8 +749,6 @@ namespace CaramelAsset
         ctx.sourceDirectory = inputPath.parent_path().string();
         ctx.verbose = options.verbose;
 
-        // Default output goes under the shared Content/Cache/ directory, tracked via cache.json so the
-        // whole directory can be gitignored; passing -o explicitly opts out of the cache bookkeeping.
         const bool useCache = options.outputDirectory.Empty();
         std::filesystem::path manifestPath = std::filesystem::path("Content") / "Cache" / "cache.json";
         nlohmann::json manifest;
@@ -822,7 +804,7 @@ namespace CaramelAsset
         CompileAnimations(ctx);
 
         cgltf_size materialCount = ctx.gltf->materials_count;
-        size_t meshCount = ctx.json["meshes"].size(); // compiled primitives, not cgltf_mesh count -- one glTF mesh may hold many primitives
+        size_t meshCount = ctx.json["meshes"].size();
         size_t textureCount = ctx.compiledTextures.Size();
 
         std::string stem = inputPath.stem().string();

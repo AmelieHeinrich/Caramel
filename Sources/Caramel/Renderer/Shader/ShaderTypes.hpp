@@ -44,11 +44,8 @@ inline agfx::ShaderModuleType ToAgfxShaderModuleType(EShaderStage stage)
     return agfx::ShaderModuleType::Vertex;
 }
 
-// Maximum number of `#pragma variant` toggles a single shader file may declare (bit-width of the variant mask).
 static constexpr uint64 kMaxShaderVariants = 64;
 
-// The result of parsing a shader file: its fully include-inlined source text, every file that
-// contributed to it (for hot-reload dependency tracking), and the pragma-declared stages/variants.
 struct ParsedShaderSource
 {
     String ShaderPath;
@@ -58,9 +55,6 @@ struct ParsedShaderSource
     TArray<String> Variants;
 };
 
-// Raw compiled bytecode produced off the render thread (by the watcher thread, or synchronously
-// on first use). Never holds an AGFX handle -- only the render thread is allowed to realize these
-// into live agfx::ShaderModule/Pipeline objects.
 struct PendingCompileResult
 {
     String ShaderPath;
@@ -76,8 +70,6 @@ enum class EPipelineKind
     Compute
 };
 
-// A single compiled variant's live GPU objects. Move-only (agfx::Handle-derived members delete
-// their copy constructor), so it can never be accidentally copied across threads.
 struct CompiledVariant
 {
     TDictionary<EShaderStage, agfx::ShaderModule> Modules;
@@ -85,9 +77,6 @@ struct CompiledVariant
     agfx::ComputePipeline ComputePipeline;
 };
 
-// A shader registered via ShaderServer::RegisterRenderPipeline/RegisterComputePipeline: the
-// caller's pipeline template (shader-module fields left blank), the current parse of its source,
-// and a cache of one CompiledVariant per requested variant bitmask.
 struct RegisteredPipeline
 {
     EPipelineKind Kind = EPipelineKind::Render;

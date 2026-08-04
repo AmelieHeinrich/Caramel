@@ -12,6 +12,12 @@
 #include <Caramel/Asset/StreamingManager.hpp>
 #include <Caramel/Physics/JoltDebugRenderer.hpp>
 #include <Caramel/Scene/Scene.hpp>
+#include <Caramel/Editor/EditorContext.hpp>
+#include <Caramel/Editor/ViewportPanel.hpp>
+#include <Caramel/Editor/OverlayPanel.hpp>
+#include <Caramel/Editor/HierarchyPanel.hpp>
+#include <Caramel/Editor/InspectorPanel.hpp>
+#include <Caramel/Editor/ContentDrawerPanel.hpp>
 
 #include <SDL3/SDL.h>
 #include <imgui.h>
@@ -34,27 +40,19 @@ public:
     ~Application();
 
     void Run();
+
+    static void SDLCALL OnSaveDialogResult(void* userdata, const char* const* filelist, int filter);
+    static void SDLCALL OnOpenDialogResult(void* userdata, const char* const* filelist, int filter);
+
 private:
-    void ShowOverlay();
-    void ShowViewport();
     void SetupDefaultDockLayout(ImGuiID dockspaceId);
-    void ShowHierarchy();
-    void ShowInspector();
-    void ShowContentDrawer();
-    void ShowRendererSettings();
-    void DrawSceneNode(SceneNode& node);
-    void DrawContentDirectory(const String& directory);
     void UpdatePicking(const TArray<RenderInstance>& renderInstances);
     void DrawColliders(const TArray<RenderInstance>& renderInstances);
 
     void HandleDroppedFile(const String& path);
 
-    // Runs the actual Save/Load off the SDL file dialog's async result -- called once per frame
-    // from Run(), never from the dialog callback itself (which may fire on a different thread).
     void ProcessPendingFileDialogResult();
     void StorePendingDialogResult(const char* const* filelist, bool isSave);
-    static void SDLCALL OnSaveDialogResult(void* userdata, const char* const* filelist, int filter);
-    static void SDLCALL OnOpenDialogResult(void* userdata, const char* const* filelist, int filter);
 
 private:
     ApplicationInfo m_Info;
@@ -67,30 +65,13 @@ private:
     TUnique<JoltDebugRenderer> m_JoltDebugRenderer;
 
     Scene m_Scene;
-    SceneNode* m_SelectedEntity = nullptr;
-    uint32 m_SelectedInstance = 0;
-    // Non-null when the selection has been drilled down to one specific mesh within the selected
-    // instance (e.g. clicked in the viewport, or a "Mesh_N" row picked in the Hierarchy); null
-    // means the whole instance is selected (every mesh highlights).
-    StreamingModel* m_SelectedMesh = nullptr;
+    EditorContext m_EditorContext;
 
-    // Hierarchy in-place rename state -- set on double-click, cleared on commit/cancel.
-    SceneNode* m_RenamingNode = nullptr;
-    bool m_RenameJustStarted = false;
-    char m_RenameBuffer[256] = {};
-
-    // Screen-space rect of the Viewport panel's content region, refreshed every frame by
-    // ShowViewport() before UpdatePicking() runs -- the single source of truth every other
-    // viewport-space computation (gizmo rect, pick ray, drop target, resolution overlay) reads from.
-    ImVec2 m_ViewportRectMin{ 0.0f, 0.0f };
-    ImVec2 m_ViewportRectSize{ 1.0f, 1.0f };
-    bool m_ViewportHovered = false;
-
-    // Bottom content-drawer open/close animation state (see ShowContentDrawer()). Time elapsed
-    // since the last open/close toggle; starts already past the animation duration so the drawer
-    // is at rest (fully closed) on the very first frame instead of animating open from a cold t=0.
-    bool m_ContentDrawerOpen = false;
-    float m_ContentDrawerAnimTime = 1.0f;
+    ViewportPanel m_ViewportPanel;
+    OverlayPanel m_OverlayPanel;
+    HierarchyPanel m_HierarchyPanel;
+    InspectorPanel m_InspectorPanel;
+    ContentDrawerPanel m_ContentDrawerPanel;
 
     agfxDeviceInfo m_DeviceInfo;
 

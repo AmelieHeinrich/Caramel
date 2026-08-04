@@ -1,13 +1,23 @@
 /**
  * @ Author: Amélie Heinrich (amelie@dayiii.com)
- * @ Create Time: 2026-08-03 10:40:00
+ * @ Create Time: 2026-08-04 12:00:00
  * @ Copyright: Day III Digital - All rights reserved
  */
 
-#include "Common/AGFX.hlsli"
+// Geometry half of every material scheme. A scheme's .hlsl includes this and adds only its own
+// parameter struct and pixel function -- the meshlet unpacking and vertex transform are identical
+// for all of them.
+//
+// The `#pragma mesh` below is picked up even though it lives in an include: ShaderParser inlines
+// includes before it scans for pragmas.
 
-#pragma mesh SponzaMS
-#pragma pixel SponzaPS
+#ifndef CARAMEL_SCENEMESH_HLSL
+#define CARAMEL_SCENEMESH_HLSL
+
+#include "AGFX.hlsli"
+#include "GPUScene.hlsli"
+
+#pragma mesh SceneMS
 
 // Mirrors CaramelAsset::Vertex (Sources/CaramelAsset/Format.hpp) field-for-field.
 struct Vertex {
@@ -29,32 +39,38 @@ struct FrameConstants {
     float4x4 mViewProj;
 };
 
-struct InstanceData {
-    float4x4 mModel;
-};
-
-struct SponzaPushConstants {
-    // Must come first -- see the mirrored C++ struct in SponzaRenderer.cpp for why (16-byte vector
-    // alignment). emissiveFactor's w is unused.
-    float4 vBaseColorFactor;
-    float4 vEmissiveFactor;
+// Mirrors ScenePushConstants in Sources/Caramel/Renderer/SceneRenderer.cpp. rSchemeParams points at
+// the parameter buffer of the scheme bucket currently being drawn.
+struct ScenePushConstants {
     ResourceHandle rFrameConstants;
     ResourceHandle rInstanceBuffer;
+    ResourceHandle rMaterialBuffer;
+    ResourceHandle rSchemeParams;
     uint uInstanceIndex;
-    ResourceHandle rVertexBuffer;
-    ResourceHandle rMeshletBuffer;
-    ResourceHandle rMeshletVertexBuffer;
-    ResourceHandle rMeshletTriangleBuffer;
-    ResourceHandle rBaseColorTexture;
     ResourceHandle rSampler;
 };
-AGFX_PUSH_CONSTANTS(SponzaPushConstants, g_Constants);
+AGFX_PUSH_CONSTANTS(ScenePushConstants, g_Constants);
 
 struct VSOut {
     float4 vPosition : SV_POSITION;
     float3 vWorldNormal : NORMAL0;
     float2 vUV : TEXCOORD0;
+    // The instance is read in the mesh shader, so the material index has to be forwarded. It is
+    // constant across the meshlet -- nointerpolation keeps it exact.
+    nointerpolation uint uMaterialSlot : TEXCOORD1;
+    float3 vWorldPosition : TEXCOORD2;
 };
+
+// Loads the material of the pixel being shaded. Every scheme's pixel shader starts with this.
+GPUMaterial SceneLoadMaterial(uint materialSlot) {
+    AGFXStructuredBuffer<GPUMaterial> bMaterials = AGFXStructuredBuffer<GPUMaterial>::Create(g_Constants.rMaterialBuffer);
+    return bMaterials.Load(materialSlot);
+}
+
+// Scheme parameter buffers are indexed by global material slot, so no separate param index is
+// needed -- see GPUScene.cpp for why that sparseness is deliberate.
+#define SCENE_LOAD_SCHEME_PARAMS(type, materialSlot) \
+    (AGFXStructuredBuffer<type>::Create(g_Constants.rSchemeParams).Load(materialSlot))
 
 // meshoptimizer packs meshlet-local triangle indices as 3 consecutive bytes per triangle (no
 // 4-byte alignment between triangles, only meshlet.uTriangleOffset itself is 4-byte aligned), so a
@@ -71,24 +87,26 @@ uint3 UnpackTriangle(AGFXByteAddressBuffer buf, uint byteOffset) {
 // kMeshletMaxVertices / kMeshletMaxTriangles from Sources/CaramelAsset/Format.hpp.
 [numthreads(32, 1, 1)]
 [outputtopology("triangle")]
-void SponzaMS(
+void SceneMS(
     uint3 uGroupID : SV_GroupID,
     uint3 uGroupThreadID : SV_GroupThreadID,
     out indices uint3 outTriangles[124],
     out vertices VSOut outVertices[64])
 {
-    AGFXStructuredBuffer<MeshletDesc> bMeshlets = AGFXStructuredBuffer<MeshletDesc>::Create(g_Constants.rMeshletBuffer);
+    AGFXStructuredBuffer<GPUInstance> bInstances = AGFXStructuredBuffer<GPUInstance>::Create(g_Constants.rInstanceBuffer);
+    GPUInstance instance = bInstances.Load(g_Constants.uInstanceIndex);
+
+    AGFXStructuredBuffer<MeshletDesc> bMeshlets = AGFXStructuredBuffer<MeshletDesc>::Create(instance.rMeshletBuffer);
     MeshletDesc meshlet = bMeshlets.Load(uGroupID.x);
 
     SetMeshOutputCounts(meshlet.uVertexCount, meshlet.uTriangleCount);
 
     AGFXStructuredBuffer<FrameConstants> bFrame = AGFXStructuredBuffer<FrameConstants>::Create(g_Constants.rFrameConstants);
-    AGFXStructuredBuffer<InstanceData> bInstances = AGFXStructuredBuffer<InstanceData>::Create(g_Constants.rInstanceBuffer);
-    float4x4 mModel = bInstances.Load(g_Constants.uInstanceIndex).mModel;
     float4x4 mViewProj = bFrame.Load(0).mViewProj;
+    float4x4 mModel = instance.mTransform;
 
-    AGFXStructuredBuffer<uint> bMeshletVertices = AGFXStructuredBuffer<uint>::Create(g_Constants.rMeshletVertexBuffer);
-    AGFXStructuredBuffer<Vertex> bVertices = AGFXStructuredBuffer<Vertex>::Create(g_Constants.rVertexBuffer);
+    AGFXStructuredBuffer<uint> bMeshletVertices = AGFXStructuredBuffer<uint>::Create(instance.rMeshletVertexBuffer);
+    AGFXStructuredBuffer<Vertex> bVertices = AGFXStructuredBuffer<Vertex>::Create(instance.rVertexBuffer);
 
     for (uint v = uGroupThreadID.x; v < meshlet.uVertexCount; v += 32) {
         uint vertexIndex = bMeshletVertices.Load(meshlet.uVertexOffset + v);
@@ -100,26 +118,15 @@ void SponzaMS(
         o.vPosition = mul(mViewProj, worldPosition);
         o.vWorldNormal = mul((float3x3)mModel, vertex.vNormal); // uniform-scale assumption, no inverse-transpose
         o.vUV = vertex.vUV;
+        o.uMaterialSlot = instance.uMaterialSlot;
+        o.vWorldPosition = worldPosition.xyz;
         outVertices[v] = o;
     }
 
-    AGFXByteAddressBuffer bTriangles = AGFXByteAddressBuffer::Create(g_Constants.rMeshletTriangleBuffer);
+    AGFXByteAddressBuffer bTriangles = AGFXByteAddressBuffer::Create(instance.rMeshletTriangleBuffer);
     for (uint t = uGroupThreadID.x; t < meshlet.uTriangleCount; t += 32) {
         outTriangles[t] = UnpackTriangle(bTriangles, meshlet.uTriangleOffset + t * 3);
     }
 }
 
-float4 SponzaPS(VSOut input) : SV_Target {
-    AGFXTexture2D<float4> tBaseColor = AGFXTexture2D<float4>::Create(g_Constants.rBaseColorTexture);
-    AGFXSampler sSampler = AGFXSampler::Create(g_Constants.rSampler);
-    float4 baseColor = tBaseColor.Sample(sSampler, input.vUV) * g_Constants.vBaseColorFactor;
-
-    float3 normal = normalize(input.vWorldNormal);
-    float3 lightDir = normalize(float3(-0.4f, 1.0f, -0.3f));
-    float ndotl = max(dot(normal, lightDir), 0.0f);
-
-    float3 ambient = baseColor.rgb * 0.25f;
-    float3 diffuse = baseColor.rgb * ndotl * 0.85f;
-    float3 emissive = g_Constants.vEmissiveFactor.rgb;
-    return float4(ambient + diffuse + emissive, baseColor.a);
-}
+#endif

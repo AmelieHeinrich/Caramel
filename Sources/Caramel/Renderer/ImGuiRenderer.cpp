@@ -14,9 +14,6 @@
 
 namespace {
 
-// Heap-allocated per-ImTextureData backend state (stored in ImTextureData::BackendUserData) --
-// owns the live agfx::Texture/TextureView for one ImGui texture (the font atlas, or a
-// user-registered texture).
 struct ImGuiTextureData
 {
     agfx::Texture Texture;
@@ -25,9 +22,6 @@ struct ImGuiTextureData
 
 constexpr const char* kImGuiShaderPath = "Content/Shaders/ImGui.hlsl";
 
-// "Caramel Noir" theme -- warm dark charcoal base with a single caramel-amber accent, in the
-// spirit of moody, high-contrast game UIs (Persona 5's overlines, Death Stranding/Super Metroid's
-// amber HUD glows, Fear & Hunger 2's grim warm palette) kept subtle rather than loud.
 ImVec4 Col(uint8 r, uint8 g, uint8 b, uint8 a = 255)
 {
     return ImVec4(r / 255.0f, g / 255.0f, b / 255.0f, a / 255.0f);
@@ -111,7 +105,6 @@ void ApplyCaramelTheme(ImGuiStyle& style)
     colors[ImGuiCol_NavWindowingDimBg]     = ImVec4(0, 0, 0, 0.50f);
     colors[ImGuiCol_ModalWindowDimBg]      = ImVec4(0, 0, 0, 0.60f);
 
-    // Slightly rounded, compact -- small radii and tight padding rather than fully flat or plush.
     style.WindowRounding    = 4.0f;
     style.WindowBorderSize  = 1.0f;
     style.ChildRounding     = 4.0f;
@@ -136,7 +129,7 @@ void ApplyCaramelTheme(ImGuiStyle& style)
     style.SeparatorTextBorderSize = 1.0f;
 }
 
-} // namespace
+}
 
 ImGuiRenderer::ImGuiRenderer(agfx::Device& device, agfx::CommandQueue& queue, agfx::TextureFormat colorFormat, uint32 framesInFlight)
     : m_Device(&device)
@@ -175,8 +168,6 @@ ImGuiRenderer::ImGuiRenderer(agfx::Device& device, agfx::CommandQueue& queue, ag
     io.BackendFlags |= ImGuiBackendFlags_RendererHasVtxOffset;
     io.BackendFlags |= ImGuiBackendFlags_RendererHasTextures;
 
-    // Ubuntu-Regular for body text (readable at compact UI sizes); Quicksand-Bold reserved as a
-    // separate display font for section headers/titles via GetHeaderFont().
     io.FontDefault = io.Fonts->AddFontFromFileTTF("Content/Fonts/Ubuntu-Regular.ttf", 17.0f);
 
     static const ImWchar kIconRanges[] = { ICON_MIN_FA, ICON_MAX_FA, 0 };
@@ -216,7 +207,6 @@ void ImGuiRenderer::UploadTexture(agfx::Texture& dstTexture, const agfxTextureRe
         memcpy(mapped.Get(), data, dataSize);
     }
 
-    // Barriers are command-buffer-level, so each upload gets its own short pass around the copy.
     m_UploadCmdBuffer.TextureBarrier(dstTexture, oldState, agfx::ResourceState::CopyDest);
     agfx::ComputePass pass = m_UploadCmdBuffer.BeginComputePass("ImGui Texture Upload");
     pass.CopyBufferToTexture(staging, 0, dstTexture, region, 0, 0, bytesPerRow, bytesPerImage);

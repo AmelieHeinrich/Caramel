@@ -22,9 +22,6 @@ public:
     void LoadTexture(const String& path);
     void LoadDirectory(const String& directory);
 
-    // Fire-and-forget async load; the returned id tags every StreamingModel this call eventually
-    // produces (StreamingModel::GetRequestId()), so a caller can discover "my" meshes later by
-    // scanning GetModels() for that id -- there is no completion callback.
     uint32 LoadModel(const String& path);
 
     void SetAutoStream(bool value) { m_AutoStream = value; }
@@ -41,11 +38,6 @@ public:
     const TArray<TShared<StreamingTexture>>& GetTextures() const { return m_Textures; }
     const TArray<TShared<StreamingModel>>& GetModels() const { return m_Models; }
 
-    // materialIndex is only meaningful relative to the .cmdl it came from (each compiled model
-    // indexes its own materials from 0), so the lookup must be scoped by requestId too -- otherwise
-    // two different loaded models sharing the same raw materialIndex (near-guaranteed once more
-    // than one model is loaded) collide and silently steal each other's textures. A material has up
-    // to 5 independent texture slots, so slot disambiguates which one this call wants.
     TShared<StreamingTexture> GetMaterialTexture(uint32 requestId, int32 materialIndex, MaterialTextureSlot slot) const;
 
 private:
@@ -68,8 +60,6 @@ private:
     void ExecuteDirectoryLoad(const String& directory);
     void StagePendingTexture(const String& path, int32 materialIndex, uint32 requestId, MaterialTextureSlot slot = MaterialTextureSlot::BaseColor);
     void ProcessPendingInits();
-    // materialIndex realistically never approaches 2^29 and there are only 5 slots (3 bits), so both
-    // comfortably fit alongside requestId in one uint64.
     static uint64 MaterialKey(uint32 requestId, int32 materialIndex, MaterialTextureSlot slot)
     {
         return ((uint64)requestId << 35) | ((uint64)(uint32)materialIndex << 3) | (uint64)slot;
@@ -89,7 +79,7 @@ private:
 
     TArray<TShared<StreamingTexture>> m_Textures;
     TArray<TShared<StreamingModel>> m_Models;
-    TDictionary<uint64, TShared<StreamingTexture>> m_MaterialTextures; // keyed by MaterialKey(requestId, materialIndex)
+    TDictionary<uint64, TShared<StreamingTexture>> m_MaterialTextures;
 
     std::mutex m_PendingMutex;
     TArray<PendingTextureInit> m_PendingTextureInits;

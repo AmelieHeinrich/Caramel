@@ -19,7 +19,6 @@ namespace Physics
         return JPH::Vec3(v.x, v.y, v.z);
     }
 
-    // glm::mat4 and JPH::Mat44 are both column-major, so this is a straight column copy.
     inline JPH::Mat44 ToJolt(const glm::mat4& m)
     {
         return JPH::Mat44(

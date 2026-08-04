@@ -34,11 +34,6 @@ fs::path Canonicalize(const fs::path& path)
     return ec ? path : canonical;
 }
 
-// Recursively inlines `#include "..."` lines starting from `path`, writing the fully-inlined text
-// into `outText`. Every absolute path read is appended (deduplicated) to `outDependencies`. A file
-// already inlined earlier in this same parse pass is skipped (contributes nothing further) --
-// harmless even without a guard since Content/Shaders/Common/AGFX.hlsli already has its own
-// `#ifndef` guard, this just avoids needless symbol/text bloat.
 bool InlineIncludesRecursive(const fs::path& path, TArray<String>& outDependencies, TArray<fs::path>& visited, String& outText)
 {
     fs::path canonical = Canonicalize(path);
@@ -97,7 +92,7 @@ std::optional<EShaderStage> StageFromPragmaName(const std::string& name)
     return std::nullopt;
 }
 
-} // namespace
+}
 
 std::optional<ParsedShaderSource> ParseShaderFile(const String& shaderPath)
 {
@@ -112,8 +107,6 @@ std::optional<ParsedShaderSource> ParseShaderFile(const String& shaderPath)
     if (!InlineIncludesRecursive(rootPath, parsed.DependencyFiles, visited, inlined))
         return std::nullopt;
 
-    // Scan the fully-inlined text for pragmas, blanking matched lines (kept as an empty line, not
-    // removed, so DXC's error line numbers still map back to the original source).
     static const std::regex stagePragma(R"(^\s*#pragma\s+(vertex|pixel|compute|task|mesh)\s+(\w+)\s*$)");
     static const std::regex variantPragma(R"(^\s*#pragma\s+variant\s+(\w+)\s*$)");
 

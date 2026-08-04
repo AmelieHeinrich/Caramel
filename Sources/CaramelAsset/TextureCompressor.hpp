@@ -16,11 +16,9 @@ namespace CaramelAsset
         uint32 height = 0;
         ECompressedTextureFormat format = ECompressedTextureFormat::BC7Unorm;
         bool isSRGB = false;
-        TArray<TArray<uint8>> mips; // mips[0] = full resolution, halved each level down to 1x1
+        TArray<TArray<uint8>> mips;
     };
 
-    // Implemented once per platform (AMDTextureCompressor.cpp on Windows/Linux, ASTCTextureCompressor.cpp
-    // on macOS) since the two backends target disjoint compressed-format value spaces.
     namespace PlatformTextureBackend
     {
         ECompressedTextureFormat SelectFormat(ETextureRole role);

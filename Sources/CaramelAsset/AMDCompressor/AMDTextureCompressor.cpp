@@ -20,12 +20,10 @@ namespace CaramelAsset
             switch (format)
             {
                 case ECompressedTextureFormat::BC4Unorm: return 8;
-                default: return 16; // BC5, BC6H, BC7 (+ SRGB variants)
+                default: return 16;
             }
         }
 
-        // Builds an edge-clamped copy sized to a multiple of 4 so block compression never reads
-        // past the source image when width/height aren't already 4-aligned.
         TArray<uint8> BuildClampPaddedRGBA(const uint8* pixelsRGBA8, uint32 width, uint32 height, uint32 paddedWidth, uint32 paddedHeight)
         {
             TArray<uint8> padded(static_cast<size_t>(paddedWidth) * paddedHeight * 4);
@@ -41,8 +39,6 @@ namespace CaramelAsset
             return padded;
         }
 
-        // CMP_Core's BC4/BC5 block readers expect a tightly packed single-channel plane
-        // (row stride = plane width in bytes) -- unlike BC7, which reads RGBA interleaved directly.
         TArray<uint8> ExtractChannelPlane(const uint8* rgba, uint32 width, uint32 height, uint32 channel)
         {
             TArray<uint8> plane(static_cast<size_t>(width) * height);
@@ -67,7 +63,7 @@ namespace CaramelAsset
             case ETextureRole::ORM:
                 return ECompressedTextureFormat::BC7Unorm;
             case ETextureRole::HDR:
-                return ECompressedTextureFormat::BC6HUFloat; // wired, unexercised: pipeline only ever decodes LDR RGBA8 source images
+                return ECompressedTextureFormat::BC6HUFloat;
             case ETextureRole::Generic:
             default:
                 return ECompressedTextureFormat::BC7Unorm;
@@ -99,8 +95,6 @@ namespace CaramelAsset
         const uint32 blockBytes = BlockByteSize(format);
         TArray<uint8> output(static_cast<size_t>(blocksX) * blocksY * blockBytes);
 
-        // BC7 defaults to quality=1.0 (exhaustive partition search) when passed no options, which is
-        // orders of magnitude slower than needed for an iterative asset pipeline; use a faster preset.
         void* bc7Options = nullptr;
         if (format == ECompressedTextureFormat::BC7Unorm || format == ECompressedTextureFormat::BC7UnormSRGB)
         {
@@ -137,7 +131,6 @@ namespace CaramelAsset
                         break;
                     }
                     default:
-                        // BC6H (HDR) is unreachable in v1: the pipeline only ever decodes LDR RGBA8 source images.
                         std::memset(out, 0, blockBytes);
                         break;
                 }

@@ -70,7 +70,6 @@ namespace
         auto t = j.value("translation", std::vector<float32>{ 0.0f, 0.0f, 0.0f });
         node.translation = glm::vec3(t[0], t[1], t[2]);
 
-        // glTF/Compressor.cpp store rotation as [x, y, z, w]; glm::quat's constructor takes (w, x, y, z).
         auto r = j.value("rotation", std::vector<float32>{ 0.0f, 0.0f, 0.0f, 1.0f });
         node.rotation = glm::quat(r[3], r[0], r[1], r[2]);
 

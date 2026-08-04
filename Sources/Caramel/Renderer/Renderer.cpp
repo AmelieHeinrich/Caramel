@@ -10,7 +10,7 @@
 #include <Caramel/Renderer/Shader/ShaderServer.hpp>
 #include <Caramel/Renderer/DebugRenderer.hpp>
 #include <Caramel/Renderer/ImGuiRenderer.hpp>
-#include <Caramel/Renderer/SponzaRenderer.hpp>
+#include <Caramel/Renderer/SceneRenderer.hpp>
 
 #include <imgui.h>
 
@@ -68,8 +68,14 @@ Renderer::Renderer(SDL_Window* window)
     CreateSceneColorTexture(m_ViewportWidth, m_ViewportHeight);
 
     ShaderServer::Initialize(m_Device, *this);
+
+    // Schemes own the scene-geometry pipelines, so they must be discovered and compiled before
+    // anything tries to draw with them.
+    m_SchemeRegistry.LoadDirectory("Content/Materials/Schemes", m_SwapChain.GetFormat(), kDepthFormat);
+
+    m_GPUScene.Init(m_Device, m_SchemeRegistry, (uint32)FRAMES_IN_FLIGHT);
     m_ImGuiRenderer = MakeUnique<ImGuiRenderer>(m_Device, m_CommandQueue, m_SwapChain.GetFormat(), (uint32)FRAMES_IN_FLIGHT);
-    m_SponzaRenderer = MakeUnique<SponzaRenderer>(m_Device, m_SwapChain.GetFormat(), kDepthFormat, (uint32)FRAMES_IN_FLIGHT);
+    m_SceneRenderer = MakeUnique<SceneRenderer>(m_Device, (uint32)FRAMES_IN_FLIGHT);
     m_DebugRenderer = MakeUnique<DebugRenderer>(m_Device, m_SwapChain.GetFormat(), kDepthFormat, (uint32)FRAMES_IN_FLIGHT);
 
     m_Device.MakeResourcesResident();
@@ -122,13 +128,6 @@ void Renderer::SetViewportSize(uint32 width, uint32 height)
     m_ViewportWidth = width;
     m_ViewportHeight = height;
 
-    // Must resize synchronously here, not deferred to the next Render() call (unlike the backbuffer/
-    // Resize()): Application::ShowViewport() calls this and immediately hands GetViewportTextureID()
-    // to ImGui::Image() in the same frame's draw list, which is finalized (ImGui::Render()) before
-    // Render() runs. Deferring the resize would destroy/recreate this texture (and its bindless view)
-    // *after* this frame's draw commands already captured the old handle, so the GPU would end up
-    // sampling a freed descriptor -- this caused a real DXGI_ERROR_DEVICE_HUNG/TDR when docking the
-    // Viewport panel changed its size mid-frame.
     m_Device.WaitIdle();
     CreateSceneColorTexture(m_ViewportWidth, m_ViewportHeight);
     CreateDepthTexture(m_ViewportWidth, m_ViewportHeight);
@@ -146,6 +145,11 @@ void Renderer::Render(const Camera& camera, StreamingManager& streamingManager, 
     m_Fence.Wait(m_FenceFrameSlots[m_FrameSlot]);
 
     ShaderServer::Tick();
+
+    // Safe to rewrite this frame slot's buffers: the fence wait above retired the frame that last
+    // used them. Streaming has already settled for this frame (Application updates it before
+    // BuildRenderInstances), so the bindless handles collected here are final.
+    m_GPUScene.Build(streamingManager, renderInstances, (uint32)m_FrameSlot);
 
     int32 width, height;
     SDL_GetWindowSizeInPixels(m_Window, &width, &height);
@@ -172,17 +176,11 @@ void Renderer::Render(const Camera& camera, StreamingManager& streamingManager, 
     depthTargetCreateInfo.SetIsDepth(true);
     agfx::RenderTarget depthTarget = m_Device.CreateRenderTarget(depthTargetCreateInfo);
 
-    // The depth buffer is cleared and written by the scene pass and then only re-read as a depth
-    // attachment by the debug pass, so it stays in DepthWrite for its whole lifetime -- only the
-    // one-time Common -> DepthWrite transition after (re)creation is needed, not one every frame.
     if (m_DepthNeedsInitialTransition) {
         commandBuffer.TextureBarrier(m_DepthTexture, agfx::ResourceState::Common, agfx::ResourceState::DepthWrite);
         m_DepthNeedsInitialTransition = false;
     }
 
-    // The scene color texture, unlike depth, ping-pongs every frame: RenderTarget while the scene/
-    // debug passes write it below, then PixelShaderResource so the ImGui pass can sample it via
-    // ImGui::Image() in the Viewport panel. The very first use is Common -> RenderTarget instead.
     if (m_SceneColorNeedsInitialTransition) {
         commandBuffer.TextureBarrier(m_SceneColorTexture, agfx::ResourceState::Common, agfx::ResourceState::RenderTarget);
         m_SceneColorNeedsInitialTransition = false;
@@ -210,7 +208,7 @@ void Renderer::Render(const Camera& camera, StreamingManager& streamingManager, 
         scenePassInfo.height = m_ViewportHeight;
 
         agfx::RenderPass scenePass = commandBuffer.BeginRenderPass(scenePassInfo);
-        m_SponzaRenderer->Render(scenePass, streamingManager, renderInstances, camera, m_ViewportWidth, m_ViewportHeight, (uint32)m_FrameSlot);
+        m_SceneRenderer->Render(scenePass, m_GPUScene, m_SchemeRegistry, camera, m_ViewportWidth, m_ViewportHeight, (uint32)m_FrameSlot);
         scenePass.End();
     }
 
@@ -225,8 +223,6 @@ void Renderer::Render(const Camera& camera, StreamingManager& streamingManager, 
     renderTargetCreateInfo.texture = backBuffer;
     agfx::RenderTarget renderTarget = m_Device.CreateRenderTarget(renderTargetCreateInfo);
 
-    // Nothing draws directly onto the backbuffer anymore except ImGui (the Viewport panel just
-    // shows the offscreen scene color texture as an image), so this can clear instead of load.
     agfx::RenderPassCreateInfo renderPassCreateInfo{};
     renderPassCreateInfo.colorAttachmentCount = 1;
     renderPassCreateInfo.colorAttachments[0].renderTarget = renderTarget;

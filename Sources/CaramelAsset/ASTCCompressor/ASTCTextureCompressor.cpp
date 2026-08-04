@@ -22,7 +22,7 @@ namespace CaramelAsset
             case ETextureRole::Occlusion:
             case ETextureRole::ORM:
             case ETextureRole::Generic:
-            case ETextureRole::HDR: // wired, unexercised: pipeline only ever decodes LDR RGBA8 source images
+            case ETextureRole::HDR:
             default:
                 return ECompressedTextureFormat::ASTC4x4Unorm;
         }

@@ -75,8 +75,6 @@ class String : public std::basic_string<char>
 public:
     using std::basic_string<char>::basic_string;
 
-    // Base copy/move constructors are never inherited by a using-declaration, so std::string
-    // (e.g. from std::ostringstream::str(), std::string::substr()) needs an explicit bridge.
     String(const std::basic_string<char>& other) : std::basic_string<char>(other) {}
     String(std::basic_string<char>&& other) : std::basic_string<char>(std::move(other)) {}
 
@@ -98,8 +96,6 @@ public:
 
 namespace std
 {
-    // String is a distinct type from std::string (its base class), so std::hash<std::string>
-    // doesn't automatically apply to it -- needed to use String as a TDictionary key.
     template<>
     struct hash<String>
     {
@@ -114,7 +110,7 @@ template<typename K, typename V>
 class TDictionary : public std::unordered_map<K, V, std::hash<K>, std::equal_to<K>>
 {
 public:
-    using std::unordered_map<K, V, std::hash<K>, std::equal_to<K>>::unordered_map; // Inherit constructors
+    using std::unordered_map<K, V, std::hash<K>, std::equal_to<K>>::unordered_map;
     
     void Clear() { this->clear(); }
     void Insert(const K& key, const V& value) { this->insert({ key, value }); }

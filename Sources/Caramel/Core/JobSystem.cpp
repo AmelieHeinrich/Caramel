@@ -18,8 +18,6 @@ void JobSystem::Initialize(uint32 threadCount)
     s_JobSystem = new JobSystem();
     s_JobSystem->m_TaskScheduler = new enki::TaskScheduler();
 
-    // enki::TaskScheduler::Initialize(uint32_t) requires a non-zero thread count -- auto-detecting
-    // hardware concurrency is only available through the parameterless overload.
     if (threadCount == 0)
         s_JobSystem->m_TaskScheduler->Initialize();
     else
