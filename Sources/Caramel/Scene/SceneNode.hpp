@@ -21,6 +21,24 @@ struct Instance
     glm::mat4 GetTransform() const;
 };
 
+// Per-mesh offset applied on top of the instance transform, in the entity's local space. Meshes
+// have no transform of their own otherwise -- the model's baked placement lives in StreamingModel
+// and is shared by every entity using that model, so it cannot be edited per entity.
+// Keyed by mesh slot (an index into SceneNode::meshIndices), so it is addressable from a MeshRef,
+// which is what a mesh-scoped script holds. That also means the offset is shared by every instance
+// of the node, exactly like a material override.
+struct MeshTransform
+{
+    uint32 meshSlot = 0;
+
+    glm::vec3 position{ 0.0f };
+    glm::vec3 rotationEuler{ 0.0f };
+    glm::vec3 scale{ 1.0f };
+
+    bool IsIdentity() const;
+    glm::mat4 GetTransform() const;
+};
+
 enum class ESceneNodeType
 {
     Folder,
@@ -41,6 +59,13 @@ inline bool SceneNodeTypeCanParent(ESceneNodeType type)
 struct MaterialOverride
 {
     int32 materialIndex = -1;
+
+    // Which mesh slot of the entity this override applies to, or kAllMeshes for "every mesh using
+    // this material". Meshes of one model routinely share a material index, so without this a
+    // mesh-scoped edit (from the inspector or from a script holding a Mesh handle) leaked onto every
+    // sibling mesh. Scenes saved before this existed have no meshSlot and load as kAllMeshes.
+    static constexpr int32 kAllMeshes = -1;
+    int32 meshSlot = kAllMeshes;
 
     bool overrideBaseColor = false;
     glm::vec4 baseColorFactor{ 1.0f, 1.0f, 1.0f, 1.0f };
@@ -91,6 +116,7 @@ public:
     uint32 requestId = 0;
     TArray<uint32> meshIndices;
     TArray<Instance> instances;
+    TArray<MeshTransform> meshTransforms;
     TArray<MaterialOverride> materialOverrides;
     TArray<ScriptComponent> scripts;
 };

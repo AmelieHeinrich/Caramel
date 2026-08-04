@@ -31,7 +31,18 @@ public:
 
     // Overrides are layered onto the pristine cooked material when GPUScene writes its material
     // buffer each frame -- nothing mutates CPUModel, so there is no "apply" step.
-    MaterialOverride& GetOrCreateMaterialOverride(SceneNode& entity, int32 materialIndex);
+    // Per-mesh transform offsets. Absent slots render with no offset, so a scene that never touches
+    // one costs nothing.
+    MeshTransform& GetOrCreateMeshTransform(SceneNode& entity, uint32 meshSlot);
+    const MeshTransform* FindMeshTransform(const SceneNode& entity, uint32 meshSlot) const;
+
+    // meshSlot narrows the override to a single mesh of the entity; the default applies it to every
+    // mesh using that material.
+    MaterialOverride& GetOrCreateMaterialOverride(SceneNode& entity, int32 materialIndex, int32 meshSlot = MaterialOverride::kAllMeshes);
+
+    // The override in effect for one mesh: an exact mesh-slot match wins over the whole-material
+    // one, so a per-mesh edit shadows the entity-wide value instead of fighting it.
+    const MaterialOverride* FindMaterialOverride(const SceneNode& entity, int32 materialIndex, int32 meshSlot) const;
 
     bool SaveToFile(const String& path) const;
     bool LoadFromFile(const String& path, StreamingManager& streamingManager);

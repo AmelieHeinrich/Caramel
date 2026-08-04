@@ -46,6 +46,8 @@ namespace
     {
         nlohmann::json j;
         j["materialIndex"] = matOverride.materialIndex;
+        if (matOverride.meshSlot != MaterialOverride::kAllMeshes)
+            j["meshSlot"] = matOverride.meshSlot;
         j["overrideBaseColor"] = matOverride.overrideBaseColor;
         j["baseColorFactor"] = { matOverride.baseColorFactor.x, matOverride.baseColorFactor.y, matOverride.baseColorFactor.z, matOverride.baseColorFactor.w };
         j["overrideMetallic"] = matOverride.overrideMetallic;
@@ -75,6 +77,7 @@ namespace
     {
         MaterialOverride matOverride;
         matOverride.materialIndex = j.value("materialIndex", -1);
+        matOverride.meshSlot = j.value("meshSlot", (int32)MaterialOverride::kAllMeshes);
 
         matOverride.overrideBaseColor = j.value("overrideBaseColor", false);
         auto bc = j.value("baseColorFactor", std::vector<float32>{ 1.0f, 1.0f, 1.0f, 1.0f });
@@ -214,6 +217,24 @@ namespace
 
         if (node.type == ESceneNodeType::Entity)
         {
+            // Identity offsets are dropped: they are the default, and Sponza-sized entities would
+            // otherwise write a few thousand no-op entries.
+            nlohmann::json meshTransformsJson = nlohmann::json::array();
+            for (const MeshTransform& meshTransform : node.meshTransforms)
+            {
+                if (meshTransform.IsIdentity())
+                    continue;
+
+                nlohmann::json entry;
+                entry["meshSlot"] = meshTransform.meshSlot;
+                entry["position"] = { meshTransform.position.x, meshTransform.position.y, meshTransform.position.z };
+                entry["rotation"] = { meshTransform.rotationEuler.x, meshTransform.rotationEuler.y, meshTransform.rotationEuler.z };
+                entry["scale"] = { meshTransform.scale.x, meshTransform.scale.y, meshTransform.scale.z };
+                meshTransformsJson.push_back(entry);
+            }
+            if (!meshTransformsJson.empty())
+                j["meshTransforms"] = meshTransformsJson;
+
             nlohmann::json overridesJson = nlohmann::json::array();
             for (const MaterialOverride& matOverride : node.materialOverrides)
                 overridesJson.push_back(SerializeMaterialOverride(matOverride));
@@ -249,6 +270,19 @@ namespace
             node = scene.CreateModelEntity(parent, name, cmdlPath, streamingManager);
             for (const auto& instanceJson : j.value("instances", nlohmann::json::array()))
                 scene.AddInstance(node, ParseInstance(instanceJson));
+            for (const auto& meshTransformJson : j.value("meshTransforms", nlohmann::json::array()))
+            {
+                MeshTransform meshTransform;
+                meshTransform.meshSlot = meshTransformJson.value("meshSlot", 0u);
+                auto p = meshTransformJson.value("position", std::vector<float32>{ 0.0f, 0.0f, 0.0f });
+                auto r = meshTransformJson.value("rotation", std::vector<float32>{ 0.0f, 0.0f, 0.0f });
+                auto s = meshTransformJson.value("scale", std::vector<float32>{ 1.0f, 1.0f, 1.0f });
+                meshTransform.position = glm::vec3(p[0], p[1], p[2]);
+                meshTransform.rotationEuler = glm::vec3(r[0], r[1], r[2]);
+                meshTransform.scale = glm::vec3(s[0], s[1], s[2]);
+                node->meshTransforms.PushBack(meshTransform);
+            }
+
             for (const auto& overrideJson : j.value("materialOverrides", nlohmann::json::array()))
                 node->materialOverrides.PushBack(ParseMaterialOverride(overrideJson));
         }
@@ -441,16 +475,23 @@ void Scene::CollectRenderInstances(SceneNode& node, StreamingManager& streamingM
     if (node.type == ESceneNodeType::Entity)
     {
         const TArray<TShared<StreamingModel>>& models = streamingManager.GetModels();
-        for (uint32 meshIndex : node.meshIndices)
+        for (uint32 slot = 0; slot < (uint32)node.meshIndices.Size(); ++slot)
         {
-            StreamingModel* mesh = models[meshIndex].get();
+            StreamingModel* mesh = models[node.meshIndices[slot]].get();
+
+            // The offset sits between the instance and the model's own placement, so it reads as
+            // "move this mesh within the entity" rather than "move it in world space".
+            const MeshTransform* meshTransform = FindMeshTransform(node, slot);
+            glm::mat4 meshOffset = meshTransform ? meshTransform->GetTransform() : glm::mat4(1.0f);
+
             for (uint32 i = 0; i < (uint32)node.instances.Size(); ++i)
             {
                 RenderInstance ri;
                 ri.mesh = mesh;
-                ri.transform = node.instances[i].GetTransform() * mesh->GetWorldTransform();
+                ri.transform = node.instances[i].GetTransform() * meshOffset * mesh->GetWorldTransform();
                 ri.owner = &node;
                 ri.instanceIndex = i;
+                ri.meshSlot = slot;
                 out.PushBack(ri);
             }
         }
@@ -467,18 +508,75 @@ TArray<RenderInstance> Scene::BuildRenderInstances(StreamingManager& streamingMa
     return out;
 }
 
-MaterialOverride& Scene::GetOrCreateMaterialOverride(SceneNode& entity, int32 materialIndex)
+MeshTransform& Scene::GetOrCreateMeshTransform(SceneNode& entity, uint32 meshSlot)
+{
+    for (MeshTransform& meshTransform : entity.meshTransforms)
+    {
+        if (meshTransform.meshSlot == meshSlot)
+            return meshTransform;
+    }
+
+    MeshTransform fresh;
+    fresh.meshSlot = meshSlot;
+    entity.meshTransforms.PushBack(fresh);
+    return entity.meshTransforms[entity.meshTransforms.Size() - 1];
+}
+
+const MeshTransform* Scene::FindMeshTransform(const SceneNode& entity, uint32 meshSlot) const
+{
+    for (const MeshTransform& meshTransform : entity.meshTransforms)
+    {
+        if (meshTransform.meshSlot == meshSlot)
+            return &meshTransform;
+    }
+    return nullptr;
+}
+
+MaterialOverride& Scene::GetOrCreateMaterialOverride(SceneNode& entity, int32 materialIndex, int32 meshSlot)
 {
     for (MaterialOverride& matOverride : entity.materialOverrides)
     {
-        if (matOverride.materialIndex == materialIndex)
+        if (matOverride.materialIndex == materialIndex && matOverride.meshSlot == meshSlot)
             return matOverride;
     }
 
     MaterialOverride fresh;
+
+    // A per-mesh override shadows the entity-wide one completely once it exists, so seed it from
+    // that value first. Without this, narrowing one field to a single mesh would silently snap every
+    // other field on that mesh back to the cooked material.
+    if (meshSlot != MaterialOverride::kAllMeshes)
+    {
+        if (const MaterialOverride* inherited = FindMaterialOverride(entity, materialIndex, MaterialOverride::kAllMeshes))
+            fresh = *inherited;
+    }
+
     fresh.materialIndex = materialIndex;
+    fresh.meshSlot = meshSlot;
+    fresh.gpuMaterialSlot = UINT32_MAX;
     entity.materialOverrides.PushBack(fresh);
     return entity.materialOverrides[entity.materialOverrides.Size() - 1];
+}
+
+const MaterialOverride* Scene::FindMaterialOverride(const SceneNode& entity, int32 materialIndex, int32 meshSlot) const
+{
+    const MaterialOverride* wholeMaterial = nullptr;
+
+    for (const MaterialOverride& matOverride : entity.materialOverrides)
+    {
+        // An override with nothing set is ignored by GPUScene, so ignore it here too -- otherwise a
+        // mesh whose override was fully reverted would display values the renderer no longer uses.
+        if (matOverride.materialIndex != materialIndex || !matOverride.HasAnyOverride())
+            continue;
+
+        if (meshSlot != MaterialOverride::kAllMeshes && matOverride.meshSlot == meshSlot)
+            return &matOverride;
+
+        if (matOverride.meshSlot == MaterialOverride::kAllMeshes)
+            wholeMaterial = &matOverride;
+    }
+
+    return wholeMaterial;
 }
 
 bool Scene::SaveToFile(const String& path) const

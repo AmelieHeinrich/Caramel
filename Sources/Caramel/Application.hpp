@@ -55,6 +55,7 @@ private:
     void DrawMainMenuBar();
     void SetupDefaultDockLayout(ImGuiID dockspaceId);
     void UpdatePicking(const TArray<RenderInstance>& renderInstances);
+    void DrawSelectionHighlight(const TArray<RenderInstance>& renderInstances);
     void DrawColliders(const TArray<RenderInstance>& renderInstances);
 
     void HandleDroppedFile(const String& path);

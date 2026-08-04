@@ -310,6 +310,11 @@ class Mesh
 {
     string name;
 
+    // Offset applied to this mesh on top of its entity's instance transform.
+    vec3 position;
+    vec3 rotation;
+    vec3 scale;
+
     bool IsValid() const;
     vec3 GetBoundsMin() const;
     vec3 GetBoundsMax() const;

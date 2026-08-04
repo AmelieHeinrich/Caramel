@@ -18,6 +18,7 @@
 #include <Jolt/Physics/Collision/RayCast.h>
 #include <Jolt/Physics/Collision/CastResult.h>
 #include <Jolt/Physics/Collision/Shape/SubShapeID.h>
+#include <Jolt/Geometry/AABox.h>
 
 #include <imgui.h>
 #include <imgui_internal.h>
@@ -116,6 +117,11 @@ Application::~Application()
 void Application::Run()
 {
     while (m_Running) {
+#if defined(CARAMEL_MACOS)
+    @autoreleasepool {
+#else
+    {
+#endif
         SDL_Event event;
         while (SDL_PollEvent(&event)) {
             ImGui_ImplSDL3_ProcessEvent(&event);
@@ -176,6 +182,7 @@ void Application::Run()
         ImGui::Render();
 
         m_Renderer->Render(m_Camera, *m_StreamingManager, renderInstances);
+    }
     }
 }
 
@@ -259,18 +266,8 @@ void Application::UpdatePicking(const TArray<RenderInstance>& renderInstances)
 
     bool hasSelection = m_EditorContext.SelectedEntity && m_EditorContext.SelectedInstance < m_EditorContext.SelectedEntity->instances.Size();
 
-    if (hasSelection) {
-        m_JoltDebugRenderer->SetDepthTest(false);
-        for (const RenderInstance& ri : renderInstances) {
-            if (ri.owner != m_EditorContext.SelectedEntity || ri.instanceIndex != m_EditorContext.SelectedInstance || !ri.mesh->HasCollider())
-                continue;
-            if (m_EditorContext.SelectedMesh && ri.mesh != m_EditorContext.SelectedMesh)
-                continue;
-
-            ri.mesh->GetColliderShape()->Draw(m_JoltDebugRenderer.get(), Physics::ToJolt(ri.transform),
-                                               JPH::Vec3::sReplicate(1.0f), JPH::Color(255, 217, 26), false, true);
-        }
-    }
+    if (hasSelection)
+        DrawSelectionHighlight(renderInstances);
 
     if (!m_EditorContext.ViewportHovered || !Input::IsMouseButtonPressed(SDL_BUTTON_LEFT))
         return;
@@ -315,6 +312,59 @@ void Application::UpdatePicking(const TArray<RenderInstance>& renderInstances)
     m_EditorContext.SelectedEntity = bestEntity;
     m_EditorContext.SelectedInstance = bestInstance;
     m_EditorContext.SelectedMesh = bestMesh;
+}
+
+void Application::DrawSelectionHighlight(const TArray<RenderInstance>& renderInstances)
+{
+    m_JoltDebugRenderer->SetDepthTest(false);
+
+    // With a mesh picked the exact collider is affordable and useful. With only an instance picked
+    // it is not: an entity like Sponza is thousands of meshes, and drawing every collider shape --
+    // depth-test off, so nothing culls -- costs more per frame than the scene itself. One enclosing
+    // box says the same thing about what is selected.
+    if (m_EditorContext.SelectedMesh) {
+        for (const RenderInstance& ri : renderInstances) {
+            if (ri.owner != m_EditorContext.SelectedEntity || ri.instanceIndex != m_EditorContext.SelectedInstance)
+                continue;
+            if (ri.mesh != m_EditorContext.SelectedMesh || !ri.mesh->HasCollider())
+                continue;
+
+            ri.mesh->GetColliderShape()->Draw(m_JoltDebugRenderer.get(), Physics::ToJolt(ri.transform),
+                                               JPH::Vec3::sReplicate(1.0f), JPH::Color(255, 217, 26), false, true);
+        }
+        return;
+    }
+
+    glm::vec3 boundsMin(FLT_MAX);
+    glm::vec3 boundsMax(-FLT_MAX);
+    bool hasBounds = false;
+
+    for (const RenderInstance& ri : renderInstances) {
+        if (ri.owner != m_EditorContext.SelectedEntity || ri.instanceIndex != m_EditorContext.SelectedInstance)
+            continue;
+
+        // Corners rather than the raw min/max: a rotated mesh's local box does not stay axis-aligned
+        // once it is transformed into world space.
+        const glm::vec3& localMin = ri.mesh->GetMesh().boundsMin;
+        const glm::vec3& localMax = ri.mesh->GetMesh().boundsMax;
+        for (int corner = 0; corner < 8; ++corner) {
+            glm::vec3 local(
+                (corner & 1) ? localMax.x : localMin.x,
+                (corner & 2) ? localMax.y : localMin.y,
+                (corner & 4) ? localMax.z : localMin.z);
+
+            glm::vec3 world = glm::vec3(ri.transform * glm::vec4(local, 1.0f));
+            boundsMin = glm::min(boundsMin, world);
+            boundsMax = glm::max(boundsMax, world);
+        }
+        hasBounds = true;
+    }
+
+    if (!hasBounds)
+        return;
+
+    JPH::AABox box(JPH::Vec3(boundsMin.x, boundsMin.y, boundsMin.z), JPH::Vec3(boundsMax.x, boundsMax.y, boundsMax.z));
+    m_JoltDebugRenderer->DrawWireBox(box, JPH::Color(255, 217, 26));
 }
 
 void Application::DrawColliders(const TArray<RenderInstance>& renderInstances)

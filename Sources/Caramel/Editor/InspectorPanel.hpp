@@ -8,6 +8,8 @@
 
 #include <Caramel/Core/Common.hpp>
 
+#include <glm/glm.hpp>
+
 class StreamingManager;
 struct EditorContext;
 struct ModelMaterial;
@@ -20,7 +22,9 @@ public:
     void Draw(EditorContext& context, StreamingManager& streaming);
 
 private:
+    void DrawTransformRow(const char* label, glm::vec3& v, float speed, float resetTo);
     void DrawTransformSection(EditorContext& context);
+    void DrawMeshTransformSection(EditorContext& context, StreamingManager& streaming);
     void DrawScriptSection(EditorContext& context, StreamingManager& streaming);
     void DrawMaterialSection(EditorContext& context, StreamingManager& streaming);
     void DrawTextureGrid(StreamingManager& streaming, const ModelMaterial& material, uint32 requestId, int32 materialIndex);

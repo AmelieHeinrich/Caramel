@@ -48,6 +48,7 @@ public:
     void OnComponentRemoved(SceneNode& node, uint32 componentIndex);
 
     bool IsInstanceDrivenByScript(const SceneNode& node, uint32 instanceIndex) const;
+    bool IsMeshDrivenByScript(const SceneNode& node, uint32 meshSlot) const;
 
     void ApplyProperty(asIScriptObject* object, const ScriptProperty& property, const glm::vec4& value, const String& text);
     void ApplyPropertyToLive(const SceneNode& node, uint32 componentIndex, const ScriptProperty& property);

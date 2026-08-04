@@ -277,6 +277,17 @@ bool ScriptSystem::IsInstanceDrivenByScript(const SceneNode& node, uint32 instan
     return false;
 }
 
+bool ScriptSystem::IsMeshDrivenByScript(const SceneNode& node, uint32 meshSlot) const
+{
+    for (const ScriptComponent& component : node.scripts) {
+        if (!component.enabled)
+            continue;
+        if (component.scope == EScriptScope::Mesh && component.targetIndex == meshSlot)
+            return true;
+    }
+    return false;
+}
+
 void ScriptSystem::CollectComponents(SceneNode& node, TArray<ScriptInstance*>& touched)
 {
     for (uint32 i = 0; i < (uint32)node.scripts.Size(); ++i) {

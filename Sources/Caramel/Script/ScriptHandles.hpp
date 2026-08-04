@@ -39,6 +39,11 @@ struct MaterialRef
 {
     uint64 nodeId = 0;
     int32 materialIndex = -1;
+
+    // -1 (MaterialOverride::kAllMeshes) when the handle came from an Entity or EntityInstance: those
+    // address the material as a whole. A handle obtained from a Mesh carries that mesh's slot, so a
+    // mesh-scoped script only repaints its own mesh.
+    int32 meshSlot = -1;
 };
 
 class ScriptSceneBridge

@@ -240,6 +240,106 @@ void InspectorPanel::DrawScriptSection(EditorContext& context, StreamingManager&
     }
 }
 
+void InspectorPanel::DrawTransformRow(const char* label, glm::vec3& v, float speed, float resetTo)
+{
+    const ImGuiStyle& style = ImGui::GetStyle();
+
+    ImGui::PushID(label);
+    EditorTheme::PropertyLabel(label);
+
+    // Three [axis tag][field] groups plus the trailing reset button, all sized off the frame
+    // height so the row survives a font or DPI change.
+    float buttonWidth = ImGui::GetFrameHeight();
+    float fieldWidth = (ImGui::GetContentRegionAvail().x - 4.0f * buttonWidth - 6.0f * style.ItemInnerSpacing.x) / 3.0f;
+    fieldWidth = std::max(fieldWidth, EditorTheme::Em(1.5f));
+
+    float* components[3] = { &v.x, &v.y, &v.z };
+    for (int i = 0; i < 3; ++i) {
+        if (i > 0)
+            ImGui::SameLine(0.0f, style.ItemInnerSpacing.x);
+        ImGui::PushID(i);
+
+        // Coloring the tag rather than the number keeps the value itself readable.
+        ImGui::PushStyleColor(ImGuiCol_Button, kAxisColors[i]);
+        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, kAxisColorsHovered[i]);
+        ImGui::PushStyleColor(ImGuiCol_ButtonActive, kAxisColorsHovered[i]);
+        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 1.0f, 1.0f, 1.0f));
+        if (ImGui::Button(kAxisNames[i], ImVec2(buttonWidth, buttonWidth)))
+            *components[i] = resetTo;
+        ImGui::PopStyleColor(4);
+        ImGui::SetItemTooltip("Reset %s", kAxisNames[i]);
+
+        ImGui::SameLine(0.0f, style.ItemInnerSpacing.x);
+        ImGui::SetNextItemWidth(fieldWidth);
+        ImGui::DragFloat("##value", components[i], speed, 0.0f, 0.0f, "%.2f");
+        ImGui::PopID();
+    }
+
+    ImGui::SameLine(0.0f, style.ItemInnerSpacing.x);
+    if (EditorTheme::IconButton(ICON_FA_ROTATE_LEFT, "Reset all axes"))
+        v = glm::vec3(resetTo);
+
+    ImGui::PopID();
+}
+
+void InspectorPanel::DrawMeshTransformSection(EditorContext& context, StreamingManager& streaming)
+{
+    if (!context.SelectedMesh)
+        return;
+
+    const TArray<TShared<StreamingModel>>& models = streaming.GetModels();
+    uint32 meshSlot = 0;
+    bool foundSlot = false;
+    for (uint32 slot = 0; slot < (uint32)context.SelectedEntity->meshIndices.Size(); ++slot) {
+        if (models[context.SelectedEntity->meshIndices[slot]].get() == context.SelectedMesh) {
+            meshSlot = slot;
+            foundSlot = true;
+            break;
+        }
+    }
+
+    if (!foundSlot)
+        return;
+
+    EditorTheme::SectionHeader(ICON_FA_CUBE " Mesh Transform");
+    ImGui::TextDisabled("Offset within the entity, shared by every instance");
+
+    // Same reasoning as the instance transform: a mesh-scoped script rewrites this every frame, and
+    // there is no undo.
+    bool scriptDriven = context.Scripts && context.Scripts->IsMeshDrivenByScript(*context.SelectedEntity, meshSlot);
+    if (scriptDriven)
+        ImGui::BeginDisabled();
+
+    // Reading through GetOrCreate would allocate an entry for every mesh the user merely clicks on,
+    // so an untouched mesh is edited through a scratch copy that is only committed when it changes.
+    const MeshTransform* existing = context.CurrentScene.FindMeshTransform(*context.SelectedEntity, meshSlot);
+    MeshTransform edited = existing ? *existing : MeshTransform{};
+    edited.meshSlot = meshSlot;
+
+    if (EditorTheme::BeginProperties("InspectorMeshTransform")) {
+        DrawTransformRow("Position", edited.position, 0.05f, 0.0f);
+        DrawTransformRow("Rotation", edited.rotationEuler, 0.5f, 0.0f);
+        DrawTransformRow("Scale", edited.scale, 0.01f, 1.0f);
+        EditorTheme::EndProperties();
+    }
+
+    bool changed = !existing
+        ? !edited.IsIdentity()
+        : (edited.position != existing->position || edited.rotationEuler != existing->rotationEuler || edited.scale != existing->scale);
+
+    if (changed && !scriptDriven) {
+        MeshTransform& stored = context.CurrentScene.GetOrCreateMeshTransform(*context.SelectedEntity, meshSlot);
+        stored.position = edited.position;
+        stored.rotationEuler = edited.rotationEuler;
+        stored.scale = edited.scale;
+    }
+
+    if (scriptDriven) {
+        ImGui::EndDisabled();
+        ImGui::TextDisabled(ICON_FA_SCROLL " Driven by script");
+    }
+}
+
 void InspectorPanel::DrawTransformSection(EditorContext& context)
 {
     Instance& instance = context.SelectedEntity->instances[context.SelectedInstance];
@@ -252,51 +352,10 @@ void InspectorPanel::DrawTransformSection(EditorContext& context)
     if (scriptDriven)
         ImGui::BeginDisabled();
 
-    auto transformRow = [](const char* label, glm::vec3& v, float speed, float resetTo) {
-        const ImGuiStyle& style = ImGui::GetStyle();
-
-        ImGui::PushID(label);
-        EditorTheme::PropertyLabel(label);
-
-        // Three [axis tag][field] groups plus the trailing reset button, all sized off the frame
-        // height so the row survives a font or DPI change.
-        float buttonWidth = ImGui::GetFrameHeight();
-        float fieldWidth = (ImGui::GetContentRegionAvail().x - 4.0f * buttonWidth - 6.0f * style.ItemInnerSpacing.x) / 3.0f;
-        fieldWidth = std::max(fieldWidth, EditorTheme::Em(1.5f));
-
-        float* components[3] = { &v.x, &v.y, &v.z };
-        for (int i = 0; i < 3; ++i) {
-            if (i > 0)
-                ImGui::SameLine(0.0f, style.ItemInnerSpacing.x);
-            ImGui::PushID(i);
-
-            // Coloring the tag rather than the number keeps the value itself readable.
-            ImGui::PushStyleColor(ImGuiCol_Button, kAxisColors[i]);
-            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, kAxisColorsHovered[i]);
-            ImGui::PushStyleColor(ImGuiCol_ButtonActive, kAxisColorsHovered[i]);
-            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 1.0f, 1.0f, 1.0f));
-            if (ImGui::Button(kAxisNames[i], ImVec2(buttonWidth, buttonWidth)))
-                *components[i] = resetTo;
-            ImGui::PopStyleColor(4);
-            ImGui::SetItemTooltip("Reset %s", kAxisNames[i]);
-
-            ImGui::SameLine(0.0f, style.ItemInnerSpacing.x);
-            ImGui::SetNextItemWidth(fieldWidth);
-            ImGui::DragFloat("##value", components[i], speed, 0.0f, 0.0f, "%.2f");
-            ImGui::PopID();
-        }
-
-        ImGui::SameLine(0.0f, style.ItemInnerSpacing.x);
-        if (EditorTheme::IconButton(ICON_FA_ROTATE_LEFT, "Reset all axes"))
-            v = glm::vec3(resetTo);
-
-        ImGui::PopID();
-    };
-
     if (EditorTheme::BeginProperties("InspectorTransform")) {
-        transformRow("Position", instance.position, 0.05f, 0.0f);
-        transformRow("Rotation", instance.rotationEuler, 0.5f, 0.0f);
-        transformRow("Scale", instance.scale, 0.01f, 1.0f);
+        DrawTransformRow("Position", instance.position, 0.05f, 0.0f);
+        DrawTransformRow("Rotation", instance.rotationEuler, 0.5f, 0.0f);
+        DrawTransformRow("Scale", instance.scale, 0.01f, 1.0f);
         EditorTheme::EndProperties();
     }
 
@@ -323,16 +382,63 @@ void InspectorPanel::DrawMaterialSection(EditorContext& context, StreamingManage
     uint32 requestId = materialSource->GetRequestId();
     int32 materialIndex = materialSource->GetMesh().materialIndex;
 
-    // `material` is the pristine cooked material -- overrides are layered on by GPUScene at
-    // buffer-write time and never written back here, so each widget has to seed itself from the
-    // override when one is active.
-    const MaterialOverride* activeOverride = nullptr;
-    for (const MaterialOverride& candidate : context.SelectedEntity->materialOverrides) {
-        if (candidate.materialIndex == materialIndex) {
-            activeOverride = &candidate;
-            break;
+    // Edits follow the selection: with a mesh picked they narrow to that mesh, otherwise they apply
+    // to every mesh of the entity using this material.
+    int32 editMeshSlot = MaterialOverride::kAllMeshes;
+    if (context.SelectedMesh) {
+        const TArray<TShared<StreamingModel>>& models = streaming.GetModels();
+        for (uint32 slot = 0; slot < (uint32)context.SelectedEntity->meshIndices.Size(); ++slot) {
+            if (models[context.SelectedEntity->meshIndices[slot]].get() == context.SelectedMesh) {
+                editMeshSlot = (int32)slot;
+                break;
+            }
         }
     }
+
+    // `material` is the pristine cooked material -- overrides are layered on by GPUScene at
+    // buffer-write time and never written back here, so each widget has to seed itself from the
+    // override when one is active. A mesh with no override of its own inherits the entity-wide one.
+    const MaterialOverride* activeOverride = context.CurrentScene.FindMaterialOverride(*context.SelectedEntity, materialIndex, editMeshSlot);
+
+    if (editMeshSlot != MaterialOverride::kAllMeshes)
+        ImGui::TextDisabled(ICON_FA_CUBE " Editing this mesh only");
+    else if (context.SelectedEntity->meshIndices.Size() > 1)
+        ImGui::TextDisabled(ICON_FA_CUBES " Applies to every mesh of this entity");
+
+    // One edit, applied to everything the current selection covers. With a mesh selected that is
+    // just that mesh; with only the entity selected it is every distinct material the entity uses,
+    // so picking a scheme on Sponza reaches all of it instead of only the first mesh's material.
+    //
+    // The re-resolve at the end is load-bearing: GetOrCreateMaterialOverride can push onto
+    // materialOverrides, which reallocates and would leave activeOverride dangling for the widgets
+    // further down this same frame.
+    auto applyToSelection = [&](auto&& mutate) {
+        if (editMeshSlot != MaterialOverride::kAllMeshes) {
+            mutate(context.CurrentScene.GetOrCreateMaterialOverride(*context.SelectedEntity, materialIndex, editMeshSlot));
+        } else {
+            const TArray<TShared<StreamingModel>>& models = streaming.GetModels();
+            TArray<int32> handled;
+
+            for (uint32 meshIndex : context.SelectedEntity->meshIndices) {
+                int32 candidate = models[meshIndex]->GetMesh().materialIndex;
+
+                bool seen = false;
+                for (int32 done : handled) {
+                    if (done == candidate) {
+                        seen = true;
+                        break;
+                    }
+                }
+                if (seen)
+                    continue;
+
+                handled.PushBack(candidate);
+                mutate(context.CurrentScene.GetOrCreateMaterialOverride(*context.SelectedEntity, candidate, MaterialOverride::kAllMeshes));
+            }
+        }
+
+        activeOverride = context.CurrentScene.FindMaterialOverride(*context.SelectedEntity, materialIndex, editMeshSlot);
+    };
 
     // Draws a "revert to cooked value" button for an active override. Without this there is no
     // way to undo an override, which is what made the old in-place mutation unrecoverable.
@@ -354,45 +460,49 @@ void InspectorPanel::DrawMaterialSection(EditorContext& context, StreamingManage
         glm::vec4 baseColor = baseColorOverridden ? activeOverride->baseColorFactor : material.baseColorFactor;
         EditorTheme::PropertyLabel("Base Color", true);
         if (ImGui::ColorEdit4("##BaseColor", &baseColor.x)) {
-            MaterialOverride& matOverride = context.CurrentScene.GetOrCreateMaterialOverride(*context.SelectedEntity, materialIndex);
-            matOverride.overrideBaseColor = true;
-            matOverride.baseColorFactor = baseColor;
+            applyToSelection([&](MaterialOverride& matOverride) {
+                matOverride.overrideBaseColor = true;
+                matOverride.baseColorFactor = baseColor;
+            });
         }
         if (drawResetButton("resetBaseColor", baseColorOverridden))
-            context.CurrentScene.GetOrCreateMaterialOverride(*context.SelectedEntity, materialIndex).overrideBaseColor = false;
+            applyToSelection([](MaterialOverride& matOverride) { matOverride.overrideBaseColor = false; });
 
         bool metallicOverridden = activeOverride && activeOverride->overrideMetallic;
         float metallic = metallicOverridden ? activeOverride->metallicFactor : material.metallicFactor;
         EditorTheme::PropertyLabel("Metallic", true);
         if (ImGui::DragFloat("##Metallic", &metallic, 0.01f, 0.0f, 1.0f)) {
-            MaterialOverride& matOverride = context.CurrentScene.GetOrCreateMaterialOverride(*context.SelectedEntity, materialIndex);
-            matOverride.overrideMetallic = true;
-            matOverride.metallicFactor = metallic;
+            applyToSelection([&](MaterialOverride& matOverride) {
+                matOverride.overrideMetallic = true;
+                matOverride.metallicFactor = metallic;
+            });
         }
         if (drawResetButton("resetMetallic", metallicOverridden))
-            context.CurrentScene.GetOrCreateMaterialOverride(*context.SelectedEntity, materialIndex).overrideMetallic = false;
+            applyToSelection([](MaterialOverride& matOverride) { matOverride.overrideMetallic = false; });
 
         bool roughnessOverridden = activeOverride && activeOverride->overrideRoughness;
         float roughness = roughnessOverridden ? activeOverride->roughnessFactor : material.roughnessFactor;
         EditorTheme::PropertyLabel("Roughness", true);
         if (ImGui::DragFloat("##Roughness", &roughness, 0.01f, 0.0f, 1.0f)) {
-            MaterialOverride& matOverride = context.CurrentScene.GetOrCreateMaterialOverride(*context.SelectedEntity, materialIndex);
-            matOverride.overrideRoughness = true;
-            matOverride.roughnessFactor = roughness;
+            applyToSelection([&](MaterialOverride& matOverride) {
+                matOverride.overrideRoughness = true;
+                matOverride.roughnessFactor = roughness;
+            });
         }
         if (drawResetButton("resetRoughness", roughnessOverridden))
-            context.CurrentScene.GetOrCreateMaterialOverride(*context.SelectedEntity, materialIndex).overrideRoughness = false;
+            applyToSelection([](MaterialOverride& matOverride) { matOverride.overrideRoughness = false; });
 
         bool emissiveOverridden = activeOverride && activeOverride->overrideEmissive;
         glm::vec3 emissive = emissiveOverridden ? activeOverride->emissiveFactor : material.emissiveFactor;
         EditorTheme::PropertyLabel("Emissive", true);
         if (ImGui::ColorEdit3("##Emissive", &emissive.x)) {
-            MaterialOverride& matOverride = context.CurrentScene.GetOrCreateMaterialOverride(*context.SelectedEntity, materialIndex);
-            matOverride.overrideEmissive = true;
-            matOverride.emissiveFactor = emissive;
+            applyToSelection([&](MaterialOverride& matOverride) {
+                matOverride.overrideEmissive = true;
+                matOverride.emissiveFactor = emissive;
+            });
         }
         if (drawResetButton("resetEmissive", emissiveOverridden))
-            context.CurrentScene.GetOrCreateMaterialOverride(*context.SelectedEntity, materialIndex).overrideEmissive = false;
+            applyToSelection([](MaterialOverride& matOverride) { matOverride.overrideEmissive = false; });
 
         EditorTheme::PropertyLabel("Alpha Mode");
         ImGui::TextUnformatted(material.alphaMode.CStr());
@@ -414,11 +524,13 @@ void InspectorPanel::DrawMaterialSection(EditorContext& context, StreamingManage
             for (uint32 i = 0; i < schemes.Count(); ++i) {
                 const MaterialScheme& candidate = schemes.Get(i);
                 if (ImGui::Selectable(candidate.name.CStr(), i == currentSchemeId)) {
-                    MaterialOverride& matOverride = context.CurrentScene.GetOrCreateMaterialOverride(*context.SelectedEntity, materialIndex);
                     // The default scheme is stored as an empty name so that an entity which was never
                     // assigned a scheme and one explicitly set back to default serialize identically.
-                    matOverride.schemeName = (i == SchemeRegistry::kDefaultSchemeId) ? String() : candidate.name;
-                    matOverride.schemeParamValues.Clear();
+                    String chosen = (i == SchemeRegistry::kDefaultSchemeId) ? String() : candidate.name;
+                    applyToSelection([&](MaterialOverride& matOverride) {
+                        matOverride.schemeName = chosen;
+                        matOverride.schemeParamValues.Clear();
+                    });
                 }
             }
             ImGui::EndCombo();
@@ -468,14 +580,16 @@ void InspectorPanel::DrawMaterialSection(EditorContext& context, StreamingManage
             }
 
             if (edited) {
-                MaterialOverride& matOverride = context.CurrentScene.GetOrCreateMaterialOverride(*context.SelectedEntity, materialIndex);
-                matOverride.schemeParamValues[param.name] = value;
+                applyToSelection([&](MaterialOverride& matOverride) {
+                    matOverride.schemeParamValues[param.name] = value;
+                });
             }
 
             ImGui::PushID(param.name.CStr());
             if (drawResetButton("resetParam", isSet)) {
-                MaterialOverride& matOverride = context.CurrentScene.GetOrCreateMaterialOverride(*context.SelectedEntity, materialIndex);
-                matOverride.schemeParamValues.Erase(param.name);
+                applyToSelection([&](MaterialOverride& matOverride) {
+                    matOverride.schemeParamValues.Erase(param.name);
+                });
             }
             ImGui::PopID();
         }
@@ -582,6 +696,7 @@ void InspectorPanel::Draw(EditorContext& context, StreamingManager& streaming)
     }
 
     DrawTransformSection(context);
+    DrawMeshTransformSection(context, streaming);
     DrawScriptSection(context, streaming);
     DrawMaterialSection(context, streaming);
 

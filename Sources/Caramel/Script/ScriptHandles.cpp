@@ -73,7 +73,7 @@ MaterialOverride* ScriptSceneBridge::ResolveOrCreate(const MaterialRef& ref)
     if (!node || !s_Scene)
         return nullptr;
 
-    return &s_Scene->GetOrCreateMaterialOverride(*node, ref.materialIndex);
+    return &s_Scene->GetOrCreateMaterialOverride(*node, ref.materialIndex, ref.meshSlot);
 }
 
 void ScriptSceneBridge::QueueDestroy(uint64 nodeId)

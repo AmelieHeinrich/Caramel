@@ -139,6 +139,62 @@ namespace
         return MaterialRef{ self->nodeId, materialIndex };
     }
 
+    // Reads go through the stored offset when there is one so an unset mesh reports identity rather
+    // than allocating a MeshTransform just to be looked at.
+    const MeshTransform* Mesh_FindTransform(const MeshRef* self)
+    {
+        Scene* scene = ScriptSceneBridge::GetScene();
+        SceneNode* node = ScriptSceneBridge::Resolve(EntityRef{ self->nodeId });
+        if (!scene || !node)
+            return nullptr;
+        return scene->FindMeshTransform(*node, self->meshSlot);
+    }
+
+    MeshTransform* Mesh_GetOrCreateTransform(const MeshRef* self)
+    {
+        Scene* scene = ScriptSceneBridge::GetScene();
+        SceneNode* node = ScriptSceneBridge::Resolve(EntityRef{ self->nodeId });
+        if (!scene || !node || self->meshSlot >= node->meshIndices.Size())
+            return nullptr;
+        return &scene->GetOrCreateMeshTransform(*node, self->meshSlot);
+    }
+
+    glm::vec3 Mesh_GetPosition(const MeshRef* self)
+    {
+        const MeshTransform* meshTransform = Mesh_FindTransform(self);
+        return meshTransform ? meshTransform->position : glm::vec3(0.0f);
+    }
+
+    void Mesh_SetPosition(const glm::vec3& value, const MeshRef* self)
+    {
+        if (MeshTransform* meshTransform = Mesh_GetOrCreateTransform(self))
+            meshTransform->position = value;
+    }
+
+    glm::vec3 Mesh_GetRotation(const MeshRef* self)
+    {
+        const MeshTransform* meshTransform = Mesh_FindTransform(self);
+        return meshTransform ? meshTransform->rotationEuler : glm::vec3(0.0f);
+    }
+
+    void Mesh_SetRotation(const glm::vec3& value, const MeshRef* self)
+    {
+        if (MeshTransform* meshTransform = Mesh_GetOrCreateTransform(self))
+            meshTransform->rotationEuler = value;
+    }
+
+    glm::vec3 Mesh_GetScale(const MeshRef* self)
+    {
+        const MeshTransform* meshTransform = Mesh_FindTransform(self);
+        return meshTransform ? meshTransform->scale : glm::vec3(1.0f);
+    }
+
+    void Mesh_SetScale(const glm::vec3& value, const MeshRef* self)
+    {
+        if (MeshTransform* meshTransform = Mesh_GetOrCreateTransform(self))
+            meshTransform->scale = value;
+    }
+
     bool Mesh_IsValid(const MeshRef* self)
     {
         return ScriptSceneBridge::Resolve(*self) != nullptr;
@@ -172,7 +228,7 @@ namespace
         StreamingModel* mesh = ScriptSceneBridge::Resolve(*self);
         if (!mesh)
             return MaterialRef{ self->nodeId, -1 };
-        return MaterialRef{ self->nodeId, mesh->GetMesh().materialIndex };
+        return MaterialRef{ self->nodeId, mesh->GetMesh().materialIndex, (int32)self->meshSlot };
     }
 
     bool Material_IsValid(const MaterialRef* self)
@@ -360,6 +416,12 @@ void RegisterSceneAPI(asIScriptEngine* engine)
     engine->RegisterObjectMethod("EntityInstance", "Material GetMaterial(int) const", asFUNCTION(Instance_GetMaterial), asCALL_CDECL_OBJLAST);
 
     engine->RegisterObjectMethod("Mesh", "bool IsValid() const", asFUNCTION(Mesh_IsValid), asCALL_CDECL_OBJLAST);
+    engine->RegisterObjectMethod("Mesh", "vec3 get_position() const property", asFUNCTION(Mesh_GetPosition), asCALL_CDECL_OBJLAST);
+    engine->RegisterObjectMethod("Mesh", "void set_position(const vec3 &in) property", asFUNCTION(Mesh_SetPosition), asCALL_CDECL_OBJLAST);
+    engine->RegisterObjectMethod("Mesh", "vec3 get_rotation() const property", asFUNCTION(Mesh_GetRotation), asCALL_CDECL_OBJLAST);
+    engine->RegisterObjectMethod("Mesh", "void set_rotation(const vec3 &in) property", asFUNCTION(Mesh_SetRotation), asCALL_CDECL_OBJLAST);
+    engine->RegisterObjectMethod("Mesh", "vec3 get_scale() const property", asFUNCTION(Mesh_GetScale), asCALL_CDECL_OBJLAST);
+    engine->RegisterObjectMethod("Mesh", "void set_scale(const vec3 &in) property", asFUNCTION(Mesh_SetScale), asCALL_CDECL_OBJLAST);
     engine->RegisterObjectMethod("Mesh", "string get_name() const property", asFUNCTION(Mesh_GetName), asCALL_CDECL_OBJLAST);
     engine->RegisterObjectMethod("Mesh", "vec3 GetBoundsMin() const", asFUNCTION(Mesh_GetBoundsMin), asCALL_CDECL_OBJLAST);
     engine->RegisterObjectMethod("Mesh", "vec3 GetBoundsMax() const", asFUNCTION(Mesh_GetBoundsMax), asCALL_CDECL_OBJLAST);

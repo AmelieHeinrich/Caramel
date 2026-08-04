@@ -64,16 +64,32 @@ uint32 GPUScene::ResolveMaterialSlot(const RenderInstance& instance, const Mater
     // from the same model no longer share (and clobber) each other's factors.
     if (instance.owner)
     {
+        // Mirrors Scene::FindMaterialOverride: an override pinned to this exact mesh slot wins over
+        // the entity-wide one, so a per-mesh edit does not spill onto sibling meshes that merely
+        // happen to share a material index.
+        MaterialOverride* chosen = nullptr;
         for (MaterialOverride& matOverride : instance.owner->materialOverrides)
         {
             if (matOverride.materialIndex != materialIndex || !matOverride.HasAnyOverride())
                 continue;
 
-            if (matOverride.gpuMaterialSlot == UINT32_MAX)
-                matOverride.gpuMaterialSlot = m_NextMaterialSlot++;
+            if (matOverride.meshSlot == (int32)instance.meshSlot)
+            {
+                chosen = &matOverride;
+                break;
+            }
 
-            outOverride = &matOverride;
-            return matOverride.gpuMaterialSlot;
+            if (matOverride.meshSlot == MaterialOverride::kAllMeshes)
+                chosen = &matOverride;
+        }
+
+        if (chosen)
+        {
+            if (chosen->gpuMaterialSlot == UINT32_MAX)
+                chosen->gpuMaterialSlot = m_NextMaterialSlot++;
+
+            outOverride = chosen;
+            return chosen->gpuMaterialSlot;
         }
     }
 

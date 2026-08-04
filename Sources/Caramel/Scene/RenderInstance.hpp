@@ -19,4 +19,8 @@ struct RenderInstance
     glm::mat4 transform{ 1.0f };
     SceneNode* owner = nullptr;
     uint32 instanceIndex = 0;
+
+    // Index into owner->meshIndices, so material overrides can be resolved per mesh rather than
+    // only per material.
+    uint32 meshSlot = 0;
 };
