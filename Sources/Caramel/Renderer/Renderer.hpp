@@ -28,7 +28,7 @@ class StreamingManager;
 class Renderer
 {
 public:
-    Renderer(SDL_Window* window);
+    Renderer(SDL_Window* window, bool vsync);
     ~Renderer();
 
     void Render(const Camera& camera, StreamingManager& streamingManager, const TArray<RenderInstance>& renderInstances);
@@ -64,6 +64,9 @@ private:
     uint64 m_FenceFrameSlots[FRAMES_IN_FLIGHT];
     agfx::CommandBuffer m_CommandBuffers[FRAMES_IN_FLIGHT];
 
+    // A single shared set is correct across frames in flight: AGFX's Metal barriers are queue-scoped
+    // (barrierAfterQueueStages), so the PixelShaderResource -> RenderTarget transition below orders
+    // this frame's scene pass against the previous frame's ImGui pass reading the same texture.
     agfx::Texture m_DepthTexture;
     bool m_DepthNeedsInitialTransition = true;
     void CreateDepthTexture(uint32 width, uint32 height);
@@ -75,6 +78,14 @@ private:
     uint32 m_ViewportHeight = 1;
     bool m_SceneColorNeedsInitialTransition = true;
     void CreateSceneColorTexture(uint32 width, uint32 height);
+
+    // SetViewportSize only records the request; the actual recreate is polled once per frame at a
+    // point where no in-flight command buffer and no ImGui draw list still references the old
+    // texture. Recreating inline would destroy a view whose handle is already baked into this
+    // frame's ImGui draw data, and would stall the GPU from inside the UI build.
+    uint32 m_RequestedViewportWidth = 1;
+    uint32 m_RequestedViewportHeight = 1;
+    void PollViewportResize();
 
     SchemeRegistry m_SchemeRegistry;
     GPUScene m_GPUScene;

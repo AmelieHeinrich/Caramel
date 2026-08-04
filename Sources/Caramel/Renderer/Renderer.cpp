@@ -21,7 +21,7 @@ namespace
 
 Renderer* Renderer::s_Instance = nullptr;
 
-Renderer::Renderer(SDL_Window* window)
+Renderer::Renderer(SDL_Window* window, bool vsync)
     : m_Window(window)
     , m_FenceValue(0)
     , m_FrameSlot(0)
@@ -54,7 +54,7 @@ Renderer::Renderer(SDL_Window* window)
     swapChainCreateInfo.height = height;
     swapChainCreateInfo.imageCount = FRAMES_IN_FLIGHT;
     swapChainCreateInfo.queue = m_CommandQueue;
-    swapChainCreateInfo.vsync = false;
+    swapChainCreateInfo.vsync = vsync;
     swapChainCreateInfo.isHDR = false;
 
     m_SwapChain = m_NativeHandle->CreateSwapChain(m_Device, swapChainCreateInfo);
@@ -120,13 +120,17 @@ void Renderer::CreateSceneColorTexture(uint32 width, uint32 height)
 
 void Renderer::SetViewportSize(uint32 width, uint32 height)
 {
-    width = width > 0 ? width : 1;
-    height = height > 0 ? height : 1;
-    if (width == m_ViewportWidth && height == m_ViewportHeight)
+    m_RequestedViewportWidth = width > 0 ? width : 1;
+    m_RequestedViewportHeight = height > 0 ? height : 1;
+}
+
+void Renderer::PollViewportResize()
+{
+    if (m_RequestedViewportWidth == m_ViewportWidth && m_RequestedViewportHeight == m_ViewportHeight)
         return;
 
-    m_ViewportWidth = width;
-    m_ViewportHeight = height;
+    m_ViewportWidth = m_RequestedViewportWidth;
+    m_ViewportHeight = m_RequestedViewportHeight;
 
     m_Device.WaitIdle();
     CreateSceneColorTexture(m_ViewportWidth, m_ViewportHeight);
@@ -146,9 +150,6 @@ void Renderer::Render(const Camera& camera, StreamingManager& streamingManager, 
 
     ShaderServer::Tick();
 
-    // Safe to rewrite this frame slot's buffers: the fence wait above retired the frame that last
-    // used them. Streaming has already settled for this frame (Application updates it before
-    // BuildRenderInstances), so the bindless handles collected here are final.
     m_GPUScene.Build(streamingManager, renderInstances, (uint32)m_FrameSlot);
 
     int32 width, height;
@@ -181,6 +182,7 @@ void Renderer::Render(const Camera& camera, StreamingManager& streamingManager, 
         m_DepthNeedsInitialTransition = false;
     }
 
+    // Queue-scoped: this also orders against the previous frame's ImGui pass sampling the texture.
     if (m_SceneColorNeedsInitialTransition) {
         commandBuffer.TextureBarrier(m_SceneColorTexture, agfx::ResourceState::Common, agfx::ResourceState::RenderTarget);
         m_SceneColorNeedsInitialTransition = false;
@@ -217,7 +219,8 @@ void Renderer::Render(const Camera& camera, StreamingManager& streamingManager, 
     commandBuffer.TextureBarrier(m_SceneColorTexture, agfx::ResourceState::RenderTarget, agfx::ResourceState::PixelShaderResource);
 
     agfx::Texture backBuffer = m_SwapChain.AcquireNextTexture();
-    commandBuffer.TextureBarrier(backBuffer, agfx::ResourceState::Present, agfx::ResourceState::RenderTarget);
+
+    commandBuffer.TextureBarrier(backBuffer, agfx::ResourceState::Present, agfx::ResourceState::RenderTarget, agfx::AllMips, agfx::AllLayers, false);
 
     agfx::RenderTargetCreateInfo renderTargetCreateInfo{};
     renderTargetCreateInfo.texture = backBuffer;
@@ -238,13 +241,16 @@ void Renderer::Render(const Camera& camera, StreamingManager& streamingManager, 
 
     renderPass.End();
 
-    commandBuffer.TextureBarrier(backBuffer, agfx::ResourceState::RenderTarget, agfx::ResourceState::Present);
+    commandBuffer.TextureBarrier(backBuffer, agfx::ResourceState::RenderTarget, agfx::ResourceState::Present,
+                                 agfx::AllMips, agfx::AllLayers, false);
     commandBuffer.End();
     m_CommandQueue.Submit(commandBuffer);
     m_SwapChain.Present();
 
     m_FenceFrameSlots[m_FrameSlot] = ++m_FenceValue;
     m_CommandQueue.Signal(m_Fence, m_FenceValue);
+
+    PollViewportResize();
 }
 
 void Renderer::Resize()

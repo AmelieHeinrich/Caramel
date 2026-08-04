@@ -70,7 +70,7 @@ Application::Application(const ApplicationInfo& info)
     ImGui::GetIO().ConfigFlags |= ImGuiConfigFlags_DockingEnable;
     ImGui_ImplSDL3_InitForOther(m_Window);
 
-    m_Renderer = MakeUnique<Renderer>(m_Window);
+    m_Renderer = MakeUnique<Renderer>(m_Window, info.VSync);
     m_DeviceInfo = m_Renderer->GetDeviceInfo();
 
     JobSystem::Initialize();
