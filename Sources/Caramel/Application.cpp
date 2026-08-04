@@ -181,6 +181,8 @@ void Application::Run()
         m_ContentDrawerPanel.Draw();
         ImGui::Render();
 
+        renderInstances = m_Scene.BuildRenderInstances(*m_StreamingManager);
+
         m_Renderer->Render(m_Camera, *m_StreamingManager, renderInstances);
     }
     }

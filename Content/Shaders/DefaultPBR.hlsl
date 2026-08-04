@@ -34,5 +34,8 @@ float4 DefaultPBRPS(VSOut input) : SV_Target {
     float3 ambient = baseColor.rgb * params.fAmbientScale;
     float3 diffuse = baseColor.rgb * ndotl * params.fDiffuseScale;
     float3 emissive = material.vEmissiveFactor.rgb;
-    return float4(ambient + diffuse + emissive, baseColor.a) * 3.0f;
+    float3 final = ambient + diffuse + emissive;
+    final = pow(final, 1.0f / 2.2f); // gamma correction
+
+    return float4(final, baseColor.a);
 }
