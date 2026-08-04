@@ -179,6 +179,8 @@ void Application::Run()
         m_HierarchyPanel.Draw(m_EditorContext, *m_StreamingManager);
         m_InspectorPanel.Draw(m_EditorContext, *m_StreamingManager);
         m_ContentDrawerPanel.Draw();
+        if (m_ShowRenderGraphPanel)
+            m_RenderGraphPanel.Draw(m_EditorContext, *m_Renderer);
         ImGui::Render();
 
         renderInstances = m_Scene.BuildRenderInstances(*m_StreamingManager);
@@ -233,6 +235,9 @@ void Application::DrawMainMenuBar()
 
         if (ImGui::MenuItem(ICON_FA_FORWARD_STEP " Advance Streaming", nullptr, false, !autoStream))
             m_StreamingManager->PumpStreaming();
+
+        ImGui::Separator();
+        ImGui::MenuItem(ICON_FA_DIAGRAM_PROJECT " Resource Dependency Viewer", nullptr, &m_ShowRenderGraphPanel);
 
         ImGui::EndMenu();
     }

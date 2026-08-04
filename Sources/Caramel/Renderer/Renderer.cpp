@@ -45,6 +45,7 @@ Renderer::Renderer(SDL_Window* window, bool vsync)
     m_CommandQueue = m_Device.CreateCommandQueue(agfx::CommandQueueType::Graphics);
     m_Fence = m_Device.CreateFence();
     m_NativeHandle = MakeUnique<NativeHandle>(m_Window);
+    m_RenderGraphAllocator = MakeUnique<RenderGraphAllocator>(m_Device);
 
     int32 width, height;
     SDL_GetWindowSizeInPixels(m_Window, &width, &height);
@@ -89,9 +90,9 @@ void Renderer::CreateDepthTexture(uint32 width, uint32 height)
              .SetType(agfx::TextureType::Texture2D)
              .SetUsage(agfx::TextureUsage::DepthStencilAttachment)
              .SetMipLevels(1);
+    m_ImportedResourceState.Erase(m_DepthTexture.Get());
     m_DepthTexture = m_Device.CreateTexture(depthInfo);
     m_DepthTexture.SetName("Scene Depth Buffer");
-    m_DepthNeedsInitialTransition = true;
 
     m_Device.MakeResourcesResident();
 }
@@ -104,6 +105,7 @@ void Renderer::CreateSceneColorTexture(uint32 width, uint32 height)
              .SetType(agfx::TextureType::Texture2D)
              .SetUsage(agfx::TextureUsage::ColorAttachment | agfx::TextureUsage::Sampled)
              .SetMipLevels(1);
+    m_ImportedResourceState.Erase(m_SceneColorTexture.Get());
     m_SceneColorTexture = m_Device.CreateTexture(colorInfo);
     m_SceneColorTexture.SetName("Scene Color Buffer");
 
@@ -113,7 +115,6 @@ void Renderer::CreateSceneColorTexture(uint32 width, uint32 height)
                                                                               .SetWriteable(false);
     m_SceneColorView = m_Device.CreateTextureView(colorViewInfo);
     m_SceneColorTexID = (ImTextureID)(intptr_t)m_SceneColorView.GetHandle();
-    m_SceneColorNeedsInitialTransition = true;
 
     m_Device.MakeResourcesResident();
 }
@@ -143,6 +144,17 @@ Renderer::~Renderer()
     ShaderServer::Shutdown();
 }
 
+agfx::ResourceState Renderer::GetImportedState(agfxTexture* texture) const
+{
+    auto it = m_ImportedResourceState.Find(texture);
+    return it != m_ImportedResourceState.End() ? it->second : agfx::ResourceState::Common;
+}
+
+void Renderer::SetImportedState(agfxTexture* texture, agfx::ResourceState state)
+{
+    m_ImportedResourceState[texture] = state;
+}
+
 void Renderer::Render(const Camera& camera, StreamingManager& streamingManager, const TArray<RenderInstance>& renderInstances)
 {
     m_FrameSlot = (uint32_t)(m_FenceValue % FRAMES_IN_FLIGHT);
@@ -164,85 +176,83 @@ void Renderer::Render(const Camera& camera, StreamingManager& streamingManager, 
     commandBuffer.Reset();
     commandBuffer.Begin();
 
+    // Stays outside the graph, and must run before any graph barrier in this same command buffer:
+    // textures imported below must reflect this *post*-transition state, not their raw pre-frame one.
     for (const PendingMipTransition& transition : m_PendingMipTransitions)
         agfxCommandBufferTextureBarrier(commandBuffer, transition.texture, AGFX_RESOURCE_STATE_COPY_DEST, AGFX_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, transition.mip, 0, 1);
     m_PendingMipTransitions.Clear();
 
-    agfx::RenderTargetCreateInfo sceneColorTargetCreateInfo{};
-    sceneColorTargetCreateInfo.texture = m_SceneColorTexture;
-    agfx::RenderTarget sceneColorTarget = m_Device.CreateRenderTarget(sceneColorTargetCreateInfo);
-
-    agfx::RenderTargetCreateInfo depthTargetCreateInfo{};
-    depthTargetCreateInfo.texture = m_DepthTexture;
-    depthTargetCreateInfo.SetIsDepth(true);
-    agfx::RenderTarget depthTarget = m_Device.CreateRenderTarget(depthTargetCreateInfo);
-
-    if (m_DepthNeedsInitialTransition) {
-        commandBuffer.TextureBarrier(m_DepthTexture, agfx::ResourceState::Common, agfx::ResourceState::DepthWrite);
-        m_DepthNeedsInitialTransition = false;
-    }
-
-    // Queue-scoped: this also orders against the previous frame's ImGui pass sampling the texture.
-    if (m_SceneColorNeedsInitialTransition) {
-        commandBuffer.TextureBarrier(m_SceneColorTexture, agfx::ResourceState::Common, agfx::ResourceState::RenderTarget);
-        m_SceneColorNeedsInitialTransition = false;
-    } else {
-        commandBuffer.TextureBarrier(m_SceneColorTexture, agfx::ResourceState::PixelShaderResource, agfx::ResourceState::RenderTarget);
-    }
-
-    {
-        agfx::RenderPassCreateInfo scenePassInfo{};
-        scenePassInfo.colorAttachmentCount = 1;
-        scenePassInfo.colorAttachments[0].renderTarget = sceneColorTarget;
-        scenePassInfo.colorAttachments[0].loadOp = AGFX_LOAD_OPERATION_CLEAR;
-        scenePassInfo.colorAttachments[0].storeOp = AGFX_STORE_OPERATION_STORE;
-        scenePassInfo.colorAttachments[0].clearColor[0] = 0.1f;
-        scenePassInfo.colorAttachments[0].clearColor[1] = 0.1f;
-        scenePassInfo.colorAttachments[0].clearColor[2] = 0.1f;
-        scenePassInfo.colorAttachments[0].clearColor[3] = 1.0f;
-        scenePassInfo.hasDepthAttachment = 1;
-        scenePassInfo.depthAttachment.renderTarget = depthTarget;
-        scenePassInfo.depthAttachment.loadOp = AGFX_LOAD_OPERATION_CLEAR;
-        scenePassInfo.depthAttachment.storeOp = AGFX_STORE_OPERATION_STORE;
-        scenePassInfo.depthAttachment.clearDepth = 1.0f;
-        scenePassInfo.name = "Scene Pass";
-        scenePassInfo.width = m_ViewportWidth;
-        scenePassInfo.height = m_ViewportHeight;
-
-        agfx::RenderPass scenePass = commandBuffer.BeginRenderPass(scenePassInfo);
-        m_SceneRenderer->Render(scenePass, m_GPUScene, m_SchemeRegistry, camera, m_ViewportWidth, m_ViewportHeight, (uint32)m_FrameSlot);
-        scenePass.End();
-    }
-
-    m_DebugRenderer->Flush(commandBuffer, sceneColorTarget, depthTarget, camera, m_ViewportWidth, m_ViewportHeight, (uint32)m_FrameSlot);
-
-    commandBuffer.TextureBarrier(m_SceneColorTexture, agfx::ResourceState::RenderTarget, agfx::ResourceState::PixelShaderResource);
-
     agfx::Texture backBuffer = m_SwapChain.AcquireNextTexture();
 
-    commandBuffer.TextureBarrier(backBuffer, agfx::ResourceState::Present, agfx::ResourceState::RenderTarget, agfx::AllMips, agfx::AllLayers, false);
+    RenderGraph graph(m_Device, m_RenderGraphAllocator.get());
 
-    agfx::RenderTargetCreateInfo renderTargetCreateInfo{};
-    renderTargetCreateInfo.texture = backBuffer;
-    agfx::RenderTarget renderTarget = m_Device.CreateRenderTarget(renderTargetCreateInfo);
+    RGTextureHandle sceneColorHandle = graph.ImportTexture("Scene Color", m_SceneColorTexture, GetImportedState(m_SceneColorTexture.Get()));
+    RGTextureHandle depthHandle = graph.ImportTexture("Scene Depth", m_DepthTexture, GetImportedState(m_DepthTexture.Get()));
+    RGTextureHandle backbufferHandle = graph.ImportTexture("Back Buffer", backBuffer, agfx::ResourceState::Present);
 
-    agfx::RenderPassCreateInfo renderPassCreateInfo{};
-    renderPassCreateInfo.colorAttachmentCount = 1;
-    renderPassCreateInfo.colorAttachments[0].renderTarget = renderTarget;
-    renderPassCreateInfo.colorAttachments[0].loadOp = AGFX_LOAD_OPERATION_CLEAR;
-    renderPassCreateInfo.colorAttachments[0].storeOp = AGFX_STORE_OPERATION_STORE;
-    renderPassCreateInfo.name = "Main Render Pass";
-    renderPassCreateInfo.width = width;
-    renderPassCreateInfo.height = height;
+    graph.AddAttachmentPass("Scene Pass",
+        [&](RGPassBuilder& builder) {
+            RGAttachmentDesc colorAttachment{};
+            colorAttachment.texture = sceneColorHandle;
+            colorAttachment.loadOp = agfx::LoadOp::Clear;
+            colorAttachment.storeOp = agfx::StoreOp::Store;
+            colorAttachment.clearColor[0] = 0.1f;
+            colorAttachment.clearColor[1] = 0.1f;
+            colorAttachment.clearColor[2] = 0.1f;
+            colorAttachment.clearColor[3] = 1.0f;
+            builder.AddColorAttachment(colorAttachment);
 
-    agfx::RenderPass renderPass = commandBuffer.BeginRenderPass(renderPassCreateInfo);
+            RGAttachmentDesc depthAttachment{};
+            depthAttachment.texture = depthHandle;
+            depthAttachment.loadOp = agfx::LoadOp::Clear;
+            depthAttachment.storeOp = agfx::StoreOp::Store;
+            depthAttachment.clearDepth = 1.0f;
+            builder.SetDepthAttachment(depthAttachment);
+        },
+        [&](agfx::RenderPass& pass, RGResolveContext&) {
+            m_SceneRenderer->Render(pass, m_GPUScene, m_SchemeRegistry, camera, m_ViewportWidth, m_ViewportHeight, (uint32)m_FrameSlot);
+        });
 
-    m_ImGuiRenderer->RenderDrawData(ImGui::GetDrawData(), renderPass, (uint32)width, (uint32)height, (uint32)m_FrameSlot);
+    graph.AddPass("Debug Draw",
+        [&](RGPassBuilder& builder) {
+            builder.WriteTexture(sceneColorHandle, agfx::ResourceState::RenderTarget);
+            builder.WriteTexture(depthHandle, agfx::ResourceState::DepthWrite);
+            // Scene-color is sampled by ImGui next frame through a raw bindless handle
+            // (GetViewportTextureID()), entirely outside the graph -- see RGTextureDesc::externallyRead.
+            builder.MarkAsExternallyRead(sceneColorHandle, agfx::ResourceState::PixelShaderResource);
+        },
+        [&](agfx::CommandBuffer& cmd, RGResolveContext& ctx) {
+            agfx::RenderTarget& colorTarget = ctx.ResolveRenderTarget(sceneColorHandle, false);
+            agfx::RenderTarget& depthTarget = ctx.ResolveRenderTarget(depthHandle, true);
+            m_DebugRenderer->Flush(cmd, colorTarget, depthTarget, camera, m_ViewportWidth, m_ViewportHeight, (uint32)m_FrameSlot);
+        });
 
-    renderPass.End();
+    graph.AddAttachmentPass("Swapchain Pass",
+        [&](RGPassBuilder& builder) {
+            builder.MarkSwapchainEdge(backbufferHandle);
+            builder.MarkAsExternallyRead(backbufferHandle, agfx::ResourceState::Present);
 
-    commandBuffer.TextureBarrier(backBuffer, agfx::ResourceState::RenderTarget, agfx::ResourceState::Present,
-                                 agfx::AllMips, agfx::AllLayers, false);
+            RGAttachmentDesc colorAttachment{};
+            colorAttachment.texture = backbufferHandle;
+            colorAttachment.loadOp = agfx::LoadOp::Clear;
+            colorAttachment.storeOp = agfx::StoreOp::Store;
+            colorAttachment.clearColor[0] = 0.0f;
+            colorAttachment.clearColor[1] = 0.0f;
+            colorAttachment.clearColor[2] = 0.0f;
+            colorAttachment.clearColor[3] = 0.0f;
+            builder.AddColorAttachment(colorAttachment);
+        },
+        [&](agfx::RenderPass& pass, RGResolveContext&) {
+            m_ImGuiRenderer->RenderDrawData(ImGui::GetDrawData(), pass, (uint32)width, (uint32)height, (uint32)m_FrameSlot);
+        });
+
+    graph.Compile();
+    graph.Execute(commandBuffer);
+
+    SetImportedState(m_SceneColorTexture.Get(), graph.GetFinalState(sceneColorHandle));
+    SetImportedState(m_DepthTexture.Get(), graph.GetFinalState(depthHandle));
+    m_LastGraphDebugInfo = graph.GetDebugInfo();
+
     commandBuffer.End();
     m_CommandQueue.Submit(commandBuffer);
     m_SwapChain.Present();

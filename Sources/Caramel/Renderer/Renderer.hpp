@@ -12,6 +12,7 @@
 #include <Caramel/Renderer/UploadQueue.hpp>
 #include <Caramel/Renderer/Camera.hpp>
 #include <Caramel/Renderer/MaterialScheme.hpp>
+#include <Caramel/Renderer/RenderGraph/RenderGraph.hpp>
 #include <Caramel/Scene/GPUScene.hpp>
 #include <Caramel/Scene/RenderInstance.hpp>
 
@@ -46,6 +47,8 @@ public:
     const SchemeRegistry& GetSchemeRegistry() const { return m_SchemeRegistry; }
     const GPUScene& GetGPUScene() const { return m_GPUScene; }
 
+    const RenderGraphDebugInfo& GetLastGraphDebugInfo() const { return m_LastGraphDebugInfo; }
+
     static Renderer& Get() { return *s_Instance; }
 
 private:
@@ -59,6 +62,10 @@ private:
     agfx::CommandQueue m_CommandQueue;
     agfx::Fence m_Fence;
     agfx::SwapChain m_SwapChain;
+
+    // Persists across frames (unlike RenderGraph, rebuilt fresh every Render() call) so the heap it
+    // packs transient resources into doesn't get recreated every frame -- see RenderGraphAllocator.
+    TUnique<RenderGraphAllocator> m_RenderGraphAllocator;
     uint64 m_FenceValue;
     uint64 m_FrameSlot;
     uint64 m_FenceFrameSlots[FRAMES_IN_FLIGHT];
@@ -68,7 +75,6 @@ private:
     // (barrierAfterQueueStages), so the PixelShaderResource -> RenderTarget transition below orders
     // this frame's scene pass against the previous frame's ImGui pass reading the same texture.
     agfx::Texture m_DepthTexture;
-    bool m_DepthNeedsInitialTransition = true;
     void CreateDepthTexture(uint32 width, uint32 height);
 
     agfx::Texture m_SceneColorTexture;
@@ -76,8 +82,18 @@ private:
     ImTextureID m_SceneColorTexID = ImTextureID_Invalid;
     uint32 m_ViewportWidth = 1;
     uint32 m_ViewportHeight = 1;
-    bool m_SceneColorNeedsInitialTransition = true;
     void CreateSceneColorTexture(uint32 width, uint32 height);
+
+    // Renderer's persistently-owned textures (scene-color, depth) are re-imported into a fresh
+    // RenderGraph every frame, but their physical GPU state carries over across frames -- this cache
+    // is what makes that correct. Absent entries default to Common, reproducing "a freshly (re)created
+    // texture starts at Common" automatically (the direct replacement for the old *NeedsInitialTransition
+    // bools). Updated from RenderGraph::GetFinalState() after every Execute().
+    TDictionary<agfxTexture*, agfx::ResourceState> m_ImportedResourceState;
+    agfx::ResourceState GetImportedState(agfxTexture* texture) const;
+    void SetImportedState(agfxTexture* texture, agfx::ResourceState state);
+
+    RenderGraphDebugInfo m_LastGraphDebugInfo;
 
     // SetViewportSize only records the request; the actual recreate is polled once per frame at a
     // point where no in-flight command buffer and no ImGui draw list still references the old

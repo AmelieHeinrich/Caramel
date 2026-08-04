@@ -1,5 +1,4 @@
 Basics
-- Render graph
 - BLAS/TLAS building (async compute)
 
 GPU driven rendering

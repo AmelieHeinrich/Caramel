@@ -21,6 +21,7 @@
 #include <Caramel/Editor/HierarchyPanel.hpp>
 #include <Caramel/Editor/InspectorPanel.hpp>
 #include <Caramel/Editor/ContentDrawerPanel.hpp>
+#include <Caramel/Editor/RenderGraphPanel.hpp>
 
 #include <SDL3/SDL.h>
 #include <imgui.h>
@@ -89,10 +90,12 @@ private:
     HierarchyPanel m_HierarchyPanel;
     InspectorPanel m_InspectorPanel;
     ContentDrawerPanel m_ContentDrawerPanel;
+    RenderGraphPanel m_RenderGraphPanel;
 
     agfxDeviceInfo m_DeviceInfo;
 
     bool m_ShowColliders = false;
+    bool m_ShowRenderGraphPanel = false;
 
     std::mutex m_FileDialogMutex;
     String m_PendingDialogPath;
