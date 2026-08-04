@@ -23,7 +23,8 @@ struct GPUMaterial {
     float  fMetallicFactor;
     float  fRoughnessFactor;
     float  fAlphaCutoff;
-    uint   uFlags;              // bit0 = doubleSided
+    uint   uFlags;              // bit0 = doubleSided, bit1 = metallic overridden (ignore texture),
+                                 // bit2 = roughness overridden (ignore texture)
     uint   uTextures[5];        // non-resident slots hold a 1x1 fallback handle, never invalid
     uint   uSchemeId;           // which material scheme drew this; debugging/validation only
     uint2  uPad;
@@ -46,5 +47,7 @@ struct GPUInstance {
 };
 
 bool GPUMaterialIsDoubleSided(GPUMaterial material) { return (material.uFlags & 1u) != 0u; }
+bool GPUMaterialOverridesMetallic(GPUMaterial material) { return (material.uFlags & 2u) != 0u; }
+bool GPUMaterialOverridesRoughness(GPUMaterial material) { return (material.uFlags & 4u) != 0u; }
 
 #endif

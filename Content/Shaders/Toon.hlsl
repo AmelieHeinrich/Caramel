@@ -8,10 +8,6 @@
 
 #pragma pixel ToonPS
 
-// Mirrors the "parameters" array in Content/Materials/Schemes/Toon.json, in declaration order.
-// Tightly packed, so offsets are 0, 4, 8, 24 and the element stride is 28 -- a StructuredBuffer is
-// NOT laid out like a cbuffer, so vRimColor sits at 8 rather than 16. Adding or reordering a field
-// here without matching the JSON silently shifts every element. See MaterialScheme::ComputeLayout.
 struct ToonParams {
     float  fBrightness;
     int    iBandCount;

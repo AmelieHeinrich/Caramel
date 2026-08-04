@@ -23,7 +23,7 @@
 struct Vertex {
     float3 vPosition;
     float3 vNormal;
-    float4 vTangent; // xyz = tangent, w = handedness (unused here -- no normal mapping)
+    float4 vTangent; // xyz = tangent, w = handedness
     float2 vUV;
 };
 
@@ -35,8 +35,11 @@ struct MeshletDesc {
     uint uTriangleCount;
 };
 
+// Mirrors FrameConstants in Sources/Caramel/Renderer/SceneRenderer.cpp field-for-field.
 struct FrameConstants {
     float4x4 mViewProj;
+    float3   vCameraPosition;
+    float    _Pad;
 };
 
 // Mirrors ScenePushConstants in Sources/Caramel/Renderer/SceneRenderer.cpp. rSchemeParams points at
@@ -48,6 +51,7 @@ struct ScenePushConstants {
     ResourceHandle rSchemeParams;
     uint uInstanceIndex;
     ResourceHandle rSampler;
+    ResourceHandle rFallbackTexture; // handle held by a material texture slot with nothing bound
 };
 AGFX_PUSH_CONSTANTS(ScenePushConstants, g_Constants);
 
@@ -59,6 +63,7 @@ struct VSOut {
     // constant across the meshlet -- nointerpolation keeps it exact.
     nointerpolation uint uMaterialSlot : TEXCOORD1;
     float3 vWorldPosition : TEXCOORD2;
+    float4 vWorldTangent : TEXCOORD3; // xyz = world-space tangent, w = handedness (passthrough)
 };
 
 // Loads the material of the pixel being shaded. Every scheme's pixel shader starts with this.
@@ -120,6 +125,7 @@ void SceneMS(
         o.vUV = vertex.vUV;
         o.uMaterialSlot = instance.uMaterialSlot;
         o.vWorldPosition = worldPosition.xyz;
+        o.vWorldTangent = float4(mul((float3x3)mModel, vertex.vTangent.xyz), vertex.vTangent.w);
         outVertices[v] = o;
     }
 

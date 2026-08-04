@@ -26,7 +26,9 @@ struct GPUMaterial
     float32   metallicFactor = 1.0f;                        // 32
     float32   roughnessFactor = 1.0f;                       // 36
     float32   alphaCutoff = 0.5f;                           // 40
-    uint32    flags = 0;                                    // 44  bit0 = doubleSided
+    uint32    flags = 0;                                    // 44  bit0 = doubleSided, bit1 = metallic
+                                                              //     overridden (ignore texture), bit2 =
+                                                              //     roughness overridden (ignore texture)
     uint32    textures[5]{};                                // 48  indexed by MaterialTextureSlot
     uint32    schemeId = 0;                                 // 68  for debugging/validation only
     uint32    _pad[2]{};                                    // 72
@@ -115,6 +117,12 @@ public:
     agfx::BufferView& GetSchemeParamBufferView(uint32 schemeId, uint32 frameIndex) { return m_SchemeParamStreams[schemeId].views[frameIndex]; }
 
     uint32 GetMaterialSlotCount() const { return (uint32)m_MaterialStaging.Size(); }
+
+    /// @brief The handle a material's texture slot holds when no texture is bound (or it has no
+    /// resident mip yet). Shaders that must treat "no texture" differently from "sampled zero"
+    /// (e.g. normal mapping, where a missing map should fall back to the geometric normal instead
+    /// of decoding whatever undefined pixel the fallback texture holds) compare against this.
+    uint32 GetFallbackTextureHandle() const { return (uint32)m_FallbackTextureView.GetHandle(); }
 
 private:
     /// @brief Returns the slot for this instance's material, allocating one on first sight. An

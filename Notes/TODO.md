@@ -1,16 +1,4 @@
-Basics
-- BLAS/TLAS building (async compute)
-
-GPU driven rendering
-- Indirect mesh draw setup
-- Frustum culling (instance, meshlet)
-- Cone culling (meshlet)
-- Sub-pixel culling (primitive)
-- HW/SW rasterizer
-- 2-pass occlusion cull
-
 Base lighting pass
-- Cook-torrance + burley
 - Clustered light culling
 - IES profiles
 
@@ -19,7 +7,6 @@ Animation
 - Very simple playback, no blend states or anything
 
 Temporal infrastructure
-- Camera jitter + 2.5D MVs
 - DLSS/FSR/MetalFX
 
 Pick and choose:

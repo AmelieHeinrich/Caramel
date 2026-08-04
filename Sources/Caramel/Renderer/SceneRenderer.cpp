@@ -15,6 +15,8 @@ namespace
     struct FrameConstants
     {
         glm::mat4 viewProj;
+        glm::vec3 cameraPosition;
+        float pad;
     };
 
     // Mirrors ScenePushConstants in Content/Shaders/Common/SceneMesh.hlsli.
@@ -26,6 +28,7 @@ namespace
         uint32 rSchemeParams;
         uint32 uInstanceIndex;
         uint32 rSampler;
+        uint32 rFallbackTexture;
     };
 }
 
@@ -62,6 +65,7 @@ void SceneRenderer::Render(agfx::RenderPass& renderPass, GPUScene& gpuScene, con
     {
         FrameConstants constants;
         constants.viewProj = camera.GetViewProjection(height != 0 ? (float)width / (float)height : 1.0f);
+        constants.cameraPosition = camera.GetPosition();
         agfx::MappedBuffer mapped(m_CameraBuffers[frameIndex]);
         std::memcpy(mapped.Get(), &constants, sizeof(constants));
     }
@@ -74,6 +78,7 @@ void SceneRenderer::Render(agfx::RenderPass& renderPass, GPUScene& gpuScene, con
     pc.rInstanceBuffer = (uint32)gpuScene.GetInstanceBufferView(frameIndex).GetHandle();
     pc.rMaterialBuffer = (uint32)gpuScene.GetMaterialBufferView(frameIndex).GetHandle();
     pc.rSampler = (uint32)m_Sampler.GetHandle();
+    pc.rFallbackTexture = gpuScene.GetFallbackTextureHandle();
 
     const TArray<MaterialBatch>& batches = gpuScene.GetBatches();
     const TArray<GPUDraw>& draws = gpuScene.GetDraws();

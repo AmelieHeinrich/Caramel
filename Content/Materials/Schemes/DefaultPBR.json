@@ -17,6 +17,6 @@
     },
     "parameters": [
         { "name": "ambientScale", "type": "float", "default": 0.25, "min": 0.0, "max": 2.0 },
-        { "name": "diffuseScale", "type": "float", "default": 0.85, "min": 0.0, "max": 4.0 }
+        { "name": "lightIntensity", "type": "float", "default": 0.85, "min": 0.0, "max": 4.0 }
     ]
 }

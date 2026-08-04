@@ -125,20 +125,28 @@ void GPUScene::WriteMaterial(uint32 slot, const ModelMaterial& source, const Mat
     dst.metallicFactor = source.metallicFactor;
     dst.roughnessFactor = source.roughnessFactor;
 
+    uint32 flags = source.doubleSided ? 1u : 0u;
+
     if (activeOverride)
     {
         if (activeOverride->overrideBaseColor)
             dst.baseColorFactor = activeOverride->baseColorFactor;
         if (activeOverride->overrideMetallic)
+        {
             dst.metallicFactor = activeOverride->metallicFactor;
+            flags |= 2u; // shader must use the factor as-is, not multiply it into the texture channel
+        }
         if (activeOverride->overrideRoughness)
+        {
             dst.roughnessFactor = activeOverride->roughnessFactor;
+            flags |= 4u;
+        }
         if (activeOverride->overrideEmissive)
             dst.emissiveFactor = glm::vec4(activeOverride->emissiveFactor, 0.0f);
     }
 
     dst.alphaCutoff = source.alphaCutoff;
-    dst.flags = source.doubleSided ? 1u : 0u;
+    dst.flags = flags;
 
     uint32 schemeId = m_Schemes->FindId(activeOverride ? activeOverride->schemeName : String());
     dst.schemeId = schemeId;
