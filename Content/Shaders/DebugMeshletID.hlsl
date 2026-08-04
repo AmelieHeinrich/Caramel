@@ -29,6 +29,12 @@ float3 IdToColor(uint id) {
 }
 
 float4 DebugMeshletIDPS(VSOut input) : SV_Target {
-    uint id = g_Constants.uInstanceIndex * 9781u + input.uMeshletID;
-    return float4(IdToColor(id), 1.0f);
+    uint id = input.uInstanceIndex * 9781u + input.uMeshletID;
+
+    // Fake lighting
+    float3 normal = normalize(input.vWorldNormal);
+    float3 lightDir = normalize(float3(0.0f, 1.0f, 0.0f));
+    float light = saturate(dot(normal, lightDir));
+
+    return float4(IdToColor(id) * light, 1.0f);
 }

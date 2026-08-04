@@ -209,6 +209,17 @@ void Renderer::Render(const Camera& camera, StreamingManager& streamingManager, 
     RGTextureHandle depthHandle = graph.ImportTexture("Scene Depth", m_DepthTexture, GetImportedState(m_DepthTexture.Get()));
     RGTextureHandle backbufferHandle = graph.ImportTexture("Back Buffer", backBuffer, agfx::ResourceState::Present);
 
+    graph.AddPass("Prepare Indirect Bundles",
+        [&](RGPassBuilder& builder) {
+            // Touches no RG-tracked resource (the bundles are raw agfx objects with their own
+            // manual barrier sequence), so it would otherwise be culled -- same reasoning as the
+            // "Acceleration Structure Build" pass below.
+            builder.AlwaysExecute();
+        },
+        [&](agfx::CommandBuffer& cmd, RGResolveContext&) {
+            m_SceneRenderer->PrepareIndirectBundles(cmd, m_GPUScene, (uint32)m_FrameSlot);
+        });
+
     graph.AddAttachmentPass("Scene Pass",
         [&](RGPassBuilder& builder) {
             RGAttachmentDesc colorAttachment{};

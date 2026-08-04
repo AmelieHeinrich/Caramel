@@ -118,6 +118,10 @@ public:
 
     uint32 GetMaterialSlotCount() const { return (uint32)m_MaterialStaging.Size(); }
 
+    /// @brief Number of resident, non-culled instances in this frame's compacted instance buffer --
+    /// the exact count the indirect-bundle populate shader should dispatch over.
+    uint32 GetInstanceCount() const { return (uint32)m_InstanceStaging.Size(); }
+
     /// @brief The handle a material's texture slot holds when no texture is bound (or it has no
     /// resident mip yet). Shaders that must treat "no texture" differently from "sampled zero"
     /// (e.g. normal mapping, where a missing map should fall back to the geometric normal instead

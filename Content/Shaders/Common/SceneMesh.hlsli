@@ -19,6 +19,8 @@
 
 #pragma mesh SceneMS
 
+AGFX_DECLARE_DRAW_ID();
+
 // Mirrors CaramelAsset::Vertex (Sources/CaramelAsset/Format.hpp) field-for-field.
 struct Vertex {
     float3 vPosition;
@@ -43,17 +45,30 @@ struct FrameConstants {
 };
 
 // Mirrors ScenePushConstants in Sources/Caramel/Renderer/SceneRenderer.cpp. rSchemeParams points at
-// the parameter buffer of the scheme bucket currently being drawn.
+// the parameter buffer of the scheme bucket currently being drawn. Draws are submitted through an
+// indirect bundle, so the instance index is no longer a per-draw push constant -- it is recovered
+// from AGFX_DRAW_ID() (see SceneResolveInstanceIndex below).
 struct ScenePushConstants {
     ResourceHandle rFrameConstants;
     ResourceHandle rInstanceBuffer;
     ResourceHandle rMaterialBuffer;
     ResourceHandle rSchemeParams;
-    uint uInstanceIndex;
+    ResourceHandle rDrawIndirection; // valid on every backend; only read on Vulkan
     ResourceHandle rSampler;
     ResourceHandle rFallbackTexture; // handle held by a material texture slot with nothing bound
 };
 AGFX_PUSH_CONSTANTS(ScenePushConstants, g_Constants);
+
+// AGFX_DRAW_ID() is the value the populate compute shader wrote as drawId on D3D12/Metal, but on
+// Vulkan it is the linear position within the compacted indirect bundle instead (SKILL.md gotcha
+// 6), so it must be resolved through the indirection buffer the populate shader wrote alongside it.
+uint SceneResolveInstanceIndex() {
+#if defined(AGFX_VULKAN)
+    return AGFXByteAddressBuffer::Create(g_Constants.rDrawIndirection).Load(AGFX_DRAW_ID() * 4);
+#else
+    return AGFX_DRAW_ID();
+#endif
+}
 
 struct VSOut {
     float4 vPosition : SV_POSITION;
@@ -65,6 +80,7 @@ struct VSOut {
     float3 vWorldPosition : TEXCOORD2;
     float4 vWorldTangent : TEXCOORD3; // xyz = world-space tangent, w = handedness (passthrough)
     nointerpolation uint uMeshletID : TEXCOORD4; // index into the instance's meshlet buffer (SV_GroupID.x)
+    nointerpolation uint uInstanceIndex : TEXCOORD5; // resolved via SceneResolveInstanceIndex, forwarded because AGFX_DRAW_ID() is only valid in vertex/mesh/task stages on Vulkan
 };
 
 // Loads the material of the pixel being shaded. Every scheme's pixel shader starts with this.
@@ -99,8 +115,10 @@ void SceneMS(
     out indices uint3 outTriangles[124],
     out vertices VSOut outVertices[64])
 {
+    uint instanceIndex = SceneResolveInstanceIndex();
+
     AGFXStructuredBuffer<GPUInstance> bInstances = AGFXStructuredBuffer<GPUInstance>::Create(g_Constants.rInstanceBuffer);
-    GPUInstance instance = bInstances.Load(g_Constants.uInstanceIndex);
+    GPUInstance instance = bInstances.Load(instanceIndex);
 
     AGFXStructuredBuffer<MeshletDesc> bMeshlets = AGFXStructuredBuffer<MeshletDesc>::Create(instance.rMeshletBuffer);
     MeshletDesc meshlet = bMeshlets.Load(uGroupID.x);
@@ -128,6 +146,7 @@ void SceneMS(
         o.vWorldPosition = worldPosition.xyz;
         o.vWorldTangent = float4(mul((float3x3)mModel, vertex.vTangent.xyz), vertex.vTangent.w);
         o.uMeshletID = uGroupID.x;
+        o.uInstanceIndex = instanceIndex;
         outVertices[v] = o;
     }
 
