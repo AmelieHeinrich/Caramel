@@ -47,5 +47,5 @@ float4 ToonPS(VSOut input) : SV_Target {
     shaded += params.vRimColor.rgb * rim * params.vRimColor.a;
 
     float3 emissive = material.vEmissiveFactor.rgb;
-    return float4(shaded + emissive, baseColor.a) * 3.0f;
+    return pow(float4(shaded + emissive, baseColor.a), 1.0 / 2.2);
 }
