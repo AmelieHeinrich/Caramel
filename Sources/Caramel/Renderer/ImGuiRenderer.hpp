@@ -19,8 +19,6 @@ public:
 
     void RenderDrawData(ImDrawData* drawData, agfx::RenderPass& renderPass, uint32 fbWidth, uint32 fbHeight, uint32 frameIndex);
 
-    ImFont* GetHeaderFont() const { return m_HeaderFont; }
-
 private:
     void UpdateTextures(ImDrawData* drawData);
     void UpdateTexture(ImTextureData* tex);
@@ -32,7 +30,6 @@ private:
     agfx::CommandQueue* m_Queue;
 
     agfx::Sampler m_Sampler;
-    ImFont* m_HeaderFont = nullptr;
 
     TArray<agfx::Buffer> m_VertexBuffers;
     TArray<agfx::BufferView> m_VertexBufferViews;

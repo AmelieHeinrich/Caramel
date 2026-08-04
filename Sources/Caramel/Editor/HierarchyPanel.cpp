@@ -7,7 +7,7 @@
 #include "HierarchyPanel.hpp"
 
 #include <Caramel/Editor/EditorContext.hpp>
-#include <Caramel/Application.hpp>
+#include <Caramel/Editor/EditorTheme.hpp>
 #include <Caramel/Scene/Scene.hpp>
 #include <Caramel/Asset/StreamingManager.hpp>
 #include <Caramel/Asset/StreamingModel.hpp>
@@ -62,28 +62,14 @@ void HierarchyPanel::Draw(EditorContext& context, StreamingManager& streaming)
     m_LastSelectedInstance = context.SelectedInstance;
     m_LastSelectedMesh = (void*)context.SelectedMesh;
 
-    if (ImGui::Button(ICON_FA_FOLDER " New Folder"))
+    // Only the two create actions live here -- this panel docks to 20% of the window width, and a
+    // row of labelled buttons overflowed it. Scene I/O and script reload are on the main menu bar.
+    if (EditorTheme::IconButton(ICON_FA_FOLDER, "New Folder"))
         context.CurrentScene.CreateFolder(nullptr, "New Folder");
 
     ImGui::SameLine();
-    if (ImGui::Button(ICON_FA_CIRCLE_NOTCH " New Empty"))
+    if (EditorTheme::IconButton(ICON_FA_CIRCLE_NOTCH, "New Empty"))
         context.CurrentScene.CreateEmptyEntity(nullptr, "New Empty");
-
-    ImGui::SameLine();
-    if (context.Scripts && ImGui::Button(ICON_FA_ROTATE " Reload Scripts"))
-        context.Scripts->ReloadAll();
-
-    ImGui::SameLine();
-    if (ImGui::Button(ICON_FA_FILE_EXPORT " Save Scene...")) {
-        static SDL_DialogFileFilter filters[] = { { "Caramel Scene", "cscene" } };
-        SDL_ShowSaveFileDialog(&Application::OnSaveDialogResult, context.Owner, context.Window, filters, 1, "Content/Scenes/");
-    }
-
-    ImGui::SameLine();
-    if (ImGui::Button(ICON_FA_FILE_IMPORT " Load Scene...")) {
-        static SDL_DialogFileFilter filters[] = { { "Caramel Scene", "cscene" } };
-        SDL_ShowOpenFileDialog(&Application::OnOpenDialogResult, context.Owner, context.Window, filters, 1, "Content/Scenes/", false);
-    }
 
     ImGui::Separator();
     DrawSceneNode(context, streaming, context.CurrentScene.GetRoot());

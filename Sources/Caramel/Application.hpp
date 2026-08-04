@@ -47,7 +47,12 @@ public:
     static void SDLCALL OnSaveDialogResult(void* userdata, const char* const* filelist, int filter);
     static void SDLCALL OnOpenDialogResult(void* userdata, const char* const* filelist, int filter);
 
+public:
+    void OpenSaveSceneDialog();
+    void OpenLoadSceneDialog();
+
 private:
+    void DrawMainMenuBar();
     void SetupDefaultDockLayout(ImGuiID dockspaceId);
     void UpdatePicking(const TArray<RenderInstance>& renderInstances);
     void DrawColliders(const TArray<RenderInstance>& renderInstances);

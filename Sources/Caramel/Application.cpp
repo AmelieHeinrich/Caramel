@@ -22,6 +22,7 @@
 #include <imgui.h>
 #include <imgui_internal.h>
 #include <imgui_impl_sdl3.h>
+#include <FontAwesome/FA.h>
 
 #include <nlohmann/json.hpp>
 
@@ -146,6 +147,9 @@ void Application::Run()
         Input::NewFrame();
         ImGui::NewFrame();
 
+        // Drawn before the dockspace so the viewport work area already excludes the bar.
+        DrawMainMenuBar();
+
         ImGuiID dockspaceId = ImGui::DockSpaceOverViewport(0, ImGui::GetMainViewport(), ImGuiDockNodeFlags_PassthruCentralNode);
         SetupDefaultDockLayout(dockspaceId);
 
@@ -165,7 +169,7 @@ void Application::Run()
         if (m_ShowColliders)
             DrawColliders(renderInstances);
 
-        m_OverlayPanel.Draw(m_EditorContext, *m_StreamingManager, m_Window, m_DeviceInfo, m_ShowColliders);
+        m_OverlayPanel.Draw(m_EditorContext, *m_StreamingManager, m_Window, m_DeviceInfo);
         m_HierarchyPanel.Draw(m_EditorContext, *m_StreamingManager);
         m_InspectorPanel.Draw(m_EditorContext, *m_StreamingManager);
         m_ContentDrawerPanel.Draw();
@@ -173,6 +177,58 @@ void Application::Run()
 
         m_Renderer->Render(m_Camera, *m_StreamingManager, renderInstances);
     }
+}
+
+void Application::OpenSaveSceneDialog()
+{
+    static SDL_DialogFileFilter filters[] = { { "Caramel Scene", "cscene" } };
+    SDL_ShowSaveFileDialog(&Application::OnSaveDialogResult, this, m_Window, filters, 1, "Content/Scenes/");
+}
+
+void Application::OpenLoadSceneDialog()
+{
+    static SDL_DialogFileFilter filters[] = { { "Caramel Scene", "cscene" } };
+    SDL_ShowOpenFileDialog(&Application::OnOpenDialogResult, this, m_Window, filters, 1, "Content/Scenes/", false);
+}
+
+void Application::DrawMainMenuBar()
+{
+    if (!ImGui::BeginMainMenuBar())
+        return;
+
+    if (ImGui::BeginMenu(ICON_FA_FILE " File")) {
+        if (ImGui::MenuItem(ICON_FA_FILE_EXPORT " Save Scene..."))
+            OpenSaveSceneDialog();
+        if (ImGui::MenuItem(ICON_FA_FILE_IMPORT " Load Scene..."))
+            OpenLoadSceneDialog();
+        ImGui::Separator();
+        if (ImGui::MenuItem(ICON_FA_XMARK " Exit"))
+            m_Running = false;
+        ImGui::EndMenu();
+    }
+
+    if (ImGui::BeginMenu(ICON_FA_SCROLL " Scripts")) {
+        if (ImGui::MenuItem(ICON_FA_ROTATE " Reload All"))
+            m_ScriptSystem->ReloadAll();
+        ImGui::EndMenu();
+    }
+
+    // The streaming and collider controls used to sit inside the viewport overlay, mixed in with
+    // read-only telemetry. They are commands, so they belong on a menu.
+    if (ImGui::BeginMenu(ICON_FA_GEAR " Debug")) {
+        ImGui::MenuItem(ICON_FA_CUBE " Show Colliders", nullptr, &m_ShowColliders);
+
+        bool autoStream = m_StreamingManager->GetAutoStream();
+        if (ImGui::MenuItem(ICON_FA_DOWNLOAD " Automatic Streaming", nullptr, &autoStream))
+            m_StreamingManager->SetAutoStream(autoStream);
+
+        if (ImGui::MenuItem(ICON_FA_FORWARD_STEP " Advance Streaming", nullptr, false, !autoStream))
+            m_StreamingManager->PumpStreaming();
+
+        ImGui::EndMenu();
+    }
+
+    ImGui::EndMainMenuBar();
 }
 
 void Application::SetupDefaultDockLayout(ImGuiID dockspaceId)

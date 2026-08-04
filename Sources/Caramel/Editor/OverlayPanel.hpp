@@ -14,5 +14,6 @@ struct EditorContext;
 class OverlayPanel
 {
 public:
-    void Draw(EditorContext& context, StreamingManager& streaming, SDL_Window* window, const agfxDeviceInfo& deviceInfo, bool& showColliders);
+    // Read-only telemetry. The streaming and collider *controls* live on the Debug menu.
+    void Draw(EditorContext& context, StreamingManager& streaming, SDL_Window* window, const agfxDeviceInfo& deviceInfo);
 };
