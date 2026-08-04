@@ -1,5 +1,4 @@
 Basics
-- Simple scripting
 - Render graph
 - BLAS/TLAS building (async compute)
 
@@ -41,11 +40,9 @@ Pick and choose:
 - RTAO
 - SSRT reflections
 - VRT
-- Texture streaming
 - Vegetation/foliage
 - HDR10/scRGB output
 - CAS
-- Simple animation
 - Decals
 - Contact shadows
 - Physically based camera

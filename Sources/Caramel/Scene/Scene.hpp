@@ -18,6 +18,8 @@ public:
 
     SceneNode* CreateModelEntity(SceneNode* parent, const String& name, const String& cmdlPath, StreamingManager& streamingManager);
 
+    SceneNode* CreateEmptyEntity(SceneNode* parent, const String& name);
+
     void AddInstance(SceneNode* entity, const Instance& instance);
     void DeleteNode(SceneNode* node);
 
@@ -37,11 +39,19 @@ public:
     SceneNode& GetRoot() { return m_Root; }
     const SceneNode& GetRoot() const { return m_Root; }
 
+    SceneNode* FindNodeById(uint64 id);
+    const SceneNode* FindNodeById(uint64 id) const;
+
+    SceneNode* FindNodeByName(const String& name);
+
 private:
     void CollectRenderInstances(SceneNode& node, StreamingManager& streamingManager, TArray<RenderInstance>& out);
-    void RemovePendingRequests(SceneNode& node);
+    void UnregisterSubtree(SceneNode& node);
+    void RegisterNode(SceneNode* node);
 
     SceneNode m_Root;
     TDictionary<uint32, SceneNode*> m_PendingRequests;
+    TDictionary<uint64, SceneNode*> m_NodesById;
+    uint64 m_NextNodeId = 1;
     size_t m_ScannedModelCount = 0;
 };

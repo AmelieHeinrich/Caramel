@@ -7,11 +7,14 @@
 #pragma once
 
 #include <Caramel/Core/Common.hpp>
+#include <Caramel/Core/Timer.hpp>
 #include <Caramel/Renderer/Renderer.hpp>
 #include <Caramel/Renderer/Camera.hpp>
 #include <Caramel/Asset/StreamingManager.hpp>
 #include <Caramel/Physics/JoltDebugRenderer.hpp>
 #include <Caramel/Scene/Scene.hpp>
+#include <Caramel/Script/ScriptEngine.hpp>
+#include <Caramel/Script/ScriptSystem.hpp>
 #include <Caramel/Editor/EditorContext.hpp>
 #include <Caramel/Editor/ViewportPanel.hpp>
 #include <Caramel/Editor/OverlayPanel.hpp>
@@ -58,6 +61,8 @@ private:
     ApplicationInfo m_Info;
     bool m_Running = true;
 
+    Timer m_Timer;
+
     SDL_Window* m_Window;
     TUnique<Renderer> m_Renderer;
     TUnique<StreamingManager> m_StreamingManager;
@@ -65,6 +70,12 @@ private:
     TUnique<JoltDebugRenderer> m_JoltDebugRenderer;
 
     Scene m_Scene;
+
+    // Declaration order matters: ScriptSystem owns the live script objects and must be destroyed
+    // before the engine that created them.
+    TUnique<ScriptEngine> m_ScriptEngine;
+    TUnique<ScriptSystem> m_ScriptSystem;
+
     EditorContext m_EditorContext;
 
     ViewportPanel m_ViewportPanel;

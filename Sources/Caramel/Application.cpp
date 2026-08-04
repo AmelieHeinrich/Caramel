@@ -80,6 +80,11 @@ Application::Application(const ApplicationInfo& info)
     m_StreamingManager = MakeUnique<StreamingManager>();
     m_StreamingManager->Init(m_Renderer->GetDevice());
 
+    m_ScriptEngine = MakeUnique<ScriptEngine>();
+    m_ScriptEngine->SetScriptDirectory("Content/Scripts");
+    m_ScriptSystem = MakeUnique<ScriptSystem>(m_Scene, *m_StreamingManager, *m_ScriptEngine);
+    m_EditorContext.Scripts = m_ScriptSystem.get();
+
     m_ViewportPanel.SetDropFileCallback([this](const String& path) { HandleDroppedFile(path); });
 }
 
@@ -89,6 +94,9 @@ Application::~Application()
     JobSystem::Shutdown();
 
     m_Renderer->GetDevice().WaitIdle();
+
+    m_ScriptSystem.reset();
+    m_ScriptEngine.reset();
 
     m_StreamingManager.reset();
     m_JoltDebugRenderer.reset();
@@ -124,7 +132,14 @@ void Application::Run()
 
         ProcessPendingFileDialogResult();
 
+        m_Timer.Tick();
+
         m_StreamingManager->Update();
+
+        // Ticked before Scene::Update so an entity spawned this frame registers its streaming
+        // request in time, and before BuildRenderInstances so scripted motion has no frame of lag.
+        m_ScriptSystem->Update(m_Timer);
+
         m_Scene.Update(*m_StreamingManager);
 
         ImGui_ImplSDL3_NewFrame();
@@ -140,7 +155,7 @@ void Application::Run()
             m_EditorContext.SelectedMesh = nullptr;
         }
 
-        m_Camera.Update(ImGui::GetIO().DeltaTime);
+        m_Camera.Update(m_Timer.GetDelta());
 
         m_ViewportPanel.Draw(m_EditorContext, *m_Renderer);
 
@@ -204,8 +219,11 @@ void Application::UpdatePicking(const TArray<RenderInstance>& renderInstances)
     if (!m_EditorContext.ViewportHovered || !Input::IsMouseButtonPressed(SDL_BUTTON_LEFT))
         return;
 
+    // The mouse and the viewport origin are both in logical points, but width/height are physical
+    // pixels -- scale into pixel space before the bounds test and the ray build.
     glm::vec2 mousePos = Input::GetMousePosition();
     glm::vec2 localMouse = mousePos - glm::vec2(m_EditorContext.ViewportRectMin.x, m_EditorContext.ViewportRectMin.y);
+    localMouse *= m_EditorContext.ViewportDpiScale;
     if (localMouse.x < 0.0f || localMouse.y < 0.0f || localMouse.x >= (float)width || localMouse.y >= (float)height)
         return;
 
@@ -345,6 +363,7 @@ void Application::ProcessPendingFileDialogResult()
         } else {
             m_EditorContext.SelectedEntity = nullptr;
             m_EditorContext.SelectedMesh = nullptr;
+            m_ScriptSystem->RebuildFromScene();
         }
     }
 }

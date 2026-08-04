@@ -7,6 +7,7 @@
 #pragma once
 
 #include <Caramel/Core/Common.hpp>
+#include <Caramel/Script/ScriptTypes.hpp>
 
 #include <glm/glm.hpp>
 
@@ -23,8 +24,19 @@ struct Instance
 enum class ESceneNodeType
 {
     Folder,
-    Entity
+    Entity,
+    Empty
 };
+
+inline bool SceneNodeTypeHasInstances(ESceneNodeType type)
+{
+    return type == ESceneNodeType::Entity || type == ESceneNodeType::Empty;
+}
+
+inline bool SceneNodeTypeCanParent(ESceneNodeType type)
+{
+    return type == ESceneNodeType::Folder || type == ESceneNodeType::Empty;
+}
 
 struct MaterialOverride
 {
@@ -66,6 +78,10 @@ struct MaterialOverride
 class SceneNode
 {
 public:
+    // Stable identity handed to scripts. Monotonic and never reused, so a stale script handle can
+    // never alias a different node. Not serialized -- assigned fresh on load.
+    uint64 id = 0;
+
     String name;
     ESceneNodeType type = ESceneNodeType::Folder;
     SceneNode* parent = nullptr;
@@ -76,4 +92,5 @@ public:
     TArray<uint32> meshIndices;
     TArray<Instance> instances;
     TArray<MaterialOverride> materialOverrides;
+    TArray<ScriptComponent> scripts;
 };

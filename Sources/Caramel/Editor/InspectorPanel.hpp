@@ -15,4 +15,7 @@ public:
     static const char* const kTitle;
 
     void Draw(EditorContext& context, StreamingManager& streaming);
+
+private:
+    void DrawScriptSection(EditorContext& context);
 };

@@ -11,6 +11,8 @@
 #include <Caramel/Scene/Scene.hpp>
 #include <Caramel/Asset/StreamingManager.hpp>
 #include <Caramel/Asset/StreamingModel.hpp>
+#include <Caramel/Script/ScriptEngine.hpp>
+#include <Caramel/Script/ScriptSystem.hpp>
 
 #include <imgui.h>
 #include <FontAwesome/FA.h>
@@ -20,6 +22,57 @@
 namespace
 {
     constexpr const char* kSceneNodeDragDropID = "SCENE_NODE_PTR";
+
+    const char* NodeIcon(ESceneNodeType type)
+    {
+        switch (type) {
+            case ESceneNodeType::Folder: return ICON_FA_FOLDER;
+            case ESceneNodeType::Empty:  return ICON_FA_CIRCLE_NOTCH;
+            default:                     return ICON_FA_CUBES;
+        }
+    }
+
+    // Offers every class in every compiled module, then attaches it at the scope of the row the
+    // menu was opened on.
+    void DrawAddScriptMenu(EditorContext& context, SceneNode& node, EScriptScope scope, uint32 targetIndex)
+    {
+        if (!context.Scripts)
+            return;
+
+        if (!ImGui::BeginMenu(ICON_FA_SCROLL " Add Script"))
+            return;
+
+        ScriptEngine& engine = context.Scripts->GetEngine();
+        TArray<String> paths = engine.GetKnownScriptPaths();
+
+        if (paths.IsEmpty())
+            ImGui::TextDisabled("No scripts in Content/Scripts");
+
+        for (const String& path : paths) {
+            const ScriptModuleInfo* moduleInfo = engine.FindModule(path);
+            if (!moduleInfo || !moduleInfo->valid || moduleInfo->classes.IsEmpty())
+                continue;
+
+            for (const ScriptClassInfo& classInfo : moduleInfo->classes) {
+                char label[320];
+                std::snprintf(label, sizeof(label), "%s", classInfo.name.CStr());
+
+                if (!ImGui::MenuItem(label))
+                    continue;
+
+                ScriptComponent component;
+                component.scriptPath = path;
+                component.className = classInfo.name;
+                component.scope = scope;
+                component.targetIndex = targetIndex;
+                node.scripts.PushBack(component);
+
+                context.Scripts->OnComponentAdded(node, (uint32)node.scripts.Size() - 1);
+            }
+        }
+
+        ImGui::EndMenu();
+    }
 }
 
 const char* const HierarchyPanel::kTitle = ICON_FA_SITEMAP " Hierarchy";
@@ -31,6 +84,14 @@ void HierarchyPanel::Draw(EditorContext& context, StreamingManager& streaming)
 
     if (ImGui::Button(ICON_FA_FOLDER " New Folder"))
         context.CurrentScene.CreateFolder(nullptr, "New Folder");
+
+    ImGui::SameLine();
+    if (ImGui::Button(ICON_FA_CIRCLE_NOTCH " New Empty"))
+        context.CurrentScene.CreateEmptyEntity(nullptr, "New Empty");
+
+    ImGui::SameLine();
+    if (context.Scripts && ImGui::Button(ICON_FA_ROTATE " Reload Scripts"))
+        context.Scripts->ReloadAll();
 
     ImGui::SameLine();
     if (ImGui::Button(ICON_FA_FILE_EXPORT " Save Scene...")) {
@@ -70,10 +131,12 @@ void HierarchyPanel::DrawSceneNode(EditorContext& context, StreamingManager& str
         ImGui::PushID(&child);
 
         bool isFolder = (child.type == ESceneNodeType::Folder);
+        bool hasInstances = SceneNodeTypeHasInstances(child.type);
+        bool canParent = SceneNodeTypeCanParent(child.type);
         bool renaming = (m_RenamingNode == &child);
 
         char nodeLabel[300];
-        std::snprintf(nodeLabel, sizeof(nodeLabel), "%s %s", isFolder ? ICON_FA_FOLDER : ICON_FA_CUBES, child.name.CStr());
+        std::snprintf(nodeLabel, sizeof(nodeLabel), "%s %s", NodeIcon(child.type), child.name.CStr());
 
         bool open = ImGui::TreeNodeEx(renaming ? "##renaming" : nodeLabel,
                                        ImGuiTreeNodeFlags_OpenOnArrow | ImGuiTreeNodeFlags_SpanAvailWidth);
@@ -91,7 +154,7 @@ void HierarchyPanel::DrawSceneNode(EditorContext& context, StreamingManager& str
             ImGui::EndDragDropSource();
         }
 
-        if (isFolder && ImGui::BeginDragDropTarget()) {
+        if (canParent && ImGui::BeginDragDropTarget()) {
             if (const ImGuiPayload* accepted = ImGui::AcceptDragDropPayload(kSceneNodeDragDropID)) {
                 SceneNode* dragged = *(SceneNode**)accepted->Data;
                 context.CurrentScene.Reparent(dragged, &child);
@@ -100,10 +163,13 @@ void HierarchyPanel::DrawSceneNode(EditorContext& context, StreamingManager& str
         }
 
         if (!renaming && ImGui::BeginPopupContextItem()) {
-            if (isFolder && ImGui::MenuItem(ICON_FA_FOLDER " New Folder"))
+            if (canParent && ImGui::MenuItem(ICON_FA_FOLDER " New Folder"))
                 context.CurrentScene.CreateFolder(&child, "New Folder");
-            if (!isFolder && ImGui::MenuItem(ICON_FA_PLUS " Add Instance"))
+            if (canParent && ImGui::MenuItem(ICON_FA_CIRCLE_NOTCH " New Empty"))
+                context.CurrentScene.CreateEmptyEntity(&child, "New Empty");
+            if (hasInstances && ImGui::MenuItem(ICON_FA_PLUS " Add Instance"))
                 context.CurrentScene.AddInstance(&child, Instance{});
+            DrawAddScriptMenu(context, child, EScriptScope::Node, 0);
             if (ImGui::MenuItem(ICON_FA_TRASH " Delete"))
                 pendingDelete = &child;
             ImGui::EndPopup();
@@ -127,9 +193,7 @@ void HierarchyPanel::DrawSceneNode(EditorContext& context, StreamingManager& str
         }
 
         if (open) {
-            if (isFolder) {
-                DrawSceneNode(context, streaming, child);
-            } else {
+            if (hasInstances) {
                 const TArray<TShared<StreamingModel>>& models = streaming.GetModels();
                 for (uint32 j = 0; j < (uint32)child.instances.Size(); ++j) {
                     ImGui::PushID((int)j);
@@ -148,8 +212,14 @@ void HierarchyPanel::DrawSceneNode(EditorContext& context, StreamingManager& str
                         context.SelectedMesh = nullptr;
                     }
 
+                    if (ImGui::BeginPopupContextItem()) {
+                        DrawAddScriptMenu(context, child, EScriptScope::Instance, j);
+                        ImGui::EndPopup();
+                    }
+
                     if (instanceOpen) {
-                        for (uint32 meshIndex : child.meshIndices) {
+                        for (uint32 slot = 0; slot < (uint32)child.meshIndices.Size(); ++slot) {
+                            uint32 meshIndex = child.meshIndices[slot];
                             StreamingModel* mesh = models[meshIndex].get();
 
                             char meshLabel[300];
@@ -167,6 +237,11 @@ void HierarchyPanel::DrawSceneNode(EditorContext& context, StreamingManager& str
                                 context.SelectedInstance = j;
                                 context.SelectedMesh = mesh;
                             }
+
+                            if (ImGui::BeginPopupContextItem()) {
+                                DrawAddScriptMenu(context, child, EScriptScope::Mesh, slot);
+                                ImGui::EndPopup();
+                            }
                             ImGui::PopID();
                         }
                         ImGui::TreePop();
@@ -175,6 +250,10 @@ void HierarchyPanel::DrawSceneNode(EditorContext& context, StreamingManager& str
                     ImGui::PopID();
                 }
             }
+
+            if (!child.children.IsEmpty())
+                DrawSceneNode(context, streaming, child);
+
             ImGui::TreePop();
         }
 

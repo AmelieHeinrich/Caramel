@@ -114,25 +114,119 @@ namespace
         return matOverride;
     }
 
+    nlohmann::json SerializeScriptComponent(const ScriptComponent& component)
+    {
+        nlohmann::json j;
+        j["script"] = component.scriptPath.CStr();
+        j["class"] = component.className.CStr();
+        j["scope"] = ScriptScopeToString(component.scope);
+        j["targetIndex"] = component.targetIndex;
+        j["enabled"] = component.enabled;
+
+        // Values are keyed by name rather than packed, so renaming or reordering a script property
+        // cannot silently corrupt a saved scene -- the same contract as schemeParamValues above.
+        if (component.propertyValues.Size() > 0)
+        {
+            nlohmann::json props = nlohmann::json::object();
+            for (const auto& entry : component.propertyValues)
+                props[entry.first.CStr()] = { entry.second.x, entry.second.y, entry.second.z, entry.second.w };
+            j["properties"] = props;
+        }
+
+        if (component.textPropertyValues.Size() > 0)
+        {
+            nlohmann::json texts = nlohmann::json::object();
+            for (const auto& entry : component.textPropertyValues)
+                texts[entry.first.CStr()] = entry.second.CStr();
+            j["textProperties"] = texts;
+        }
+
+        return j;
+    }
+
+    ScriptComponent ParseScriptComponent(const nlohmann::json& j)
+    {
+        ScriptComponent component;
+        component.scriptPath = j.value("script", "");
+        component.className = j.value("class", "");
+        component.scope = ScriptScopeFromString(String(j.value("scope", "node")));
+        component.targetIndex = j.value("targetIndex", 0u);
+        component.enabled = j.value("enabled", true);
+
+        if (j.contains("properties") && j["properties"].is_object())
+        {
+            for (auto it = j["properties"].begin(); it != j["properties"].end(); ++it)
+            {
+                glm::vec4 value{ 0.0f };
+                if (it.value().is_array())
+                {
+                    const nlohmann::json& arr = it.value();
+                    for (uint32 i = 0; i < 4 && i < arr.size(); ++i)
+                        value[i] = arr[i].get<float32>();
+                }
+                else if (it.value().is_number())
+                {
+                    value.x = it.value().get<float32>();
+                }
+                else if (it.value().is_boolean())
+                {
+                    value.x = it.value().get<bool>() ? 1.0f : 0.0f;
+                }
+                component.propertyValues[String(it.key())] = value;
+            }
+        }
+
+        if (j.contains("textProperties") && j["textProperties"].is_object())
+        {
+            for (auto it = j["textProperties"].begin(); it != j["textProperties"].end(); ++it)
+                component.textPropertyValues[String(it.key())] = String(it.value().get<std::string>());
+        }
+
+        return component;
+    }
+
+    const char* NodeTypeToString(ESceneNodeType type)
+    {
+        switch (type)
+        {
+            case ESceneNodeType::Entity: return "Entity";
+            case ESceneNodeType::Empty:  return "Empty";
+            default:                     return "Folder";
+        }
+    }
+
     nlohmann::json SerializeNode(const SceneNode& node)
     {
         nlohmann::json j;
         j["name"] = node.name.CStr();
-        j["type"] = node.type == ESceneNodeType::Folder ? "Folder" : "Entity";
+        j["type"] = NodeTypeToString(node.type);
 
         if (node.type == ESceneNodeType::Entity)
-        {
             j["cmdl"] = node.cmdlPath.CStr();
 
+        if (SceneNodeTypeHasInstances(node.type))
+        {
             nlohmann::json instancesJson = nlohmann::json::array();
             for (const Instance& instance : node.instances)
                 instancesJson.push_back(SerializeInstance(instance));
             j["instances"] = instancesJson;
+        }
 
+        if (node.type == ESceneNodeType::Entity)
+        {
             nlohmann::json overridesJson = nlohmann::json::array();
             for (const MaterialOverride& matOverride : node.materialOverrides)
                 overridesJson.push_back(SerializeMaterialOverride(matOverride));
             j["materialOverrides"] = overridesJson;
+        }
+
+        // Written for every node type -- folders and empties can carry director/spawner scripts.
+        if (!node.scripts.IsEmpty())
+        {
+            nlohmann::json scriptsJson = nlohmann::json::array();
+            for (const ScriptComponent& component : node.scripts)
+                scriptsJson.push_back(SerializeScriptComponent(component));
+            j["scripts"] = scriptsJson;
         }
 
         nlohmann::json childrenJson = nlohmann::json::array();
@@ -158,14 +252,54 @@ namespace
             for (const auto& overrideJson : j.value("materialOverrides", nlohmann::json::array()))
                 node->materialOverrides.PushBack(ParseMaterialOverride(overrideJson));
         }
+        else if (typeStr == "Empty")
+        {
+            node = scene.CreateEmptyEntity(parent, name);
+            node->instances.Clear();
+            for (const auto& instanceJson : j.value("instances", nlohmann::json::array()))
+                scene.AddInstance(node, ParseInstance(instanceJson));
+            if (node->instances.IsEmpty())
+                scene.AddInstance(node, Instance());
+        }
         else
         {
             node = scene.CreateFolder(parent, name);
         }
 
+        for (const auto& scriptJson : j.value("scripts", nlohmann::json::array()))
+            node->scripts.PushBack(ParseScriptComponent(scriptJson));
+
         for (const auto& childJson : j.value("children", nlohmann::json::array()))
             ParseNode(childJson, node, scene, streamingManager);
     }
+}
+
+void Scene::RegisterNode(SceneNode* node)
+{
+    node->id = m_NextNodeId++;
+    m_NodesById.Insert(node->id, node);
+}
+
+SceneNode* Scene::FindNodeById(uint64 id)
+{
+    auto it = m_NodesById.Find(id);
+    return it != m_NodesById.End() ? it->second : nullptr;
+}
+
+const SceneNode* Scene::FindNodeById(uint64 id) const
+{
+    auto it = m_NodesById.Find(id);
+    return it != m_NodesById.End() ? it->second : nullptr;
+}
+
+SceneNode* Scene::FindNodeByName(const String& name)
+{
+    for (auto& entry : m_NodesById)
+    {
+        if (entry.second->name == name)
+            return entry.second;
+    }
+    return nullptr;
 }
 
 SceneNode* Scene::CreateFolder(SceneNode* parent, const String& name)
@@ -178,6 +312,7 @@ SceneNode* Scene::CreateFolder(SceneNode* parent, const String& name)
     node->parent = actualParent;
 
     SceneNode* raw = node.get();
+    RegisterNode(raw);
     actualParent->children.PushBack(std::move(node));
     return raw;
 }
@@ -194,14 +329,32 @@ SceneNode* Scene::CreateModelEntity(SceneNode* parent, const String& name, const
     node->requestId = streamingManager.LoadModel(cmdlPath);
 
     SceneNode* raw = node.get();
+    RegisterNode(raw);
     m_PendingRequests.Insert(raw->requestId, raw);
     actualParent->children.PushBack(std::move(node));
     return raw;
 }
 
+SceneNode* Scene::CreateEmptyEntity(SceneNode* parent, const String& name)
+{
+    SceneNode* actualParent = parent ? parent : &m_Root;
+
+    TUnique<SceneNode> node = MakeUnique<SceneNode>();
+    node->name = name;
+    node->type = ESceneNodeType::Empty;
+    node->parent = actualParent;
+
+    SceneNode* raw = node.get();
+    RegisterNode(raw);
+    actualParent->children.PushBack(std::move(node));
+
+    AddInstance(raw, Instance());
+    return raw;
+}
+
 void Scene::AddInstance(SceneNode* entity, const Instance& instance)
 {
-    if (!entity || entity->type != ESceneNodeType::Entity)
+    if (!entity || !SceneNodeTypeHasInstances(entity->type))
         return;
 
     Instance copy = instance;
@@ -211,13 +364,16 @@ void Scene::AddInstance(SceneNode* entity, const Instance& instance)
     entity->instances.PushBack(std::move(copy));
 }
 
-void Scene::RemovePendingRequests(SceneNode& node)
+void Scene::UnregisterSubtree(SceneNode& node)
 {
     if (node.type == ESceneNodeType::Entity && node.requestId != 0)
         m_PendingRequests.Erase(node.requestId);
 
+    if (node.id != 0)
+        m_NodesById.Erase(node.id);
+
     for (TUnique<SceneNode>& child : node.children)
-        RemovePendingRequests(*child);
+        UnregisterSubtree(*child);
 }
 
 void Scene::DeleteNode(SceneNode* node)
@@ -225,7 +381,7 @@ void Scene::DeleteNode(SceneNode* node)
     if (!node || node == &m_Root || !node->parent)
         return;
 
-    RemovePendingRequests(*node);
+    UnregisterSubtree(*node);
 
     TArray<TUnique<SceneNode>>& siblings = node->parent->children;
     for (size_t i = 0; i < siblings.Size(); ++i)
@@ -244,7 +400,7 @@ void Scene::Reparent(SceneNode* node, SceneNode* newParent)
         return;
 
     SceneNode* actualNewParent = newParent ? newParent : &m_Root;
-    if (actualNewParent->type != ESceneNodeType::Folder)
+    if (!SceneNodeTypeCanParent(actualNewParent->type))
         return;
 
     if (node->parent == actualNewParent)
@@ -328,7 +484,7 @@ MaterialOverride& Scene::GetOrCreateMaterialOverride(SceneNode& entity, int32 ma
 bool Scene::SaveToFile(const String& path) const
 {
     nlohmann::json j;
-    j["version"] = 1;
+    j["version"] = 2;
     j["root"] = SerializeNode(m_Root);
 
     std::ofstream file(path.CStr());
@@ -350,6 +506,8 @@ bool Scene::LoadFromFile(const String& path, StreamingManager& streamingManager)
 
     m_Root.children.Clear();
     m_PendingRequests.Clear();
+    m_NodesById.Clear();
+    m_NextNodeId = 1;
 
     const auto& rootJson = j.at("root");
     for (const auto& childJson : rootJson.value("children", nlohmann::json::array()))

@@ -36,8 +36,9 @@ void ViewportPanel::Draw(EditorContext& context, Renderer& renderer)
     int32 windowPixelWidth, windowPixelHeight;
     SDL_GetWindowSize(context.Window, &windowWidth, &windowHeight);
     SDL_GetWindowSizeInPixels(context.Window, &windowPixelWidth, &windowPixelHeight);
-    float dpiScale = (float)windowPixelWidth / (float)windowWidth;
-    
+    float dpiScale = windowWidth > 0 ? (float)windowPixelWidth / (float)windowWidth : 1.0f;
+    context.ViewportDpiScale = dpiScale;
+
     context.ViewportRectSize.x *= dpiScale;
     context.ViewportRectSize.y *= dpiScale;
 

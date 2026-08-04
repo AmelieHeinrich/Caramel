@@ -13,6 +13,8 @@
 #include <Caramel/Asset/StreamingTexture.hpp>
 #include <Caramel/Renderer/MaterialScheme.hpp>
 #include <Caramel/Renderer/Renderer.hpp>
+#include <Caramel/Script/ScriptEngine.hpp>
+#include <Caramel/Script/ScriptSystem.hpp>
 
 #include <imgui.h>
 #include <imgui_internal.h>
@@ -23,6 +25,158 @@
 #include <cstdio>
 
 const char* const InspectorPanel::kTitle = ICON_FA_CIRCLE " Inspector";
+
+void InspectorPanel::DrawScriptSection(EditorContext& context)
+{
+    if (!context.Scripts || !context.SelectedEntity)
+        return;
+
+    SceneNode& node = *context.SelectedEntity;
+    ScriptEngine& engine = context.Scripts->GetEngine();
+
+    ImGui::Separator();
+    ImGui::TextUnformatted(ICON_FA_SCROLL " Scripts");
+
+    if (node.scripts.IsEmpty()) {
+        ImGui::TextDisabled("None -- right-click in the Hierarchy to add one");
+        return;
+    }
+
+    int32 pendingRemove = -1;
+
+    for (uint32 i = 0; i < (uint32)node.scripts.Size(); ++i) {
+        ScriptComponent& component = node.scripts[i];
+
+        // Instance- and mesh-scoped components only belong to the row currently selected.
+        if (component.scope == EScriptScope::Instance && component.targetIndex != context.SelectedInstance)
+            continue;
+        if (component.scope == EScriptScope::Mesh) {
+            if (!context.SelectedMesh)
+                continue;
+            if (component.targetIndex >= node.meshIndices.Size())
+                continue;
+        }
+
+        ImGui::PushID((int)i);
+
+        const ScriptClassInfo* classInfo = engine.FindClass(component.scriptPath, component.className);
+
+        char header[320];
+        std::snprintf(header, sizeof(header), "%s %s (%s)", ICON_FA_SCROLL, component.className.CStr(),
+                      ScriptScopeToString(component.scope));
+
+        if (ImGui::TreeNodeEx(header, ImGuiTreeNodeFlags_DefaultOpen | ImGuiTreeNodeFlags_SpanAvailWidth)) {
+            ImGui::TextDisabled("%s", component.scriptPath.CStr());
+
+            if (ImGui::Checkbox("Enabled", &component.enabled))
+                context.Scripts->OnComponentAdded(node, i);
+
+            ImGui::SameLine();
+            if (ImGui::SmallButton(ICON_FA_TRASH " Remove"))
+                pendingRemove = (int32)i;
+
+            if (classInfo && classInfo->runOnce) {
+                ImGui::SameLine();
+                if (ImGui::SmallButton(ICON_FA_PLAY " Run"))
+                    context.Scripts->RunComponentOnce(node, i);
+            }
+
+            if (!classInfo) {
+                ImGui::TextColored(ImVec4(0.9f, 0.3f, 0.3f, 1.0f), ICON_FA_TRIANGLE_EXCLAMATION " Not compiled -- see log");
+            } else {
+                // Widgets are generated from the script's declared metadata, the same way the scheme
+                // parameter loop below is generated from the scheme JSON.
+                for (const ScriptProperty& property : classInfo->properties) {
+                    if (property.hidden)
+                        continue;
+
+                    if (property.type == EScriptPropertyType::Text) {
+                        auto existing = component.textPropertyValues.Find(property.name);
+                        String text = existing != component.textPropertyValues.End() ? existing->second : property.defaultText;
+
+                        char buffer[512];
+                        std::snprintf(buffer, sizeof(buffer), "%s", text.CStr());
+                        if (ImGui::InputText(property.name.CStr(), buffer, sizeof(buffer))) {
+                            component.textPropertyValues[property.name] = String(buffer);
+                            context.Scripts->ApplyPropertyToLive(node, i, property);
+                        }
+                        if (!property.tooltip.Empty())
+                            ImGui::SetItemTooltip("%s", property.tooltip.CStr());
+                        continue;
+                    }
+
+                    auto existing = component.propertyValues.Find(property.name);
+                    bool isSet = existing != component.propertyValues.End();
+                    glm::vec4 value = isSet ? existing->second : property.defaultValue;
+
+                    float32 minValue = property.hasRange ? property.minValue : 0.0f;
+                    float32 maxValue = property.hasRange ? property.maxValue : 0.0f;
+
+                    bool edited = false;
+                    switch (property.type) {
+                        case EScriptPropertyType::Bool: {
+                            bool asBool = value.x != 0.0f;
+                            edited = ImGui::Checkbox(property.name.CStr(), &asBool);
+                            if (edited)
+                                value.x = asBool ? 1.0f : 0.0f;
+                            break;
+                        }
+                        case EScriptPropertyType::Int: {
+                            int32 asInt = (int32)value.x;
+                            edited = ImGui::DragInt(property.name.CStr(), &asInt, 0.1f, (int32)minValue, (int32)maxValue);
+                            if (edited)
+                                value.x = (float32)asInt;
+                            break;
+                        }
+                        case EScriptPropertyType::Float:
+                            edited = ImGui::DragFloat(property.name.CStr(), &value.x, 0.01f, minValue, maxValue);
+                            break;
+                        case EScriptPropertyType::Float2:
+                            edited = ImGui::DragFloat2(property.name.CStr(), &value.x, 0.01f, minValue, maxValue);
+                            break;
+                        case EScriptPropertyType::Float3:
+                            edited = property.isColor ? ImGui::ColorEdit3(property.name.CStr(), &value.x)
+                                                      : ImGui::DragFloat3(property.name.CStr(), &value.x, 0.01f, minValue, maxValue);
+                            break;
+                        case EScriptPropertyType::Float4:
+                            edited = property.isColor ? ImGui::ColorEdit4(property.name.CStr(), &value.x)
+                                                      : ImGui::DragFloat4(property.name.CStr(), &value.x, 0.01f, minValue, maxValue);
+                            break;
+                        default:
+                            break;
+                    }
+
+                    if (!property.tooltip.Empty())
+                        ImGui::SetItemTooltip("%s", property.tooltip.CStr());
+
+                    if (edited) {
+                        component.propertyValues[property.name] = value;
+                        context.Scripts->ApplyPropertyToLive(node, i, property);
+                    }
+
+                    if (isSet) {
+                        ImGui::SameLine();
+                        ImGui::PushID(property.name.CStr());
+                        if (ImGui::SmallButton(ICON_FA_ROTATE_LEFT)) {
+                            component.propertyValues.Erase(property.name);
+                            context.Scripts->ApplyPropertyToLive(node, i, property);
+                        }
+                        ImGui::PopID();
+                    }
+                }
+            }
+
+            ImGui::TreePop();
+        }
+
+        ImGui::PopID();
+    }
+
+    if (pendingRemove >= 0) {
+        node.scripts.Erase((size_t)pendingRemove);
+        context.Scripts->OnComponentRemoved(node, (uint32)pendingRemove);
+    }
+}
 
 void InspectorPanel::Draw(EditorContext& context, StreamingManager& streaming)
 {
@@ -38,7 +192,10 @@ void InspectorPanel::Draw(EditorContext& context, StreamingManager& streaming)
     Instance& instance = context.SelectedEntity->instances[context.SelectedInstance];
 
     ImGui::Text(ICON_FA_CUBES " Entity: %s", context.SelectedEntity->name.CStr());
-    ImGui::Text(ICON_FA_FILE " Asset: %s", context.SelectedEntity->cmdlPath.CStr());
+    if (context.SelectedEntity->type == ESceneNodeType::Entity)
+        ImGui::Text(ICON_FA_FILE " Asset: %s", context.SelectedEntity->cmdlPath.CStr());
+    else
+        ImGui::TextDisabled(ICON_FA_CIRCLE_NOTCH " Empty entity");
     if (context.SelectedMesh)
         ImGui::Text(ICON_FA_CUBE " Mesh: %s", context.SelectedMesh->GetMesh().name.CStr());
 
@@ -81,9 +238,22 @@ void InspectorPanel::Draw(EditorContext& context, StreamingManager& streaming)
         ImGui::PopID();
     };
 
+    // A script that owns this instance rewrites the transform every frame, so editing it here would
+    // silently lose the edit -- and the editor has no undo.
+    bool scriptDriven = context.Scripts && context.Scripts->IsInstanceDrivenByScript(*context.SelectedEntity, context.SelectedInstance);
+    if (scriptDriven)
+        ImGui::BeginDisabled();
+
     transformRow("Position", instance.position, 0.05f, 0.0f);
     transformRow("Rotation", instance.rotationEuler, 0.5f, 0.0f);
     transformRow("Scale", instance.scale, 0.01f, 1.0f);
+
+    if (scriptDriven) {
+        ImGui::EndDisabled();
+        ImGui::TextDisabled(ICON_FA_SCROLL " Driven by script");
+    }
+
+    DrawScriptSection(context);
 
     ImGui::Separator();
     ImGui::TextUnformatted(ICON_FA_PALETTE " Material");

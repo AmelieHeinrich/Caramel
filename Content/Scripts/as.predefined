@@ -1,0 +1,414 @@
+// Editor-only declarations of everything Caramel registers with AngelScript.
+// Not compiled by the engine -- the VS Code AngelScript extension reads this file to resolve
+// types and signatures. Keep it in sync with Sources/Caramel/Script/ScriptBindings*.cpp.
+
+// ---------------------------------------------------------------------------------------------
+// Script entry points
+//
+// A script class may declare any of these. All are optional.
+//
+//   void OnStart()          called once before the first OnUpdate, and again after a hot reload
+//   void OnUpdate(float dt) called every frame
+//
+// Declare a member named `self` to receive the object the component is attached to:
+//
+//   Entity self;            the owning node
+//   EntityInstance self;    the instance the component targets (instance scope)
+//   Mesh self;              the mesh slot the component targets (mesh scope)
+//
+// Property metadata, placed before a public member:
+//
+//   [Range(min, max)]       clamps and drives the inspector widget
+//   [Color]                 draw a vec3/vec4 as a color picker
+//   [Tooltip("text")]       hover text in the inspector
+//   [Hidden]                not shown in the inspector, but still saved and preserved across
+//                           a hot reload -- use it for latched state
+//
+// Class metadata:
+//
+//   [RunOnce]               do not auto-fire OnStart; adds a Run button to the inspector
+// ---------------------------------------------------------------------------------------------
+
+// --- string (scriptstdstring add-on) ---------------------------------------------------------
+
+class string
+{
+    string& opAssign(const string &in);
+    string& opAssign(bool);
+    string& opAssign(double);
+    string& opAssign(float);
+    string& opAssign(int64);
+    string& opAssign(uint64);
+
+    string& opAddAssign(const string &in);
+    string& opAddAssign(bool);
+    string& opAddAssign(double);
+    string& opAddAssign(float);
+    string& opAddAssign(int64);
+    string& opAddAssign(uint64);
+
+    string opAdd(const string &in) const;
+    string opAdd(bool) const;
+    string opAdd(double) const;
+    string opAdd(float) const;
+    string opAdd(int64) const;
+    string opAdd(uint64) const;
+
+    string opAdd_r(bool) const;
+    string opAdd_r(double) const;
+    string opAdd_r(float) const;
+    string opAdd_r(int64) const;
+    string opAdd_r(uint64) const;
+
+    bool opEquals(const string &in) const;
+    int opCmp(const string &in) const;
+
+    uint8& opIndex(uint);
+    const uint8& opIndex(uint) const;
+
+    uint length() const;
+    uint size() const;
+    bool isEmpty() const;
+    bool empty() const;
+    void resize(uint);
+
+    string substr(uint start = 0, int count = -1) const;
+    void insert(uint pos, const string &in other);
+    void erase(uint pos, int count = -1);
+
+    int find(const string &in, uint start = 0) const;
+    int rfind(const string &in, int start = -1) const;
+    int findFirst(const string &in, uint start = 0) const;
+    int findFirstOf(const string &in, uint start = 0) const;
+    int findFirstNotOf(const string &in, uint start = 0) const;
+    int findLast(const string &in, int start = -1) const;
+    int findLastOf(const string &in, int start = -1) const;
+    int findLastNotOf(const string &in, int start = -1) const;
+    int regexFind(const string &in regex, uint start = 0) const;
+
+    array<string>@ split(const string &in) const;
+}
+
+string join(const array<string> &in, const string &in);
+
+string formatInt(int64 val, const string &in options = "", uint width = 0);
+string formatUInt(uint64 val, const string &in options = "", uint width = 0);
+string formatFloat(double val, const string &in options = "", uint width = 0, uint precision = 0);
+int64 parseInt(const string &in, uint base = 10, uint &out byteCount = 0);
+uint64 parseUInt(const string &in, uint base = 10, uint &out byteCount = 0);
+double parseFloat(const string &in, uint &out byteCount = 0);
+
+// --- array (scriptarray add-on) ---------------------------------------------------------------
+
+class array<T>
+{
+    T& opIndex(uint index);
+    const T& opIndex(uint index) const;
+    array<T>& opAssign(const array<T> &in);
+
+    void insertAt(uint index, const T &in value);
+    void insertLast(const T &in value);
+    void removeAt(uint index);
+    void removeLast();
+    void removeRange(uint start, uint count);
+
+    uint length() const;
+    void reserve(uint length);
+    void resize(uint length);
+
+    void sortAsc();
+    void sortAsc(uint startAt, uint count);
+    void sortDesc();
+    void sortDesc(uint startAt, uint count);
+    void reverse();
+
+    int find(const T &in value) const;
+    int find(uint startAt, const T &in value) const;
+    int findByRef(const T &in value) const;
+    int findByRef(uint startAt, const T &in value) const;
+
+    bool opEquals(const array<T> &in) const;
+    bool isEmpty() const;
+}
+
+// --- math (scriptmath add-on) -----------------------------------------------------------------
+
+float cos(float);
+float sin(float);
+float tan(float);
+float acos(float);
+float asin(float);
+float atan(float);
+float atan2(float, float);
+float cosh(float);
+float sinh(float);
+float tanh(float);
+float log(float);
+float log10(float);
+float pow(float, float);
+float sqrt(float);
+float ceil(float);
+float abs(float);
+float floor(float);
+float fraction(float);
+bool closeTo(float, float, float = 0.00001f);
+
+double cos(double);
+double sin(double);
+double tan(double);
+double acos(double);
+double asin(double);
+double atan(double);
+double atan2(double, double);
+double cosh(double);
+double sinh(double);
+double tanh(double);
+double log(double);
+double log10(double);
+double pow(double, double);
+double sqrt(double);
+double ceil(double);
+double abs(double);
+double floor(double);
+double fraction(double);
+bool closeTo(double, double, double = 0.0000000001);
+
+// --- vectors and matrices (ScriptBindingsMath.cpp) ---------------------------------------------
+
+class vec2
+{
+    float x;
+    float y;
+
+    vec2();
+    vec2(float);
+    vec2(float, float);
+
+    vec2 opAdd(const vec2 &in) const;
+    vec2 opSub(const vec2 &in) const;
+    vec2 opMul(const vec2 &in) const;
+    vec2 opMul(float) const;
+    vec2 opMul_r(float) const;
+    vec2 opDiv(float) const;
+    vec2 opNeg() const;
+    bool opEquals(const vec2 &in) const;
+    vec2& opAddAssign(const vec2 &in);
+    vec2& opSubAssign(const vec2 &in);
+    vec2& opMulAssign(float);
+}
+
+class vec3
+{
+    float x;
+    float y;
+    float z;
+
+    vec3();
+    vec3(float);
+    vec3(float, float, float);
+
+    vec3 opAdd(const vec3 &in) const;
+    vec3 opSub(const vec3 &in) const;
+    vec3 opMul(const vec3 &in) const;
+    vec3 opMul(float) const;
+    vec3 opMul_r(float) const;
+    vec3 opDiv(float) const;
+    vec3 opNeg() const;
+    bool opEquals(const vec3 &in) const;
+    vec3& opAddAssign(const vec3 &in);
+    vec3& opSubAssign(const vec3 &in);
+    vec3& opMulAssign(float);
+}
+
+class vec4
+{
+    float x;
+    float y;
+    float z;
+    float w;
+
+    vec4();
+    vec4(float);
+    vec4(float, float, float, float);
+    vec4(const vec3 &in, float);
+
+    vec4 opAdd(const vec4 &in) const;
+    vec4 opSub(const vec4 &in) const;
+    vec4 opMul(const vec4 &in) const;
+    vec4 opMul(float) const;
+    vec4 opMul_r(float) const;
+    vec4 opDiv(float) const;
+    vec4 opNeg() const;
+    bool opEquals(const vec4 &in) const;
+    vec4& opAddAssign(const vec4 &in);
+    vec4& opSubAssign(const vec4 &in);
+    vec4& opMulAssign(float);
+}
+
+class mat4
+{
+    mat4();
+    mat4(float);
+
+    mat4 opMul(const mat4 &in) const;
+    vec4 opMul(const vec4 &in) const;
+}
+
+float dot(const vec2 &in, const vec2 &in);
+float length(const vec2 &in);
+vec2 normalize(const vec2 &in);
+vec2 lerp(const vec2 &in, const vec2 &in, float);
+
+float dot(const vec3 &in, const vec3 &in);
+float length(const vec3 &in);
+vec3 normalize(const vec3 &in);
+vec3 lerp(const vec3 &in, const vec3 &in, float);
+vec3 cross(const vec3 &in, const vec3 &in);
+
+float dot(const vec4 &in, const vec4 &in);
+float length(const vec4 &in);
+vec4 normalize(const vec4 &in);
+vec4 lerp(const vec4 &in, const vec4 &in, float);
+
+mat4 translate(const vec3 &in);
+mat4 scaleMat(const vec3 &in);
+mat4 rotateEuler(const vec3 &in);
+
+// --- scene handles (ScriptBindingsScene.cpp) --------------------------------------------------
+//
+// These are lightweight ids, not references. They are re-resolved on every access, so holding one
+// across frames is safe: if the node or instance is gone, getters return defaults, setters are
+// no-ops, and IsValid() returns false.
+
+class Entity
+{
+    string name;
+
+    bool IsValid() const;
+    uint GetInstanceCount() const;
+    EntityInstance GetInstance(uint) const;
+    EntityInstance AddInstance(const vec3 &in);
+    uint GetMeshCount() const;
+    Mesh GetMesh(uint) const;
+    Material GetMaterial(int) const;
+    void Destroy();
+}
+
+class EntityInstance
+{
+    vec3 position;
+    vec3 rotation;
+    vec3 scale;
+
+    bool IsValid() const;
+    mat4 GetTransform() const;
+    Entity GetEntity() const;
+    Material GetMaterial(int) const;
+}
+
+class Mesh
+{
+    string name;
+
+    bool IsValid() const;
+    vec3 GetBoundsMin() const;
+    vec3 GetBoundsMax() const;
+    Entity GetEntity() const;
+    Material GetMaterial() const;
+}
+
+class Material
+{
+    bool IsValid() const;
+    void SetBaseColor(const vec4 &in);
+    void SetMetallic(float);
+    void SetRoughness(float);
+    void SetEmissive(const vec3 &in);
+    void ClearOverrides();
+    void SetScheme(const string &in);
+    void SetParam(const string &in, float);
+    void SetParam(const string &in, const vec3 &in);
+    void SetParam(const string &in, const vec4 &in);
+    float GetParam(const string &in) const;
+}
+
+namespace Scene
+{
+    Entity SpawnModel(const string &in cmdlPath, const string &in name);
+    Entity SpawnEmpty(const string &in name);
+    Entity CreateFolder(const string &in name);
+    Entity FindEntity(const string &in name);
+    void DestroyEntity(const Entity &in);
+    void Reparent(const Entity &in child, const Entity &in newParent);
+}
+
+// --- debug rendering (ScriptBindingsDebug.cpp) -------------------------------------------------
+
+class DebugStyle
+{
+    vec4 color;
+    bool filled;
+    bool depthTest;
+    float thickness;
+    uint segments;
+
+    DebugStyle();
+}
+
+namespace Debug
+{
+    void Line(const vec3 &in a, const vec3 &in b, const DebugStyle &in style = DebugStyle());
+    void Point(const vec3 &in p, const DebugStyle &in style = DebugStyle());
+    void Quad(const mat4 &in transform, const vec2 &in halfExtents, const DebugStyle &in style = DebugStyle());
+    void Quad(const vec3 &in center, const vec3 &in right, const vec3 &in up, const DebugStyle &in style = DebugStyle());
+    void Triangle(const vec3 &in a, const vec3 &in b, const vec3 &in c, const DebugStyle &in style = DebugStyle());
+    void Box(const vec3 &in boundsMin, const vec3 &in boundsMax, const DebugStyle &in style = DebugStyle());
+    void Arrow(const vec3 &in from, const vec3 &in to, const DebugStyle &in style = DebugStyle(), float headLength = -1, float headRadius = -1);
+    void Cylinder(const vec3 &in base, const vec3 &in axis, float radius, const DebugStyle &in style = DebugStyle());
+    void Cylinder(const mat4 &in transform, float radius, float height, const DebugStyle &in style = DebugStyle());
+    void Capsule(const vec3 &in a, const vec3 &in b, float radius, const DebugStyle &in style = DebugStyle());
+    void Capsule(const mat4 &in transform, float radius, float cylinderHeight, const DebugStyle &in style = DebugStyle());
+    void Cone(const vec3 &in apex, const vec3 &in dir, float height, float radius, const DebugStyle &in style = DebugStyle());
+    void Cone(const mat4 &in transform, float radius, float height, const DebugStyle &in style = DebugStyle());
+    void SphereRings(const vec3 &in center, float radius, const DebugStyle &in style = DebugStyle());
+    void Sphere(const vec3 &in center, float radius, const DebugStyle &in style = DebugStyle());
+    void Axes(const mat4 &in transform, float scale = 1.0f, const DebugStyle &in style = DebugStyle());
+    void Frustum(const mat4 &in viewProj, const DebugStyle &in style = DebugStyle());
+}
+
+// --- time, input, logging ---------------------------------------------------------------------
+
+namespace Time
+{
+    float delta;
+    float elapsed;
+    uint frame;
+}
+
+namespace Key
+{
+    const int W;
+    const int A;
+    const int S;
+    const int D;
+    const int Q;
+    const int E;
+    const int Space;
+    const int LeftShift;
+    const int Left;
+    const int Right;
+    const int Up;
+    const int Down;
+}
+
+namespace Input
+{
+    bool IsKeyDown(int scancode);
+    bool IsKeyPressed(int scancode);
+    vec2 GetMousePosition();
+    vec2 GetMouseDelta();
+}
+
+void Print(const string &in);
+void PrintWarn(const string &in);
+void PrintError(const string &in);
