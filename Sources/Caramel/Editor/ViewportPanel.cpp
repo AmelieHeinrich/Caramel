@@ -32,8 +32,17 @@ void ViewportPanel::Draw(EditorContext& context, Renderer& renderer)
     context.ViewportRectMin = ImGui::GetCursorScreenPos();
     context.ViewportRectSize = ImVec2(contentSize.x > 0.0f ? contentSize.x : 1.0f, contentSize.y > 0.0f ? contentSize.y : 1.0f);
 
+    int32 windowWidth, windowHeight;
+    int32 windowPixelWidth, windowPixelHeight;
+    SDL_GetWindowSize(context.Window, &windowWidth, &windowHeight);
+    SDL_GetWindowSizeInPixels(context.Window, &windowPixelWidth, &windowPixelHeight);
+    float dpiScale = (float)windowPixelWidth / (float)windowWidth;
+    
+    context.ViewportRectSize.x *= dpiScale;
+    context.ViewportRectSize.y *= dpiScale;
+
     renderer.SetViewportSize((uint32)context.ViewportRectSize.x, (uint32)context.ViewportRectSize.y);
-    ImGui::Image(renderer.GetViewportTextureID(), context.ViewportRectSize);
+    ImGui::Image(renderer.GetViewportTextureID(), ImVec2(context.ViewportRectSize.x / dpiScale, context.ViewportRectSize.y / dpiScale));
 
     if (ImGui::BeginDragDropTarget()) {
         if (const ImGuiPayload* accepted = ImGui::AcceptDragDropPayload(kContentFileDragDropID)) {
