@@ -290,21 +290,19 @@ template<typename T>
 class AGFXStructuredBuffer
 {
     ResourceHandle handle;
-    StructuredBuffer<T> buffer;
 
     static AGFXStructuredBuffer<T> Create(ResourceHandle id)
     {
         AGFXStructuredBuffer<T> b;
-        b.handle  = id;
-        b.buffer = ResourceDescriptorHeap[id];
+        b.handle = id;
         return b;
     }
 
     ResourceHandle Handle() { return handle; }
-    StructuredBuffer<T>   Resource() { return buffer; }
+    StructuredBuffer<T>   Resource() { StructuredBuffer<T> buffer = ResourceDescriptorHeap[handle]; return buffer; }
 
-    T Load(uint location) { return buffer[location]; }
-    void GetDimensions(out uint count) { buffer.GetDimensions(count); }
+    T Load(uint location) { StructuredBuffer<T> buffer = ResourceDescriptorHeap[handle]; return buffer[location]; }
+    void GetDimensions(out uint count) { StructuredBuffer<T> buffer = ResourceDescriptorHeap[handle]; buffer.GetDimensions(count); }
 };
 
 template<typename T>
@@ -352,37 +350,35 @@ class AGFXByteAddressBuffer
 class AGFXRWByteAddressBuffer
 {
     ResourceHandle handle;
-    RWByteAddressBuffer buffer;
 
     static AGFXRWByteAddressBuffer Create(ResourceHandle id)
     {
         AGFXRWByteAddressBuffer b;
-        b.handle  = id;
-        b.buffer = ResourceDescriptorHeap[id];
+        b.handle = id;
         return b;
     }
 
     ResourceHandle Handle() { return handle; }
-    RWByteAddressBuffer   Resource() { return buffer; }
+    RWByteAddressBuffer   Resource() { RWByteAddressBuffer buffer = ResourceDescriptorHeap[handle]; return buffer; }
 
-    uint Load(uint location) { return buffer.Load(location); }
-    uint2 Load2(uint location) { return buffer.Load2(location); }
-    uint3 Load3(uint location) { return buffer.Load3(location); }
-    uint4 Load4(uint location) { return buffer.Load4(location); }
+    uint Load(uint location) { RWByteAddressBuffer buffer = ResourceDescriptorHeap[handle]; return buffer.Load(location); }
+    uint2 Load2(uint location) { RWByteAddressBuffer buffer = ResourceDescriptorHeap[handle]; return buffer.Load2(location); }
+    uint3 Load3(uint location) { RWByteAddressBuffer buffer = ResourceDescriptorHeap[handle]; return buffer.Load3(location); }
+    uint4 Load4(uint location) { RWByteAddressBuffer buffer = ResourceDescriptorHeap[handle]; return buffer.Load4(location); }
 
-    void Store(uint location, uint value) { buffer.Store(location, value); }
-    void Store2(uint location, uint2 value) { buffer.Store2(location, value); }
-    void Store3(uint location, uint3 value) { buffer.Store3(location, value); }
-    void Store4(uint location, uint4 value) { buffer.Store4(location, value); }
+    void Store(uint location, uint value) { RWByteAddressBuffer buffer = ResourceDescriptorHeap[handle]; buffer.Store(location, value); }
+    void Store2(uint location, uint2 value) { RWByteAddressBuffer buffer = ResourceDescriptorHeap[handle]; buffer.Store2(location, value); }
+    void Store3(uint location, uint3 value) { RWByteAddressBuffer buffer = ResourceDescriptorHeap[handle]; buffer.Store3(location, value); }
+    void Store4(uint location, uint4 value) { RWByteAddressBuffer buffer = ResourceDescriptorHeap[handle]; buffer.Store4(location, value); }
 
-    void InterlockedAdd(uint addr, uint v, out uint original) { buffer.InterlockedAdd(addr, v, original); }
-    void InterlockedAnd(uint addr, uint v, out uint original) { buffer.InterlockedAnd(addr, v, original); }
-    void InterlockedOr(uint addr, uint v, out uint original) { buffer.InterlockedOr(addr, v, original); }
-    void InterlockedXor(uint addr, uint v, out uint original) { buffer.InterlockedXor(addr, v, original); }
-    void InterlockedMax(uint addr, uint v, out uint original) { buffer.InterlockedMax(addr, v, original); }
-    void InterlockedMin(uint addr, uint v, out uint original) { buffer.InterlockedMin(addr, v, original); }
-    void InterlockedExchange(uint addr, uint v, out uint original) { buffer.InterlockedExchange(addr, v, original); }
-    void InterlockedCompareExchange(uint addr, uint compareValue, uint value, out uint original) { buffer.InterlockedCompareExchange(addr, compareValue, value, original); }
+    void InterlockedAdd(uint addr, uint v, out uint original) { RWByteAddressBuffer buffer = ResourceDescriptorHeap[handle]; buffer.InterlockedAdd(addr, v, original); }
+    void InterlockedAnd(uint addr, uint v, out uint original) { RWByteAddressBuffer buffer = ResourceDescriptorHeap[handle]; buffer.InterlockedAnd(addr, v, original); }
+    void InterlockedOr(uint addr, uint v, out uint original) { RWByteAddressBuffer buffer = ResourceDescriptorHeap[handle]; buffer.InterlockedOr(addr, v, original); }
+    void InterlockedXor(uint addr, uint v, out uint original) { RWByteAddressBuffer buffer = ResourceDescriptorHeap[handle]; buffer.InterlockedXor(addr, v, original); }
+    void InterlockedMax(uint addr, uint v, out uint original) { RWByteAddressBuffer buffer = ResourceDescriptorHeap[handle]; buffer.InterlockedMax(addr, v, original); }
+    void InterlockedMin(uint addr, uint v, out uint original) { RWByteAddressBuffer buffer = ResourceDescriptorHeap[handle]; buffer.InterlockedMin(addr, v, original); }
+    void InterlockedExchange(uint addr, uint v, out uint original) { RWByteAddressBuffer buffer = ResourceDescriptorHeap[handle]; buffer.InterlockedExchange(addr, v, original); }
+    void InterlockedCompareExchange(uint addr, uint compareValue, uint value, out uint original) { RWByteAddressBuffer buffer = ResourceDescriptorHeap[handle]; buffer.InterlockedCompareExchange(addr, compareValue, value, original); }
 };
 
 // RT

@@ -573,6 +573,9 @@ agfxDevice* agfxDeviceCreate(const agfxDeviceCreateInfo* createInfo)
     enabledFeatures12.descriptorBindingSampledImageUpdateAfterBind = VK_TRUE;
     enabledFeatures12.bufferDeviceAddress = VK_TRUE;
     enabledFeatures12.timelineSemaphore = VK_TRUE;
+    // The shader compiler emits scalar-layout SPIR-V (-fvk-use-scalar-layout), so structured
+    // buffer strides and push constant members are packed tighter than std430 allows.
+    enabledFeatures12.scalarBlockLayout = VK_TRUE;
     enabledFeatures12.drawIndirectCount = device->supportsMultiDrawIndirect ? VK_TRUE : VK_FALSE;
     VkPhysicalDeviceVulkan11Features enabledFeatures11 = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES };
     enabledFeatures11.pNext = &enabledFeatures12;

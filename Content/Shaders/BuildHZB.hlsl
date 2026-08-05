@@ -20,6 +20,9 @@
 struct BuildHZBPushConstants {
     ResourceHandle rSrcDepth;
     ResourceHandle rCounter;    // single uint, zeroed by the host every frame
+    uint2          _Pad0;       // D3D12 cbuffer packing aligns the array below to 16 bytes on its
+                                // own, but Vulkan compiles with -fvk-use-scalar-layout, which would
+                                // place it at offset 8 -- pad explicitly so both match the C++ side.
     uint4          rHZBMips[4]; // 16 UAV slots, one per mip. uint4[4] rather than uint[13] because
                                 // constant-buffer arrays pad each element to 16 bytes -- a uint[13]
                                 // would cost 208 bytes and blow the 128-byte push-constant budget.
