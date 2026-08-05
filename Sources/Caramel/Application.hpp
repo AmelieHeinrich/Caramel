@@ -23,6 +23,7 @@
 #include <Caramel/Editor/ContentDrawerPanel.hpp>
 #include <Caramel/Editor/RenderGraphPanel.hpp>
 #include <Caramel/Editor/GpuTimingPanel.hpp>
+#include <Caramel/Editor/CpuProfilerPanel.hpp>
 #include <Caramel/Editor/ConsolePanel.hpp>
 #include <Caramel/Editor/SettingsPanel.hpp>
 
@@ -95,6 +96,7 @@ private:
     ContentDrawerPanel m_ContentDrawerPanel;
     RenderGraphPanel m_RenderGraphPanel;
     GpuTimingPanel m_GpuTimingPanel;
+    CpuProfilerPanel m_CpuProfilerPanel;
     ConsolePanel m_ConsolePanel;
     SettingsPanel m_SettingsPanel;
 

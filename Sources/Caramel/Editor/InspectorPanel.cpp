@@ -240,9 +240,10 @@ void InspectorPanel::DrawScriptSection(EditorContext& context, StreamingManager&
     }
 }
 
-void InspectorPanel::DrawTransformRow(const char* label, glm::vec3& v, float speed, float resetTo)
+bool InspectorPanel::DrawTransformRow(const char* label, glm::vec3& v, float speed, float resetTo)
 {
     const ImGuiStyle& style = ImGui::GetStyle();
+    bool changed = false;
 
     ImGui::PushID(label);
     EditorTheme::PropertyLabel(label);
@@ -264,22 +265,28 @@ void InspectorPanel::DrawTransformRow(const char* label, glm::vec3& v, float spe
         ImGui::PushStyleColor(ImGuiCol_ButtonHovered, kAxisColorsHovered[i]);
         ImGui::PushStyleColor(ImGuiCol_ButtonActive, kAxisColorsHovered[i]);
         ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 1.0f, 1.0f, 1.0f));
-        if (ImGui::Button(kAxisNames[i], ImVec2(buttonWidth, buttonWidth)))
+        if (ImGui::Button(kAxisNames[i], ImVec2(buttonWidth, buttonWidth))) {
             *components[i] = resetTo;
+            changed = true;
+        }
         ImGui::PopStyleColor(4);
         ImGui::SetItemTooltip("Reset %s", kAxisNames[i]);
 
         ImGui::SameLine(0.0f, style.ItemInnerSpacing.x);
         ImGui::SetNextItemWidth(fieldWidth);
-        ImGui::DragFloat("##value", components[i], speed, 0.0f, 0.0f, "%.2f");
+        if (ImGui::DragFloat("##value", components[i], speed, 0.0f, 0.0f, "%.2f"))
+            changed = true;
         ImGui::PopID();
     }
 
     ImGui::SameLine(0.0f, style.ItemInnerSpacing.x);
-    if (EditorTheme::IconButton(ICON_FA_ROTATE_LEFT, "Reset all axes"))
+    if (EditorTheme::IconButton(ICON_FA_ROTATE_LEFT, "Reset all axes")) {
         v = glm::vec3(resetTo);
+        changed = true;
+    }
 
     ImGui::PopID();
+    return changed;
 }
 
 void InspectorPanel::DrawMeshTransformSection(EditorContext& context, StreamingManager& streaming)
@@ -352,12 +359,15 @@ void InspectorPanel::DrawTransformSection(EditorContext& context)
     if (scriptDriven)
         ImGui::BeginDisabled();
 
+    bool changed = false;
     if (EditorTheme::BeginProperties("InspectorTransform")) {
-        DrawTransformRow("Position", instance.position, 0.05f, 0.0f);
-        DrawTransformRow("Rotation", instance.rotationEuler, 0.5f, 0.0f);
-        DrawTransformRow("Scale", instance.scale, 0.01f, 1.0f);
+        changed |= DrawTransformRow("Position", instance.position, 0.05f, 0.0f);
+        changed |= DrawTransformRow("Rotation", instance.rotationEuler, 0.5f, 0.0f);
+        changed |= DrawTransformRow("Scale", instance.scale, 0.01f, 1.0f);
         EditorTheme::EndProperties();
     }
+    if (changed)
+        context.CurrentScene.MarkRenderInstancesDirty();
 
     if (scriptDriven) {
         ImGui::EndDisabled();

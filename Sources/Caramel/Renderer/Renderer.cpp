@@ -7,6 +7,7 @@
 #include "Renderer.hpp"
 
 #include <Caramel/Core/Logger.hpp>
+#include <Caramel/Core/CpuProfiler.hpp>
 #include <Caramel/Renderer/Shader/ShaderServer.hpp>
 #include <Caramel/Renderer/AccelerationStructureManager.hpp>
 #include <Caramel/Renderer/DebugRenderer.hpp>
@@ -233,8 +234,20 @@ void Renderer::SetImportedState(agfxTexture* texture, agfx::ResourceState state)
 
 void Renderer::Render(const Camera& camera, StreamingManager& streamingManager, const TArray<RenderInstance>& renderInstances)
 {
+    CARAMEL_ZONE("Renderer::Render");
+
     m_FrameSlot = (uint32_t)(m_FenceValue % FRAMES_IN_FLIGHT);
-    m_Fence.Wait(m_FenceFrameSlots[m_FrameSlot]);
+    {
+        // Not CPU work -- this is the CPU sitting idle until the GPU finishes with this frame slot
+        // from FRAMES_IN_FLIGHT frames ago. A spike here means the GPU fell behind (e.g. camera
+        // movement changed visibility/LOD enough to cost more GPU time that frame), not that the CPU
+        // did anything expensive. Removing the wait is not a fix: this frame slot's command buffer
+        // and resources may still be in use by the GPU, so proceeding without it is a data race.
+        // Real levers: raise FRAMES_IN_FLIGHT for more slack (costs latency/memory), or find out why
+        // the GPU frame got more expensive via the GPU Timings panel for that same moment.
+        CARAMEL_ZONE_WAIT("Fence Wait");
+        m_Fence.Wait(m_FenceFrameSlots[m_FrameSlot]);
+    }
 
     // The wait above already proves this slot's last Execute() (including its ResolveQueryPool) is
     // done, so it's safe to read the timestamps it wrote before this frame overwrites them below.
@@ -253,7 +266,10 @@ void Renderer::Render(const Camera& camera, StreamingManager& streamingManager, 
     ShaderServer::Tick();
 
     m_GPUScene.Build(streamingManager, renderInstances, (uint32)m_FrameSlot);
-    m_AccelStructManager->ScanForNewlyResidentModels(renderInstances);
+    {
+        CARAMEL_ZONE("Scan Newly Resident Models");
+        m_AccelStructManager->ScanForNewlyResidentModels(renderInstances);
+    }
 
     int32 width, height;
     SDL_GetWindowSizeInPixels(m_Window, &width, &height);
@@ -399,7 +415,7 @@ void Renderer::Render(const Camera& camera, StreamingManager& streamingManager, 
 
     agfx::CommandBuffer* computeCommandBuffer = nullptr;
     agfx::QueryPool* computeQueryPool = nullptr;
-    if (m_AccelStructManager->IsSupported()) {
+    if (m_AccelStructManager->ShouldBuild()) {
         m_AccelStructManager->WaitForFrameSlot(m_FrameSlot);
         computeCommandBuffer = &m_AccelStructManager->GetFrameCommandBuffer(m_FrameSlot);
         computeQueryPool = &m_AccelStructManager->GetTimingQueryPool(m_FrameSlot);
@@ -417,8 +433,16 @@ void Renderer::Render(const Camera& camera, StreamingManager& streamingManager, 
             });
     }
 
-    graph.Compile();
-    graph.Execute(commandBuffer, &m_TimingQueryPools[m_FrameSlot], computeQueryPool);
+    {
+        CARAMEL_ZONE("RenderGraph Compile");
+        graph.Compile();
+    }
+    {
+        // Pass lambdas were only captured above -- their command-recording work (incl. cull/render
+        // dispatch bodies) actually runs inside this call.
+        CARAMEL_ZONE("RenderGraph Execute");
+        graph.Execute(commandBuffer, &m_TimingQueryPools[m_FrameSlot], computeQueryPool);
+    }
 
     SetImportedState(m_SceneColorTexture.Get(), graph.GetFinalState(sceneColorHandle));
     SetImportedState(m_DepthTexture.Get(), graph.GetFinalState(depthHandle));

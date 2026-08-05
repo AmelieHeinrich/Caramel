@@ -7,6 +7,7 @@
 #include "Scene.hpp"
 
 #include <Caramel/Asset/StreamingManager.hpp>
+#include <Caramel/Core/CpuProfiler.hpp>
 
 #include <nlohmann/json.hpp>
 
@@ -396,6 +397,7 @@ void Scene::AddInstance(SceneNode* entity, const Instance& instance)
         copy.name = String("Instance " + std::to_string(entity->instances.Size()));
 
     entity->instances.PushBack(std::move(copy));
+    MarkRenderInstancesDirty();
 }
 
 void Scene::UnregisterSubtree(SceneNode& node)
@@ -423,6 +425,7 @@ void Scene::DeleteNode(SceneNode* node)
         if (siblings[i].get() == node)
         {
             siblings.Erase(i);
+            MarkRenderInstancesDirty();
             return;
         }
     }
@@ -453,6 +456,10 @@ void Scene::Reparent(SceneNode* node, SceneNode* newParent)
             oldSiblings.Erase(i);
             moved->parent = actualNewParent;
             actualNewParent->children.PushBack(std::move(moved));
+            // Doesn't change any RenderInstance's content (transforms are world-space, not
+            // parent-relative -- see CollectRenderInstances), only traversal order. Marked dirty
+            // anyway since nothing downstream is known to depend on that order, and this is rare.
+            MarkRenderInstancesDirty();
             return;
         }
     }
@@ -466,7 +473,10 @@ void Scene::Update(StreamingManager& streamingManager)
         uint32 requestId = models[m_ScannedModelCount]->GetRequestId();
         auto it = m_PendingRequests.Find(requestId);
         if (it != m_PendingRequests.End())
+        {
             it->second->meshIndices.PushBack((uint32)m_ScannedModelCount);
+            MarkRenderInstancesDirty();
+        }
     }
 }
 
@@ -501,11 +511,16 @@ void Scene::CollectRenderInstances(SceneNode& node, StreamingManager& streamingM
         CollectRenderInstances(*child, streamingManager, out);
 }
 
-TArray<RenderInstance> Scene::BuildRenderInstances(StreamingManager& streamingManager)
+const TArray<RenderInstance>& Scene::BuildRenderInstances(StreamingManager& streamingManager)
 {
-    TArray<RenderInstance> out;
-    CollectRenderInstances(m_Root, streamingManager, out);
-    return out;
+    CARAMEL_ZONE("Scene::BuildRenderInstances");
+    if (!m_RenderInstancesDirty)
+        return m_CachedRenderInstances;
+
+    m_CachedRenderInstances.Clear();
+    CollectRenderInstances(m_Root, streamingManager, m_CachedRenderInstances);
+    m_RenderInstancesDirty = false;
+    return m_CachedRenderInstances;
 }
 
 MeshTransform& Scene::GetOrCreateMeshTransform(SceneNode& entity, uint32 meshSlot)
@@ -519,6 +534,9 @@ MeshTransform& Scene::GetOrCreateMeshTransform(SceneNode& entity, uint32 meshSlo
     MeshTransform fresh;
     fresh.meshSlot = meshSlot;
     entity.meshTransforms.PushBack(fresh);
+    // Only reached from edit-intent call sites (inspector, script bindings) that immediately write
+    // into the returned reference -- see MarkRenderInstancesDirty's doc comment.
+    MarkRenderInstancesDirty();
     return entity.meshTransforms[entity.meshTransforms.Size() - 1];
 }
 
@@ -611,5 +629,6 @@ bool Scene::LoadFromFile(const String& path, StreamingManager& streamingManager)
     for (const auto& childJson : rootJson.value("children", nlohmann::json::array()))
         ParseNode(childJson, &m_Root, *this, streamingManager);
 
+    MarkRenderInstancesDirty();
     return true;
 }

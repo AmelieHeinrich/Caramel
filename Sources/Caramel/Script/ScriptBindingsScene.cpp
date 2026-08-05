@@ -94,7 +94,11 @@ namespace
     {
         Instance* instance = ScriptSceneBridge::Resolve(*self);
         if (instance)
+        {
             instance->position = value;
+            if (Scene* scene = ScriptSceneBridge::GetScene())
+                scene->MarkRenderInstancesDirty();
+        }
     }
 
     glm::vec3 Instance_GetRotation(const InstanceRef* self)
@@ -107,7 +111,11 @@ namespace
     {
         Instance* instance = ScriptSceneBridge::Resolve(*self);
         if (instance)
+        {
             instance->rotationEuler = value;
+            if (Scene* scene = ScriptSceneBridge::GetScene())
+                scene->MarkRenderInstancesDirty();
+        }
     }
 
     glm::vec3 Instance_GetScale(const InstanceRef* self)
@@ -120,7 +128,11 @@ namespace
     {
         Instance* instance = ScriptSceneBridge::Resolve(*self);
         if (instance)
+        {
             instance->scale = value;
+            if (Scene* scene = ScriptSceneBridge::GetScene())
+                scene->MarkRenderInstancesDirty();
+        }
     }
 
     glm::mat4 Instance_GetTransform(const InstanceRef* self)

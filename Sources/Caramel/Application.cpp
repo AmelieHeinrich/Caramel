@@ -10,6 +10,7 @@
 #include <Caramel/Core/Input.hpp>
 #include <Caramel/Core/JobSystem.hpp>
 #include <Caramel/Core/CVar.hpp>
+#include <Caramel/Core/CpuProfiler.hpp>
 #include <Caramel/Asset/Model.hpp>
 #include <Caramel/Physics/Physics.hpp>
 #include <Caramel/Physics/JoltMath.hpp>
@@ -39,6 +40,7 @@ namespace
     CVar cv_ShowColliders("debug.show_colliders", false, "Show Colliders", "Physics", "Draw Jolt physics collider wireframes");
     CVar cv_ShowRenderGraphPanel("debug.show_rendergraph_panel", false, "Resource Dependency Viewer", "Renderer", "Show the resource dependency viewer");
     CVar cv_ShowGpuTimingPanel("debug.show_gpu_timing_panel", false, "GPU Timings", "Renderer", "Show per-pass GPU timings");
+    CVar cv_ShowCpuProfilerPanel("debug.show_cpu_profiler_panel", false, "CPU Profiler", "Renderer", "Show per-thread CPU zone timings");
 }
 
 Application::Application(const ApplicationInfo& info)
@@ -46,6 +48,7 @@ Application::Application(const ApplicationInfo& info)
     , m_EditorContext{ m_Scene }
 {
     Logger::Initialize();
+    CpuProfiler::SetThreadName("Main Thread");
     if (!SDL_Init(SDL_INIT_VIDEO | SDL_INIT_GAMEPAD)) {
         CARAMEL_ERROR("SDL_Init failed: {}", SDL_GetError());
         assert(false);
@@ -137,18 +140,24 @@ void Application::Run()
 #else
     {
 #endif
+        CpuProfiler::BeginFrame();
+        CARAMEL_ZONE("Frame");
+
         SDL_Event event;
-        while (SDL_PollEvent(&event)) {
-            ImGui_ImplSDL3_ProcessEvent(&event);
-            Input::ProcessEvent(event);
-            if (event.type == SDL_EVENT_QUIT) {
-                m_Running = false;
-            }
-            if (event.type == SDL_EVENT_WINDOW_RESIZED || event.type == SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED) {
-                m_Renderer->Resize();
-            }
-            if (event.type == SDL_EVENT_DROP_FILE) {
-                HandleDroppedFile(event.drop.data);
+        {
+            CARAMEL_ZONE("Poll Events");
+            while (SDL_PollEvent(&event)) {
+                ImGui_ImplSDL3_ProcessEvent(&event);
+                Input::ProcessEvent(event);
+                if (event.type == SDL_EVENT_QUIT) {
+                    m_Running = false;
+                }
+                if (event.type == SDL_EVENT_WINDOW_RESIZED || event.type == SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED) {
+                    m_Renderer->Resize();
+                }
+                if (event.type == SDL_EVENT_DROP_FILE) {
+                    HandleDroppedFile(event.drop.data);
+                }
             }
         }
 
@@ -156,13 +165,22 @@ void Application::Run()
 
         m_Timer.Tick();
 
-        m_StreamingManager->Update();
+        {
+            CARAMEL_ZONE("Streaming Update");
+            m_StreamingManager->Update();
+        }
 
         // Ticked before Scene::Update so an entity spawned this frame registers its streaming
         // request in time, and before BuildRenderInstances so scripted motion has no frame of lag.
-        m_ScriptSystem->Update(m_Timer);
+        {
+            CARAMEL_ZONE("Script Update");
+            m_ScriptSystem->Update(m_Timer);
+        }
 
-        m_Scene.Update(*m_StreamingManager);
+        {
+            CARAMEL_ZONE("Scene Update");
+            m_Scene.Update(*m_StreamingManager);
+        }
 
         ImGui_ImplSDL3_NewFrame();
         Input::NewFrame();
@@ -188,7 +206,16 @@ void Application::Run()
 
         m_ViewportPanel.Draw(m_EditorContext, *m_Renderer);
 
-        TArray<RenderInstance> renderInstances = m_Scene.BuildRenderInstances(*m_StreamingManager);
+        // Scene::BuildRenderInstances caches its result and only rebuilds when something marks it
+        // dirty (structural edits, transform edits from the inspector or a script) -- bind a
+        // reference rather than assigning into a local TArray, so a cache hit stays a flag check
+        // instead of copying every instance every frame.
+        const TArray<RenderInstance>* renderInstancesPtr;
+        {
+            CARAMEL_ZONE("Build Render Instances");
+            renderInstancesPtr = &m_Scene.BuildRenderInstances(*m_StreamingManager);
+        }
+        const TArray<RenderInstance>& renderInstances = *renderInstancesPtr;
 
         UpdatePicking(renderInstances);
         if (*cv_ShowColliders.AsBoolPtr())
@@ -202,13 +229,16 @@ void Application::Run()
             m_RenderGraphPanel.Draw(m_EditorContext, *m_Renderer);
         if (*cv_ShowGpuTimingPanel.AsBoolPtr())
             m_GpuTimingPanel.Draw(*m_Renderer);
+        if (*cv_ShowCpuProfilerPanel.AsBoolPtr())
+            m_CpuProfilerPanel.Draw();
         if (m_ShowSettingsPanel)
             m_SettingsPanel.Draw();
         ImGui::Render();
 
-        renderInstances = m_Scene.BuildRenderInstances(*m_StreamingManager);
-
-        m_Renderer->Render(m_Camera, *m_StreamingManager, renderInstances);
+        {
+            CARAMEL_ZONE("Renderer Render");
+            m_Renderer->Render(m_Camera, *m_StreamingManager, renderInstances);
+        }
     }
     }
 }
@@ -262,6 +292,7 @@ void Application::DrawMainMenuBar()
         ImGui::Separator();
         ImGui::MenuItem(ICON_FA_DIAGRAM_PROJECT " Resource Dependency Viewer", nullptr, cv_ShowRenderGraphPanel.AsBoolPtr());
         ImGui::MenuItem(ICON_FA_STOPWATCH " GPU Timings", nullptr, cv_ShowGpuTimingPanel.AsBoolPtr());
+        ImGui::MenuItem(ICON_FA_CHART_GANTT " CPU Profiler", nullptr, cv_ShowCpuProfilerPanel.AsBoolPtr());
         ImGui::MenuItem(ICON_FA_SLIDERS " Settings", nullptr, &m_ShowSettingsPanel);
 
         ImGui::EndMenu();

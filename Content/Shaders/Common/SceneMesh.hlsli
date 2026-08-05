@@ -184,7 +184,12 @@ bool ContributionCullMeshlet(GPUInstance instance, MeshletCullData data, FrameCo
     float radius;
     SceneGetMeshletBoundingSphere(instance, data, center, radius);
 
-    float4 lbrt = SphereScreenExtents(center, radius, frame.mProjection);
+    float3 viewCenter = mul(frame.mView, float4(center, 1.0)).xyz;
+    float rad2 = radius * radius;
+    if (dot(viewCenter.xz, viewCenter.xz) <= rad2 || dot(viewCenter.yz, viewCenter.yz) <= rad2)
+        return true;
+
+    float4 lbrt = SphereScreenExtents(viewCenter, radius, frame.mProjection);
     float w = abs(lbrt.z - lbrt.x);
     float h = abs(lbrt.w - lbrt.y);
 
@@ -295,9 +300,6 @@ void SceneAS(uint3 uGroupID : SV_GroupID, uint3 uGroupThreadID : SV_GroupThreadI
         }
     }
 
-    // Compaction assumes the whole group executes as one SIMD wave (kMeshletTaskGroupSize == 32,
-    // the wave width this engine targets) -- Wave*() intrinsics only see the calling lane's wave,
-    // not the full thread group, so this silently drops meshlets if the group ever spans >1 wave.
     uint compactedIndex = WavePrefixCountBits(visible);
     if (visible)
         s_Payload.uMeshletIndices[compactedIndex] = meshletIndex;

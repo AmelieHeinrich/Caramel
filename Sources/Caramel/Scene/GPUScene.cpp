@@ -8,6 +8,7 @@
 
 #include <Caramel/Asset/StreamingManager.hpp>
 #include <Caramel/Core/JobSystem.hpp>
+#include <Caramel/Core/CpuProfiler.hpp>
 #include <Caramel/Scene/SceneNode.hpp>
 
 #include <algorithm>
@@ -175,6 +176,8 @@ void GPUScene::WriteMaterial(uint32 slot, const ModelMaterial& source, const Mat
 
 void GPUScene::Build(StreamingManager& streamingManager, const TArray<RenderInstance>& renderInstances, uint32 frameIndex)
 {
+    CARAMEL_ZONE("GPUScene::Build");
+
     m_Draws.Clear();
     m_PreCullMeshlets = 0;
     m_PreCullTriangles = 0;
@@ -185,48 +188,54 @@ void GPUScene::Build(StreamingManager& streamingManager, const TArray<RenderInst
 
     // Serial phase: residency filtering and slot resolution mutate shared state (slot maps, staging
     // sizes) and are cheap; everything per-instance and per-material moves to the phases below.
-    for (const RenderInstance& instance : renderInstances)
     {
-        StreamingModel& model = *instance.mesh;
-
-        uint32 lod = model.SnapshotResidentLOD();
-        if (lod == StreamingModel::kNoResidentLOD)
-            continue;
-
-        uint32 meshletCount = model.GetMeshletCount(lod);
-        if (meshletCount == 0)
-            continue;
-
-        const MaterialOverride* activeOverride = nullptr;
-        uint32 materialSlot = ResolveMaterialSlot(instance, activeOverride);
-        if (materialSlot >= m_MaterialStaging.Size())
+        CARAMEL_ZONE("Resolve Slots (serial)");
+        for (const RenderInstance& instance : renderInstances)
         {
-            m_MaterialStaging.Resize(materialSlot + 1);
-            m_SlotSchemeId.Resize(materialSlot + 1, SchemeRegistry::kDefaultSchemeId);
+            StreamingModel& model = *instance.mesh;
+
+            uint32 lod = model.SnapshotResidentLOD();
+            if (lod == StreamingModel::kNoResidentLOD)
+                continue;
+
+            uint32 meshletCount = model.GetMeshletCount(lod);
+            if (meshletCount == 0)
+                continue;
+
+            const MaterialOverride* activeOverride = nullptr;
+            uint32 materialSlot = ResolveMaterialSlot(instance, activeOverride);
+            if (materialSlot >= m_MaterialStaging.Size())
+            {
+                m_MaterialStaging.Resize(materialSlot + 1);
+                m_SlotSchemeId.Resize(materialSlot + 1, SchemeRegistry::kDefaultSchemeId);
+            }
+
+            if (materialSlot >= m_SlotWrittenThisBuild.Size())
+                m_SlotWrittenThisBuild.Resize(materialSlot + 1, 0);
+            if (!m_SlotWrittenThisBuild[materialSlot])
+            {
+                m_SlotWrittenThisBuild[materialSlot] = 1;
+                m_MaterialWrites.PushBack(MaterialWrite{ materialSlot, &model, activeOverride });
+            }
+
+            for (uint32 lodIdx = 0; lodIdx < CaramelAsset::kLodCount; ++lodIdx)
+                m_MaxMeshletCount = std::max(m_MaxMeshletCount, model.GetMeshletCount(lodIdx));
+
+            m_PreCullMeshlets += meshletCount;
+            m_PreCullTriangles += model.GetMesh().lods[lod].GetFlatIndexCount() / 3;
+
+            m_BuildItems.PushBack(BuildItem{ &instance, lod, meshletCount, materialSlot });
         }
-
-        if (materialSlot >= m_SlotWrittenThisBuild.Size())
-            m_SlotWrittenThisBuild.Resize(materialSlot + 1, 0);
-        if (!m_SlotWrittenThisBuild[materialSlot])
-        {
-            m_SlotWrittenThisBuild[materialSlot] = 1;
-            m_MaterialWrites.PushBack(MaterialWrite{ materialSlot, &model, activeOverride });
-        }
-
-        for (uint32 lodIdx = 0; lodIdx < CaramelAsset::kLodCount; ++lodIdx)
-            m_MaxMeshletCount = std::max(m_MaxMeshletCount, model.GetMeshletCount(lodIdx));
-
-        m_PreCullMeshlets += meshletCount;
-        m_PreCullTriangles += model.GetMesh().lods[lod].GetFlatIndexCount() / 3;
-
-        m_BuildItems.PushBack(BuildItem{ &instance, lod, meshletCount, materialSlot });
     }
 
-    // One WriteMaterial per slot per frame instead of one per instance -- same freshness for the
-    // volatile texture handles, a fraction of the scheme-param packing and streaming lookups.
-    for (const MaterialWrite& write : m_MaterialWrites)
-        WriteMaterial(write.slot, write.model->GetMaterial(), write.activeOverride, streamingManager,
-                      write.model->GetRequestId(), write.model->GetMesh().materialIndex);
+    {
+        // One WriteMaterial per slot per frame instead of one per instance -- same freshness for the
+        // volatile texture handles, a fraction of the scheme-param packing and streaming lookups.
+        CARAMEL_ZONE("Write Materials");
+        for (const MaterialWrite& write : m_MaterialWrites)
+            WriteMaterial(write.slot, write.model->GetMaterial(), write.activeOverride, streamingManager,
+                          write.model->GetRequestId(), write.model->GetMesh().materialIndex);
+    }
 
     uint32 itemCount = (uint32)m_BuildItems.Size();
     m_InstanceStaging.Resize(itemCount);
@@ -235,62 +244,75 @@ void GPUScene::Build(StreamingManager& streamingManager, const TArray<RenderInst
 
     // Parallel fill: every write below lands at an index owned by exactly one item, and everything
     // read is either per-item or immutable for the rest of this Build.
-    JobSystem::Get().ParallelFor(itemCount, 64, [&](uint32 start, uint32 end, uint32) {
-        for (uint32 i = start; i < end; ++i)
-        {
-            const BuildItem& item = m_BuildItems[i];
-            StreamingModel& model = *item.instance->mesh;
-            const ModelMesh& mesh = model.GetMesh();
-
-            GPUInstance gpu;
-            gpu.transform = item.instance->transform;
-            gpu.boundsMin = glm::vec4(mesh.boundsMin, 0.0f);
-            gpu.boundsMax = glm::vec4(mesh.boundsMax, 0.0f);
-            gpu.materialSlot = item.materialSlot;
-            gpu.vertexBuffer = (uint32)model.GetVertexBufferView().GetHandle();
-            gpu.meshletBuffer = (uint32)model.GetMeshletBufferView(item.lod).GetHandle();
-            gpu.meshletVertexBuffer = (uint32)model.GetMeshletVertexBufferView(item.lod).GetHandle();
-            gpu.meshletTriangleBuffer = (uint32)model.GetMeshletTriangleBufferView(item.lod).GetHandle();
-            gpu.meshletCount = item.meshletCount;
-            gpu.lod = item.lod;
-            gpu.meshletBoundsBuffer = (uint32)model.GetMeshletBoundsBufferView(item.lod).GetHandle();
-            m_InstanceStaging[i] = gpu;
-
-            // Every LOD's handles + CPU-known meshlet count, not just the resident one baked into
-            // `gpu` above -- PopulateOpaqueIndirectBundleCS picks the actual LOD per instance per
-            // frame from this. Entry i's LODs occupy [i * kLodCount, (i + 1) * kLodCount).
-            for (uint32 lodIdx = 0; lodIdx < CaramelAsset::kLodCount; ++lodIdx)
+    {
+        CARAMEL_ZONE("Parallel Fill (dispatch)");
+        JobSystem::Get().ParallelFor(itemCount, 64, [&](uint32 start, uint32 end, uint32) {
+            CARAMEL_ZONE("Parallel Fill (chunk)");
+            for (uint32 i = start; i < end; ++i)
             {
-                GPULodInfo lodInfo;
-                lodInfo.meshletBuffer = (uint32)model.GetMeshletBufferView(lodIdx).GetHandle();
-                lodInfo.meshletVertexBuffer = (uint32)model.GetMeshletVertexBufferView(lodIdx).GetHandle();
-                lodInfo.meshletTriangleBuffer = (uint32)model.GetMeshletTriangleBufferView(lodIdx).GetHandle();
-                lodInfo.meshletBoundsBuffer = (uint32)model.GetMeshletBoundsBufferView(lodIdx).GetHandle();
-                lodInfo.meshletCount = model.GetMeshletCount(lodIdx);
-                m_InstanceLodStaging[(uint64)i * CaramelAsset::kLodCount + lodIdx] = lodInfo;
+                const BuildItem& item = m_BuildItems[i];
+                StreamingModel& model = *item.instance->mesh;
+                const ModelMesh& mesh = model.GetMesh();
+
+                GPUInstance gpu;
+                gpu.transform = item.instance->transform;
+                gpu.boundsMin = glm::vec4(mesh.boundsMin, 0.0f);
+                gpu.boundsMax = glm::vec4(mesh.boundsMax, 0.0f);
+                gpu.materialSlot = item.materialSlot;
+                gpu.vertexBuffer = (uint32)model.GetVertexBufferView().GetHandle();
+                gpu.meshletBuffer = (uint32)model.GetMeshletBufferView(item.lod).GetHandle();
+                gpu.meshletVertexBuffer = (uint32)model.GetMeshletVertexBufferView(item.lod).GetHandle();
+                gpu.meshletTriangleBuffer = (uint32)model.GetMeshletTriangleBufferView(item.lod).GetHandle();
+                gpu.meshletCount = item.meshletCount;
+                gpu.lod = item.lod;
+                gpu.meshletBoundsBuffer = (uint32)model.GetMeshletBoundsBufferView(item.lod).GetHandle();
+                m_InstanceStaging[i] = gpu;
+
+                // Every LOD's handles + CPU-known meshlet count, not just the resident one baked into
+                // `gpu` above -- PopulateOpaqueIndirectBundleCS picks the actual LOD per instance per
+                // frame from this. Entry i's LODs occupy [i * kLodCount, (i + 1) * kLodCount).
+                for (uint32 lodIdx = 0; lodIdx < CaramelAsset::kLodCount; ++lodIdx)
+                {
+                    GPULodInfo lodInfo;
+                    lodInfo.meshletBuffer = (uint32)model.GetMeshletBufferView(lodIdx).GetHandle();
+                    lodInfo.meshletVertexBuffer = (uint32)model.GetMeshletVertexBufferView(lodIdx).GetHandle();
+                    lodInfo.meshletTriangleBuffer = (uint32)model.GetMeshletTriangleBufferView(lodIdx).GetHandle();
+                    lodInfo.meshletBoundsBuffer = (uint32)model.GetMeshletBoundsBufferView(lodIdx).GetHandle();
+                    lodInfo.meshletCount = model.GetMeshletCount(lodIdx);
+                    m_InstanceLodStaging[(uint64)i * CaramelAsset::kLodCount + lodIdx] = lodInfo;
+                }
+
+                m_Draws[i] = GPUDraw{ i, item.meshletCount, m_SlotSchemeId[item.materialSlot], item.materialSlot };
             }
+        });
+    }
 
-            m_Draws[i] = GPUDraw{ i, item.meshletCount, m_SlotSchemeId[item.materialSlot], item.materialSlot };
-        }
-    });
+    {
+        // Sort draws into (scheme, material) order. The instance buffer is deliberately NOT reordered
+        // -- draws carry an index into it, so this stays a CPU-side reshuffle.
+        CARAMEL_ZONE("Sort Draws");
+        std::sort(m_Draws.Begin(), m_Draws.End(), [](const GPUDraw& a, const GPUDraw& b) {
+            if (a.schemeId != b.schemeId)
+                return a.schemeId < b.schemeId;
+            return a.materialSlot < b.materialSlot;
+        });
+    }
 
-    // Sort draws into (scheme, material) order. The instance buffer is deliberately NOT reordered --
-    // draws carry an index into it, so this stays a CPU-side reshuffle.
-    std::sort(m_Draws.Begin(), m_Draws.End(), [](const GPUDraw& a, const GPUDraw& b) {
-        if (a.schemeId != b.schemeId)
-            return a.schemeId < b.schemeId;
-        return a.materialSlot < b.materialSlot;
-    });
+    {
+        CARAMEL_ZONE("Build Buckets");
+        BuildBuckets();
+    }
 
-    BuildBuckets();
-
-    m_InstanceStream.Upload(*m_Device, frameIndex, "GPUScene Instance Buffer", sizeof(GPUInstance),
-                            m_InstanceStaging.Data(), m_InstanceStaging.Size() * sizeof(GPUInstance));
-    m_InstanceLodStream.Upload(*m_Device, frameIndex, "GPUScene Instance LOD Table", sizeof(GPULodInfo),
-                               m_InstanceLodStaging.Data(), m_InstanceLodStaging.Size() * sizeof(GPULodInfo));
-    m_MaterialStream.Upload(*m_Device, frameIndex, "GPUScene Material Buffer", sizeof(GPUMaterial),
-                            m_MaterialStaging.Data(), m_MaterialStaging.Size() * sizeof(GPUMaterial));
-    UploadSchemeParams(frameIndex);
+    {
+        CARAMEL_ZONE("Upload Streams");
+        m_InstanceStream.Upload(*m_Device, frameIndex, "GPUScene Instance Buffer", sizeof(GPUInstance),
+                                m_InstanceStaging.Data(), m_InstanceStaging.Size() * sizeof(GPUInstance));
+        m_InstanceLodStream.Upload(*m_Device, frameIndex, "GPUScene Instance LOD Table", sizeof(GPULodInfo),
+                                   m_InstanceLodStaging.Data(), m_InstanceLodStaging.Size() * sizeof(GPULodInfo));
+        m_MaterialStream.Upload(*m_Device, frameIndex, "GPUScene Material Buffer", sizeof(GPUMaterial),
+                                m_MaterialStaging.Data(), m_MaterialStaging.Size() * sizeof(GPUMaterial));
+        UploadSchemeParams(frameIndex);
+    }
 }
 
 void GPUScene::BuildBuckets()

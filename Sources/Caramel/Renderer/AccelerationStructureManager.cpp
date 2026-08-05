@@ -8,6 +8,8 @@
 
 #include <Caramel/Core/Logger.hpp>
 #include <Caramel/Core/JobSystem.hpp>
+#include <Caramel/Core/CpuProfiler.hpp>
+#include <Caramel/Core/CVar.hpp>
 #include <Caramel/Asset/StreamingModel.hpp>
 
 #include <glm/glm.hpp>
@@ -15,6 +17,16 @@
 #if defined(CARAMEL_WINDOWS)
     #undef MemoryBarrier
 #endif
+
+namespace
+{
+    // Building BLAS/TLAS is pure overhead until an RT feature actually reads them (see the class
+    // comment) -- at high instance counts RecordTLASBuild alone is tens of ms for zero visual effect,
+    // so this defaults off. Flip it on once something consumes m_TLAS.
+    CVar cv_BuildAccelerationStructures("render.build_acceleration_structures", false,
+        "Build Acceleration Structures", "Raytracing",
+        "Build the scene BLAS/TLAS every frame. No pass reads them yet, so this is pure CPU/compute overhead until an RT feature lands.");
+}
 
 AccelerationStructureManager::AccelerationStructureManager(agfx::Device& device)
     : m_Device(&device)
@@ -62,7 +74,10 @@ void AccelerationStructureManager::WaitForFrameSlot(uint64 frameSlot)
 {
     if (!m_RayTracingSupported)
         return;
-    m_Fence.Wait(m_FenceValue);
+    {
+        CARAMEL_ZONE_WAIT("AccelerationStructureManager Fence Wait");
+        m_Fence.Wait(m_FenceValue);
+    }
 
     if (m_TimingSlotHasData[frameSlot] && !m_TimingSlotNames[frameSlot].IsEmpty())
     {
@@ -90,9 +105,14 @@ void AccelerationStructureManager::Submit(agfx::CommandBuffer& commandBuffer)
     m_ComputeQueue.Signal(m_Fence, ++m_FenceValue);
 }
 
+bool AccelerationStructureManager::ShouldBuild() const
+{
+    return m_RayTracingSupported && *cv_BuildAccelerationStructures.AsBoolPtr();
+}
+
 void AccelerationStructureManager::ScanForNewlyResidentModels(const TArray<RenderInstance>& renderInstances)
 {
-    if (!m_RayTracingSupported)
+    if (!ShouldBuild())
         return;
 
     for (const RenderInstance& instance : renderInstances)
@@ -152,46 +172,58 @@ void AccelerationStructureManager::RecordBLASBuilds(agfx::CommandBuffer& cmd)
 
 void AccelerationStructureManager::RecordTLASBuild(agfx::CommandBuffer& cmd, const TArray<RenderInstance>& renderInstances)
 {
+    CARAMEL_ZONE("AccelerationStructureManager::RecordTLASBuild");
+
     uint32 candidateCount = (uint32)renderInstances.Size();
-    m_PendingInstances.Resize(candidateCount);
+    {
+        CARAMEL_ZONE("Resize Pending Instances");
+        m_PendingInstances.Resize(candidateCount);
+    }
 
     // m_BLASEntries is read-only here -- registration and ready flags were finalized earlier this
     // frame (ScanForNewlyResidentModels / RecordBLASBuilds) -- so the lookups can run in parallel.
     // Instances without a ready BLAS are marked with a null blas and compacted out below.
-    JobSystem::Get().ParallelFor(candidateCount, 256, [&](uint32 start, uint32 end, uint32) {
-        for (uint32 i = start; i < end; ++i)
-        {
-            const RenderInstance& instance = renderInstances[i];
-            agfx::AccelerationStructureInstance& inst = m_PendingInstances[i];
-
-            StreamingModel* model = instance.mesh;
-            auto it = model ? m_BLASEntries.Find(model) : m_BLASEntries.End();
-            if (it == m_BLASEntries.End() || !it->second.ready)
+    {
+        CARAMEL_ZONE("Parallel Instance Fill (dispatch)");
+        JobSystem::Get().ParallelFor(candidateCount, 256, [&](uint32 start, uint32 end, uint32) {
+            CARAMEL_ZONE("Parallel Instance Fill (chunk)");
+            for (uint32 i = start; i < end; ++i)
             {
-                inst.blas = nullptr;
-                continue;
+                const RenderInstance& instance = renderInstances[i];
+                agfx::AccelerationStructureInstance& inst = m_PendingInstances[i];
+
+                StreamingModel* model = instance.mesh;
+                auto it = model ? m_BLASEntries.Find(model) : m_BLASEntries.End();
+                if (it == m_BLASEntries.End() || !it->second.ready)
+                {
+                    inst.blas = nullptr;
+                    continue;
+                }
+
+                // glm is column-major by default; AGFX wants a row-major 3x4.
+                glm::mat4 t = glm::transpose(instance.transform);
+                float rowMajor[12] = {
+                    t[0][0], t[0][1], t[0][2], t[0][3],
+                    t[1][0], t[1][1], t[1][2], t[1][3],
+                    t[2][0], t[2][1], t[2][2], t[2][3],
+                };
+
+                inst.SetBLAS(it->second.blas.Get()).SetTransform(rowMajor).SetUserID(instance.instanceIndex).SetOpaque(true);
             }
-
-            // glm is column-major by default; AGFX wants a row-major 3x4.
-            glm::mat4 t = glm::transpose(instance.transform);
-            float rowMajor[12] = {
-                t[0][0], t[0][1], t[0][2], t[0][3],
-                t[1][0], t[1][1], t[1][2], t[1][3],
-                t[2][0], t[2][1], t[2][2], t[2][3],
-            };
-
-            inst.SetBLAS(it->second.blas.Get()).SetTransform(rowMajor).SetUserID(instance.instanceIndex).SetOpaque(true);
-        }
-    });
+        });
+    }
 
     uint32 liveCount = 0;
-    for (uint32 i = 0; i < candidateCount; ++i)
     {
-        if (!m_PendingInstances[i].blas)
-            continue;
-        if (liveCount != i)
-            m_PendingInstances[liveCount] = m_PendingInstances[i];
-        ++liveCount;
+        CARAMEL_ZONE("Compact Live Instances (serial)");
+        for (uint32 i = 0; i < candidateCount; ++i)
+        {
+            if (!m_PendingInstances[i].blas)
+                continue;
+            if (liveCount != i)
+                m_PendingInstances[liveCount] = m_PendingInstances[i];
+            ++liveCount;
+        }
     }
 
     m_LastTLASInstanceCount = liveCount;
@@ -204,11 +236,15 @@ void AccelerationStructureManager::RecordTLASBuild(agfx::CommandBuffer& cmd, con
         liveCount = m_MaxInstanceCount;
     }
 
-    m_TLAS.ResetInstances();
-    if (liveCount > 0)
-        m_TLAS.AddInstances(m_PendingInstances.Data(), liveCount);
+    {
+        CARAMEL_ZONE("TLAS ResetInstances/AddInstances");
+        m_TLAS.ResetInstances();
+        if (liveCount > 0)
+            m_TLAS.AddInstances(m_PendingInstances.Data(), liveCount);
+    }
 
     {
+        CARAMEL_ZONE("Record TLAS Build Command");
         agfx::ComputePass pass = cmd.BeginComputePass("TLAS Build");
         pass.BuildAccelerationStructure(m_TLAS, m_TLASScratchBuffer);
     }
@@ -218,7 +254,7 @@ void AccelerationStructureManager::RecordTLASBuild(agfx::CommandBuffer& cmd, con
 
 void AccelerationStructureManager::RecordBuilds(agfx::CommandBuffer& cmd, const TArray<RenderInstance>& renderInstances)
 {
-    if (!m_RayTracingSupported)
+    if (!ShouldBuild())
         return;
 
     if (m_TLASNeedsGrow)

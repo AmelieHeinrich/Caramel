@@ -42,5 +42,5 @@ float4 DebugMeshletIDPS(VSOut input, PrimOut prim) : SV_Target {
     float3 lightDir = normalize(float3(1.0f, 1.0f, 1.0f));
     float light = saturate(dot(normal, lightDir)) * 0.5f + 0.5f;
 
-    return light * float4(IdToColor(id), 1.0f);
+    return float4(IdToColor(id), 1.0f);
 }

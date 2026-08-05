@@ -25,6 +25,11 @@ public:
 
     bool IsSupported() const { return m_RayTracingSupported; }
 
+    // True when the device supports raytracing AND the debug toggle to actually build BLAS/TLAS is
+    // on. Building them is otherwise pure overhead -- see the class comment above -- so callers
+    // deciding whether to do the compute-queue work should check this, not IsSupported() alone.
+    bool ShouldBuild() const;
+
     // Waits until the compute queue has executed *every* submitted build, then reads back
     // frameSlot's timing query pool from its last use, if any -- see RenderGraph::Execute's
     // computeQueryPool param and SetLastTimedPassNames below. The wait-all (not just frameSlot's

@@ -96,13 +96,15 @@ GPULodInfo SceneLoadLodInfo(uint instanceLodTable, uint instanceIndex, uint lod)
     return AGFXStructuredBuffer<GPULodInfo>::Create(instanceLodTable).Load(instanceIndex * kLodCount + lod);
 }
 
-// World-space bounding sphere for one meshlet. Uniform-scale assumption: radius is scaled by the
-// length of the transformed local +X axis, so a non-uniformly scaled instance reports a sphere
-// that is too tight along its squashed axes and too loose along its stretched ones.
+// World-space bounding sphere for one meshlet. Radius is scaled by the longest transformed basis
+// axis, so non-uniform scale stays conservative (too loose along squashed axes, never too tight).
 void SceneGetMeshletBoundingSphere(GPUInstance instance, MeshletCullData bounds, out float3 outCenter, out float outRadius) {
     outCenter = mul(instance.mTransform, float4(bounds.vCenter, 1.0)).xyz;
-    float scale = length(mul((float3x3)instance.mTransform, float3(1.0, 0.0, 0.0)));
-    outRadius = bounds.fRadius * scale;
+    float3x3 rs = (float3x3)instance.mTransform;
+    float sx = length(mul(rs, float3(1.0, 0.0, 0.0)));
+    float sy = length(mul(rs, float3(0.0, 1.0, 0.0)));
+    float sz = length(mul(rs, float3(0.0, 0.0, 1.0)));
+    outRadius = bounds.fRadius * max(sx, max(sy, sz));
 }
 
 // World-space normal cone for one meshlet: every triangle in the meshlet faces within fConeCutoff

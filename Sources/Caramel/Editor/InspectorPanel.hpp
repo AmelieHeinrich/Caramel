@@ -22,7 +22,7 @@ public:
     void Draw(EditorContext& context, StreamingManager& streaming);
 
 private:
-    void DrawTransformRow(const char* label, glm::vec3& v, float speed, float resetTo);
+    bool DrawTransformRow(const char* label, glm::vec3& v, float speed, float resetTo);
     void DrawTransformSection(EditorContext& context);
     void DrawMeshTransformSection(EditorContext& context, StreamingManager& streaming);
     void DrawScriptSection(EditorContext& context, StreamingManager& streaming);

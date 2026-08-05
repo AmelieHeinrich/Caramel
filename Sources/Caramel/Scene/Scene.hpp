@@ -27,7 +27,15 @@ public:
 
     void Update(StreamingManager& streamingManager);
 
-    TArray<RenderInstance> BuildRenderInstances(StreamingManager& streamingManager);
+    // Cached: rebuilt only when something that could change its contents has actually happened
+    // (see MarkRenderInstancesDirty). At rest this is just a flag check -- callers that only read
+    // the result (nearly everyone) should hold the reference, not copy it, to keep that free.
+    const TArray<RenderInstance>& BuildRenderInstances(StreamingManager& streamingManager);
+
+    // Invalidates the BuildRenderInstances cache. Called internally for structural edits (add/
+    // remove/reparent, streaming promoting a mesh into an entity); anything else that rewrites a
+    // live Instance's transform after the fact (script bindings, the inspector) must call this too.
+    void MarkRenderInstancesDirty() { m_RenderInstancesDirty = true; }
 
     // Overrides are layered onto the pristine cooked material when GPUScene writes its material
     // buffer each frame -- nothing mutates CPUModel, so there is no "apply" step.
@@ -65,4 +73,7 @@ private:
     TDictionary<uint64, SceneNode*> m_NodesById;
     uint64 m_NextNodeId = 1;
     size_t m_ScannedModelCount = 0;
+
+    bool m_RenderInstancesDirty = true;
+    TArray<RenderInstance> m_CachedRenderInstances;
 };
