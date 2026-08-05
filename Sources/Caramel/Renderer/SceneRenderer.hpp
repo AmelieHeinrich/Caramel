@@ -15,29 +15,53 @@
 
 struct ScenePushConstants;
 
+/// @brief Two-pass HZB occlusion culling at meshlet granularity. Frame order is Cull Early ->
+/// Scene Early -> Build HZB -> Cull Late -> Scene Late. The early pass redraws the meshlets the late
+/// pass marked visible last frame, the pyramid is rebuilt from the depth that produced, and the late
+/// pass re-tests every meshlet of every visible instance against the fresh pyramid, drawing only what
+/// the early pass skipped. Anything that becomes disoccluded therefore appears the same frame rather
+/// than one frame late, and occlusion tests never run against a pyramid from another viewpoint --
+/// see SceneMesh.hlsli's SceneAS and OcclusionCullMeshlet.
 class SceneRenderer
 {
 public:
     SceneRenderer(agfx::Device& device, agfx::TextureFormat colorFormat, agfx::TextureFormat depthFormat, uint32 framesInFlight);
 
-    /// @brief Populates the Opaque indirect bundle for this frame (grow-on-demand, populate compute
-    /// dispatch, PrepareIndirectBundle) and transitions it into IndirectArgument state. Must run in
-    /// its own render-graph pass before Render()'s render pass, on the same command buffer.
-    void PrepareIndirectBundles(agfx::CommandBuffer& cmd, GPUScene& gpuScene, uint32 frameIndex);
+    /// @brief Uploads this frame's camera constants and issues the frozen-frustum debug draw. Must
+    /// run before the render graph is built -- both cull dispatches read what it writes.
+    void BeginFrame(const Camera& camera, uint32 width, uint32 height, uint32 frameIndex);
 
-    void Render(agfx::RenderPass& renderPass, GPUScene& gpuScene,
-                const Camera& camera, uint32 width, uint32 height, uint32 frameIndex);
+    /// @brief Populates bundle regions 0/1 from last frame's visibility flags, and resets all four
+    /// count slots (the late cull appends into the same count buffer without a second reset).
+    void CullEarly(agfx::CommandBuffer& cmd, GPUScene& gpuScene, const HZBResources& hzb, uint32 frameIndex);
+
+    /// @brief Rebuilds the whole depth pyramid from the early pass's depth in a single dispatch.
+    void BuildHZB(agfx::CommandBuffer& cmd, const HZBResources& hzb);
+
+    /// @brief Populates bundle regions 2/3 with everything visible against the fresh pyramid that the
+    /// early pass did not already draw, and refreshes the visibility flags for next frame.
+    void CullLate(agfx::CommandBuffer& cmd, GPUScene& gpuScene, const HZBResources& hzb, uint32 frameIndex);
+
+    void RenderEarly(agfx::RenderPass& renderPass, GPUScene& gpuScene, const HZBResources& hzb, uint32 width, uint32 height, uint32 frameIndex);
+    void RenderLate(agfx::RenderPass& renderPass, GPUScene& gpuScene, const HZBResources& hzb, uint32 width, uint32 height, uint32 frameIndex);
+
+    /// @brief Call when the HZB is recreated (viewport resize): the new pyramid holds garbage and the
+    /// visibility flags describe a projection that no longer exists.
+    void InvalidateOcclusionState();
 
 private:
-    ScenePushConstants BuildPushConstants(GPUScene& gpuScene, uint32 frameIndex) const;
+    ScenePushConstants BuildPushConstants(GPUScene& gpuScene, const HZBResources& hzb, uint32 frameIndex) const;
 
-    /// @brief Execute info for one region of the opaque bundle (0 = single-sided/backface-culling
-    /// pipeline, 1 = double-sided/no-culling). Shared between PrepareIndirectBundle and
-    /// ExecuteIndirectBundle so their pipeline + push constants can never drift (Metal bakes both
+    /// @brief Execute info for one region of the opaque bundle. Shared between PrepareIndirectBundle
+    /// and ExecuteIndirectBundle so their pipeline + push constants can never drift (Metal bakes both
     /// into the ICB at prepare time).
     agfx::IndirectBundleExecuteInfo BuildRegionExecuteInfo(const ScenePushConstants& pc, uint32 region, uint32 frameIndex) const;
 
     void EnsureOpaqueCapacity(uint32 frameIndex, uint32 requiredCount);
+    void EnsureVisibilityCapacity(uint32 requiredCount, uint32 maxMeshletCount);
+
+    /// @brief The half of a cull dispatch that is identical between the two passes.
+    void RecordCullPass(agfx::CommandBuffer& cmd, GPUScene& gpuScene, const HZBResources& hzb, uint32 frameIndex, uint32 pass);
 
     agfx::Device* m_Device;
 
@@ -66,15 +90,49 @@ private:
 
     uint32 m_OpaqueCapacities[FRAMES_IN_FLIGHT] = {};
 
-    // Single persistent zero source used to reset a bundle's count slot every frame (its commands
-    // buffer needs no reset -- see SKILL.md gotcha 7).
+    // Per-instance visibility, one uint per instance. Deliberately *not* per-frame-slot: the whole
+    // point is that frame N's early pass reads what frame N-1's late pass wrote. Within a frame the
+    // early cull overwrites it with what it actually drew, so the late cull can subtract that exactly
+    // instead of re-deriving it.
+    //
+    // GPUScene::Build compacts instances by residency, so an index can change meaning when streaming
+    // state does. Worst case is one frame of misattributed flags, which the late pass corrects the
+    // same frame -- not worth defending against.
+    agfx::Buffer m_InstanceVisibility;
+    agfx::BufferView m_InstanceVisibilityView;
+    uint32 m_VisibilityCapacity = 0;
+
+    // Per-meshlet visibility bits, m_MeshletVisStride words per instance, bit m of word m/32 =
+    // "meshlet m passed every late-pass test last time its instance was emitted late". Same persistent
+    // single-allocation lifecycle as m_InstanceVisibility, and only meaningful together with the
+    // per-instance flags (kInstanceVisBitsLodValid guards LOD changes and staleness).
+    agfx::Buffer m_MeshletVisibility;
+    agfx::BufferView m_MeshletVisibilityView;
+    uint32 m_MeshletVisStride = 0;
+
+    // The downsampler's cross-workgroup ticket counter. Zeroed from m_ZeroBuffer every frame.
+    agfx::Buffer m_HZBCounter;
+    agfx::BufferView m_HZBCounterView;
+
+    // Set until a pyramid has actually been built into the current HZB texture, and until the
+    // visibility flags describe the current instance set. Both reach the shaders as uCullFlags bits
+    // rather than as skipped work: the early cull still dispatches, it just draws nothing and zeroes
+    // the flags, leaving the late pass to rebuild everything from scratch. Skipping the dispatch
+    // outright would also skip its bundle-buffer barriers, which D3D12 rejects at ExecuteIndirect.
+    bool m_HZBValid = false;
+    bool m_VisibilityDirty = true;
+
+    // Single persistent zero source used to reset the bundle's count slots and the downsampler's
+    // counter every frame (the commands buffer needs no reset -- see SKILL.md gotcha 7).
     agfx::Buffer m_ZeroBuffer;
 
     // Every FrameConstants field the camera drives, held in place while scene.freeze_frustum is on
     // instead of tracking the live camera every frame -- everything except viewProjection, which
-    // Render() always recomputes live so the scene still renders correctly from wherever the editor
+    // BeginFrame always recomputes live so the scene still renders correctly from wherever the editor
     // camera currently is. That split is what lets contribution/frustum/cone culling be inspected
     // from outside the frozen viewpoint: culling reads the frozen fields, rendering reads the live one.
+    // Occlusion culling is the exception -- it must project with the camera the pyramid it samples was
+    // rasterized from, which is m_HZBViewProjection below, not any of these.
     glm::mat4 m_FrozenView{ 1.0f };
     glm::mat4 m_FrozenProjection{ 1.0f };
     glm::mat4 m_FrozenInvView{ 1.0f };
@@ -85,7 +143,6 @@ private:
     float m_FrozenNearPlane = 0.0f;
     float m_FrozenFarPlane = 0.0f;
 
-    // The frozen frustum's own view*projection, used only to debug-draw its wireframe -- distinct
-    // from the live viewProjection uploaded to the GPU for actual rendering.
     glm::mat4 m_FrozenFrustumViewProjection{ 1.0f };
+    glm::mat4 m_HZBViewProjection{ 1.0f };
 };

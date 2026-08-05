@@ -144,6 +144,10 @@ public:
     uint64 GetPreCullMeshletCount() const { return m_PreCullMeshlets; }
     uint64 GetPreCullTriangleCount() const { return m_PreCullTriangles; }
 
+    /// @brief Largest meshlet count any (instance, LOD) pair in this frame's build can dispatch --
+    /// sizes the per-instance stride of the renderer's meshlet visibility bitfield.
+    uint32 GetMaxMeshletCount() const { return m_MaxMeshletCount; }
+
     /// @brief CPU-side view of this frame's compacted instance buffer (transform + local bounds),
     /// e.g. for debug-drawing instance AABBs.
     const TArray<GPUInstance>& GetInstances() const { return m_InstanceStaging; }
@@ -173,6 +177,29 @@ private:
     /// @brief Groups the sorted draw list into material batches and scheme buckets.
     void BuildBuckets();
 
+    // One resident instance surviving Build's serial filter phase, everything the parallel fill
+    // phase needs without touching shared mutable state.
+    struct BuildItem
+    {
+        const RenderInstance* instance = nullptr;
+        uint32 lod = 0;
+        uint32 meshletCount = 0;
+        uint32 materialSlot = 0;
+    };
+
+    // First instance seen using a slot this frame -- WriteMaterial runs once per slot, not once per
+    // instance (texture handles are volatile, so it still runs every frame).
+    struct MaterialWrite
+    {
+        uint32 slot = 0;
+        StreamingModel* model = nullptr;
+        const MaterialOverride* activeOverride = nullptr;
+    };
+
+    TArray<BuildItem> m_BuildItems;
+    TArray<MaterialWrite> m_MaterialWrites;
+    TArray<uint8> m_SlotWrittenThisBuild;
+
     void UploadSchemeParams(uint32 frameIndex);
 
     agfx::Device* m_Device = nullptr;
@@ -192,6 +219,7 @@ private:
     TArray<GPUDraw> m_Draws;
     uint64 m_PreCullMeshlets = 0;
     uint64 m_PreCullTriangles = 0;
+    uint32 m_MaxMeshletCount = 0;
     TArray<MaterialBatch> m_Batches;
     TArray<SchemeBucket> m_Buckets;
 

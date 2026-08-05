@@ -10,59 +10,69 @@
 #include <Caramel/Renderer/DebugRenderer.hpp>
 #include <Caramel/Core/CVar.hpp>
 
-#include <cfloat>
 #include <cstring>
 
 namespace
 {
-    // Off (default): color by a hash of (instance, meshlet) ID. On: color by a hash of
-    // (instance, meshlet, triangle) ID instead, for inspecting individual triangles within a
-    // meshlet rather than the meshlet as a whole.
-    CVar cv_ShowPrimitiveID("scene.show_primitive_id", false, "Show Primitive ID", "Scene Renderer",
-        "Color by triangle (primitive) ID instead of the default per-meshlet ID");
-
-    // Off (default): color by a hash of (instance, meshlet[, triangle]) ID. On: color by the
-    // selected LOD instead (see DebugMeshletID.hlsl's LODToColor) -- ground truth for whether
-    // PopulateOpaqueIndirectBundleCS's distance-based LOD selection is actually changing which
-    // meshlet/vertex/triangle buffers get read, independent of triangle density being hard to
-    // eyeball at a glance.
-    CVar cv_ShowSelectedLOD("scene.show_selected_lod", false, "Show Selected LOD", "Scene Renderer",
-        "Color by the GPU-selected LOD (red=0/coarsest .. magenta=4/finest) instead of meshlet ID");
+    // Off: nothing is culled at all -- every instance is submitted and every meshlet reaches the mesh
+    // shader. The ground truth to diff against when something disappears that should not have.
+    CVar cv_EnableCulling("scene.enable_culling", true, "Enable Culling", "Scene Renderer",
+        "Instance frustum/occlusion culling and meshlet frustum/cone/contribution/occlusion culling");
 
     // Off (default): every camera-driven FrameConstants field tracks the live camera every frame.
     // On: all of them freeze at whatever the camera was the moment this was turned on -- view,
     // projection, their inverses, frustum planes, camera position, near/far -- except
     // viewProjection, which keeps tracking the live camera so the scene still renders from wherever
-    // you fly to. That lets frustum, cone, and (eventually) contribution culling all be inspected
-    // from outside the frozen viewpoint instead of just the debug-drawn frustum shape.
+    // you fly to. That lets frustum and cone culling be inspected from outside the frozen viewpoint
+    // instead of just the debug-drawn frustum shape. Occlusion culling is unaffected by design: it
+    // projects with hzbViewProjection, the camera the pyramid was actually rasterized from.
     CVar cv_FreezeFrustum("scene.freeze_frustum", false, "Freeze Frustum", "Scene Renderer",
         "Stop updating the camera data culling reads (frustum, position, view/projection) and debug-draw the frustum frozen in place");
 
-    // Off (default): no instance-bounds overlay. On: debug-draw every scene instance's world-space
-    // AABB, letting frustum-culling bugs (e.g. instances vanishing that should be visible) be
-    // inspected visually against the frustum drawn by scene.freeze_frustum.
-    CVar cv_ShowInstanceAABBs("scene.show_instance_aabbs", false, "Show Instance AABBs", "Scene Renderer",
-        "Debug-draw the world-space AABB of every instance in the scene");
+    // Which hash DebugMeshletID.hlsl colors by.
+    CVar cv_DebugId("scene.debug_id", 0, 0, 2, "Debug ID", "Scene Renderer",
+        "Color by 0 = meshlet ID, 1 = primitive (triangle) ID, 2 = instance ID");
 
-    // Distance (world units) from the camera at which the finest LOD begins stepping down; each
-    // further boundary scales by scene.lod_distance_multiplier (geometric falloff). No hysteresis --
-    // recomputed fresh every frame in PopulateOpaqueIndirectBundleCS.
-    CVar cv_LodBaseDistance("scene.lod_base_distance", 20.0f, 0.0f, 100000.0f, "LOD Base Distance", "Scene Renderer",
-        "Distance from the camera at which the finest LOD starts dropping a level");
-
-    CVar cv_LodDistanceMultiplier("scene.lod_distance_multiplier", 2.0f, 1.01f, 10.0f, "LOD Distance Multiplier", "Scene Renderer",
-        "Geometric falloff applied to scene.lod_base_distance for each successive LOD boundary");
+    // Off: the depth pyramid stops being rebuilt and freezes at whatever it last held, together with
+    // the viewProjection occlusion tests project bounds with (hzbViewProjection). Every occlusion
+    // decision is then made from the frozen viewpoint, so flying away reveals over-culling as holes
+    // anchored in world space behind the old occluders.
+    CVar cv_BuildHZB("scene.build_hzb", true, "Build HZB", "Scene Renderer",
+        "Rebuild the depth pyramid every frame. Off freezes it in place for debugging occlusion culling");
 
     constexpr const char* kDebugMeshletIDShaderPath = "Content/Shaders/DebugMeshletID.hlsl";
     constexpr const char* kDebugMeshletIDTwoSidedShaderPath = "Content/Shaders/DebugMeshletIDTwoSided.hlsl";
     constexpr const char* kPopulateOpaqueIndirectBundleShaderPath = "Content/Shaders/PopulateOpaqueIndirectBundle.hlsl";
+    constexpr const char* kBuildHZBShaderPath = "Content/Shaders/BuildHZB.hlsl";
 
     constexpr uint32 kPopulateThreadGroupSize = 64;
-    // Opaque bundle regions: 0 = single-sided (CullMode::Back), 1 = double-sided (CullMode::None).
-    constexpr uint32 kOpaqueRegionCount = 2;
+    // The downsampler's group owns a 64x64 tile of HZB mip 0. Mirrors kHZBTileSize in BuildHZB.hlsl.
+    constexpr uint32 kHZBTileSize = 64;
+
+    // Opaque bundle regions: region = pass * 2 + doubleSided, so 0/1 are the early pass
+    // (CullMode::Back / CullMode::None) and 2/3 the late pass.
+    constexpr uint32 kOpaqueRegionCount = 4;
+    constexpr uint32 kPassEarly = 0;
+    constexpr uint32 kPassLate = 1;
+
+    constexpr uint32 kCullFlagEnabled = 1u;
+    constexpr uint32 kCullFlagHZBValid = 2u;
+    // Bit 2 means something different per consumer: "visibility flags are trustworthy" in the populate
+    // shader's block, "this region belongs to the late pass" in SceneAS's. Bits 0/1 are shared via
+    // the copy in RecordCullPass, so bit 2 must only ever be set at each consumer's build site --
+    // never in BuildPushConstants, which feeds both.
+    constexpr uint32 kCullFlagVisibilityValid = 4u;
+    constexpr uint32 kSceneCullFlagLatePass = 4u;
+
     // Translucent/Deferred bundles are unused until the forward/deferred passes exist -- a small
     // nominal capacity is enough to keep them real, usable objects for now.
     constexpr uint32 kNominalUnusedBundleCapacity = 1024;
+
+    // Distance (world units) from the camera at which the finest LOD begins stepping down; each
+    // further boundary scales geometrically. No hysteresis -- recomputed fresh every frame in
+    // PopulateOpaqueIndirectBundleCS.
+    constexpr float32 kLodBaseDistance = 20.0f;
+    constexpr float32 kLodDistanceMultiplier = 2.0f;
 
     struct FrameConstants
     {
@@ -77,6 +87,7 @@ namespace
         float nearPlane;
         float farPlane;
         glm::vec3 pad;
+        glm::mat4 hzbViewProjection;
     };
 
     // Mirrors PopulatePushConstants in Content/Shaders/PopulateOpaqueIndirectBundle.hlsl.
@@ -93,6 +104,30 @@ namespace
         float32 fLodDistanceMultiplier;
         uint32 rMaterialBuffer;
         uint32 uRegionCapacity;
+        uint32 uPass;
+        uint32 rVisibilityBuffer;
+        uint32 uCullFlags;
+        uint32 rHZB;
+        uint32 uHZBWidth;
+        uint32 uHZBHeight;
+        uint32 uHZBMipCount;
+    };
+
+    // Mirrors BuildHZBPushConstants in Content/Shaders/BuildHZB.hlsl. The mip handles are a uint4[4]
+    // there because constant-buffer arrays pad every element to 16 bytes; as a flat uint[16] on this
+    // side the bytes line up exactly.
+    struct BuildHZBPushConstants
+    {
+        uint32 rSrcDepth;
+        uint32 rCounter;
+        uint32 pad0[2];
+        uint32 rHZBMips[16];
+        uint32 uSrcDepthWidth;
+        uint32 uSrcDepthHeight;
+        uint32 uHZBWidth;
+        uint32 uHZBHeight;
+        uint32 uMipCount;
+        uint32 uNumWorkGroups;
     };
 }
 
@@ -109,10 +144,18 @@ struct ScenePushConstants
     uint32 rDrawIndirection;
     uint32 rSampler;
     uint32 rFallbackTexture;
-    uint32 uDebugFlags;
+    uint32 uDebugId;
     uint32 rInstanceLodTable;
     uint32 rSelectedLodBuffer;
     uint32 uDrawIndirectionBase;
+    uint32 uCullFlags;
+    uint32 rHZB;
+    uint32 uHZBWidth;
+    uint32 uHZBHeight;
+    uint32 uHZBMipCount;
+    uint32 rInstanceVisibility;
+    uint32 rMeshletVisibility;
+    uint32 uMeshletVisStride;
 };
 
 SceneRenderer::SceneRenderer(agfx::Device& device, agfx::TextureFormat colorFormat, agfx::TextureFormat depthFormat, uint32 framesInFlight)
@@ -136,7 +179,7 @@ SceneRenderer::SceneRenderer(agfx::Device& device, agfx::TextureFormat colorForm
                      .AddColorAttachment(colorFormat);
     ShaderServer::RegisterRenderPipeline(debugPipelineInfo, kDebugMeshletIDShaderPath);
 
-    // Same shader, no backface culling -- replays the double-sided region of the opaque bundle
+    // Same shader, no backface culling -- replays the double-sided regions of the opaque bundle
     // (double-sided materials legitimately show their back faces).
     agfx::RenderPipelineCreateInfo twoSidedPipelineInfo = debugPipelineInfo;
     twoSidedPipelineInfo.SetName("Scene Debug Meshlet ID Two-Sided Pipeline")
@@ -146,6 +189,10 @@ SceneRenderer::SceneRenderer(agfx::Device& device, agfx::TextureFormat colorForm
     agfx::ComputePipelineCreateInfo populatePipelineInfo;
     populatePipelineInfo.SetName("Populate Opaque Indirect Bundle Pipeline");
     ShaderServer::RegisterComputePipeline(populatePipelineInfo, kPopulateOpaqueIndirectBundleShaderPath);
+
+    agfx::ComputePipelineCreateInfo buildHZBPipelineInfo;
+    buildHZBPipelineInfo.SetName("Build HZB Pipeline");
+    ShaderServer::RegisterComputePipeline(buildHZBPipelineInfo, kBuildHZBShaderPath);
 
     for (uint32 i = 0; i < framesInFlight; ++i)
     {
@@ -176,6 +223,26 @@ SceneRenderer::SceneRenderer(agfx::Device& device, agfx::TextureFormat colorForm
         agfx::MappedBuffer mapped(m_ZeroBuffer);
         std::memset(mapped.Get(), 0, kOpaqueRegionCount * sizeof(uint32));
     }
+
+    agfx::BufferCreateInfo counterInfo;
+    counterInfo.SetSize(sizeof(uint32))
+               .SetStride(sizeof(uint32))
+               .SetUsage(agfx::BufferUsage::ShaderRead | agfx::BufferUsage::ShaderWrite)
+               .SetMemoryType(agfx::BufferMemoryType::GPUOnly);
+    m_HZBCounter = m_Device->CreateBuffer(counterInfo);
+    m_HZBCounter.SetName("HZB Downsampler Counter");
+
+    agfx::BufferViewCreateInfo counterViewInfo;
+    counterViewInfo.SetBuffer(m_HZBCounter.Get()).SetType(agfx::BufferViewType::Raw).SetOffset(0).SetWriteable(true);
+    m_HZBCounterView = m_Device->CreateBufferView(counterViewInfo);
+
+    m_Device->MakeResourcesResident();
+}
+
+void SceneRenderer::InvalidateOcclusionState()
+{
+    m_HZBValid = false;
+    m_VisibilityDirty = true;
 }
 
 void SceneRenderer::EnsureOpaqueCapacity(uint32 frameIndex, uint32 requiredCount)
@@ -187,8 +254,8 @@ void SceneRenderer::EnsureOpaqueCapacity(uint32 frameIndex, uint32 requiredCount
     // mirroring StreamBuffer::Reserve.
     uint32 newCapacity = requiredCount + requiredCount / 2 + 256;
 
-    // Two regions share the commands buffer (SKILL.md gotcha 4): [0, newCapacity) single-sided
-    // draws counted in slot 0, [newCapacity, 2 * newCapacity) double-sided draws counted in slot 1.
+    // The four regions share the commands buffer (SKILL.md gotcha 4): region r occupies
+    // [r * newCapacity, (r + 1) * newCapacity) and is counted in slot r.
     m_OpaqueBundles[frameIndex] = m_Device->CreateIndirectBundle(agfx::IndirectBundleCreateInfo()
         .SetType(agfx::IndirectBundleType::DrawMesh)
         .SetMaxCommandCount(newCapacity * kOpaqueRegionCount)
@@ -222,7 +289,52 @@ void SceneRenderer::EnsureOpaqueCapacity(uint32 frameIndex, uint32 requiredCount
     m_Device->MakeResourcesResident();
 }
 
-ScenePushConstants SceneRenderer::BuildPushConstants(GPUScene& gpuScene, uint32 frameIndex) const
+void SceneRenderer::EnsureVisibilityCapacity(uint32 requiredCount, uint32 maxMeshletCount)
+{
+    uint32 requiredStride = (maxMeshletCount + 31) / 32;
+    if (requiredStride == 0)
+        requiredStride = 1;
+
+    if (requiredCount <= m_VisibilityCapacity && requiredStride <= m_MeshletVisStride)
+        return;
+
+    uint32 newCapacity = m_VisibilityCapacity;
+    if (requiredCount > newCapacity)
+        newCapacity = requiredCount + requiredCount / 2 + 256;
+    uint32 newStride = requiredStride > m_MeshletVisStride ? requiredStride : m_MeshletVisStride;
+
+    agfx::BufferCreateInfo visibilityInfo;
+    visibilityInfo.SetSize((uint64)newCapacity * sizeof(uint32))
+                  .SetStride(sizeof(uint32))
+                  .SetUsage(agfx::BufferUsage::ShaderRead | agfx::BufferUsage::ShaderWrite)
+                  .SetMemoryType(agfx::BufferMemoryType::GPUOnly);
+    m_InstanceVisibility = m_Device->CreateBuffer(visibilityInfo);
+    m_InstanceVisibility.SetName("Opaque Instance Visibility");
+
+    agfx::BufferViewCreateInfo visibilityViewInfo;
+    visibilityViewInfo.SetBuffer(m_InstanceVisibility.Get()).SetType(agfx::BufferViewType::Structured).SetOffset(0).SetWriteable(true);
+    m_InstanceVisibilityView = m_Device->CreateBufferView(visibilityViewInfo);
+
+    agfx::BufferCreateInfo meshletVisInfo;
+    meshletVisInfo.SetSize((uint64)newCapacity * newStride * sizeof(uint32))
+                  .SetStride(sizeof(uint32))
+                  .SetUsage(agfx::BufferUsage::ShaderRead | agfx::BufferUsage::ShaderWrite)
+                  .SetMemoryType(agfx::BufferMemoryType::GPUOnly);
+    m_MeshletVisibility = m_Device->CreateBuffer(meshletVisInfo);
+    m_MeshletVisibility.SetName("Opaque Meshlet Visibility");
+
+    agfx::BufferViewCreateInfo meshletVisViewInfo;
+    meshletVisViewInfo.SetBuffer(m_MeshletVisibility.Get()).SetType(agfx::BufferViewType::Raw).SetOffset(0).SetWriteable(true);
+    m_MeshletVisibilityView = m_Device->CreateBufferView(meshletVisViewInfo);
+
+    m_VisibilityCapacity = newCapacity;
+    m_MeshletVisStride = newStride;
+    // The fresh allocations hold nothing meaningful, so the early pass must ignore them.
+    m_VisibilityDirty = true;
+    m_Device->MakeResourcesResident();
+}
+
+ScenePushConstants SceneRenderer::BuildPushConstants(GPUScene& gpuScene, const HZBResources& hzb, uint32 frameIndex) const
 {
     ScenePushConstants pc{};
     pc.rFrameConstants = (uint32)m_CameraBufferViews[frameIndex].GetHandle();
@@ -232,9 +344,18 @@ ScenePushConstants SceneRenderer::BuildPushConstants(GPUScene& gpuScene, uint32 
     pc.rDrawIndirection = (uint32)m_OpaqueDrawIndirectionViews[frameIndex].GetHandle();
     pc.rSampler = (uint32)m_Sampler.GetHandle();
     pc.rFallbackTexture = gpuScene.GetFallbackTextureHandle();
-    pc.uDebugFlags = (*cv_ShowPrimitiveID.AsBoolPtr() ? 1u : 0u) | (*cv_ShowSelectedLOD.AsBoolPtr() ? 2u : 0u);
+    pc.uDebugId = (uint32)*cv_DebugId.AsIntPtr();
     pc.rInstanceLodTable = (uint32)gpuScene.GetInstanceLodTableView(frameIndex).GetHandle();
     pc.rSelectedLodBuffer = (uint32)m_SelectedLodViews[frameIndex].GetHandle();
+    pc.uCullFlags = (*cv_EnableCulling.AsBoolPtr() ? kCullFlagEnabled : 0u)
+                  | (m_HZBValid ? kCullFlagHZBValid : 0u);
+    pc.rHZB = hzb.hzbHandle;
+    pc.uHZBWidth = hzb.width;
+    pc.uHZBHeight = hzb.height;
+    pc.uHZBMipCount = hzb.mipCount;
+    pc.rInstanceVisibility = (uint32)m_InstanceVisibilityView.GetHandle();
+    pc.rMeshletVisibility = (uint32)m_MeshletVisibilityView.GetHandle();
+    pc.uMeshletVisStride = m_MeshletVisStride;
     return pc;
 }
 
@@ -245,10 +366,15 @@ agfx::IndirectBundleExecuteInfo SceneRenderer::BuildRegionExecuteInfo(const Scen
 {
     uint32 capacity = m_OpaqueCapacities[frameIndex];
     agfx::RenderPipeline* pipeline = ShaderServer::GetPipeline(
-        region == 0 ? kDebugMeshletIDShaderPath : kDebugMeshletIDTwoSidedShaderPath, {});
+        (region & 1u) ? kDebugMeshletIDTwoSidedShaderPath : kDebugMeshletIDShaderPath, {});
 
     ScenePushConstants regionPC = pc;
     regionPC.uDrawIndirectionBase = region * capacity;
+    // Late regions occlusion-cull meshlets against the fresh pyramid, rewrite the meshlet visibility
+    // bits, and draw only what the early pass skipped; early regions draw last frame's visible
+    // meshlets and never occlusion-cull. See SceneAS.
+    if (region / 2 == kPassLate)
+        regionPC.uCullFlags |= kSceneCullFlagLatePass;
 
     agfx::IndirectBundleExecuteInfo info;
     info.SetCountIndex(region)
@@ -258,26 +384,33 @@ agfx::IndirectBundleExecuteInfo SceneRenderer::BuildRegionExecuteInfo(const Scen
     return info;
 }
 
-void SceneRenderer::PrepareIndirectBundles(agfx::CommandBuffer& cmd, GPUScene& gpuScene, uint32 frameIndex)
+void SceneRenderer::RecordCullPass(agfx::CommandBuffer& cmd, GPUScene& gpuScene, const HZBResources& hzb, uint32 frameIndex, uint32 pass)
 {
     uint32 count = gpuScene.GetInstanceCount();
     if (count == 0)
         return;
 
-    agfx::ComputePipeline* populatePipeline = ShaderServer::GetComputePipeline(kPopulateOpaqueIndirectBundleShaderPath);
-    if (!populatePipeline)
-        return;
-
     EnsureOpaqueCapacity(frameIndex, count);
+    EnsureVisibilityCapacity(count, gpuScene.GetMaxMeshletCount());
 
     agfx::IndirectBundle& bundle = m_OpaqueBundles[frameIndex];
-    ScenePushConstants pc = BuildPushConstants(gpuScene, frameIndex);
-    agfx::IndirectBundleExecuteInfo regionInfos[kOpaqueRegionCount];
-    for (uint32 region = 0; region < kOpaqueRegionCount; ++region)
+    ScenePushConstants pc = BuildPushConstants(gpuScene, hzb, frameIndex);
+
+    // A pipeline can be momentarily missing while the shader watcher recompiles it. That must not
+    // skip the count reset or the barriers below -- the render passes replay this bundle regardless,
+    // and a count buffer left in COPY_DEST with no per-resource barrier on it is exactly what D3D12
+    // rejects at ExecuteIndirect (it falls back to legacy state tracking for resources an enhanced
+    // barrier never touched). Missing pipelines only skip the work that needs them.
+    agfx::ComputePipeline* populatePipeline = ShaderServer::GetComputePipeline(kPopulateOpaqueIndirectBundleShaderPath);
+
+    // Only the two regions this pass owns.
+    agfx::IndirectBundleExecuteInfo regionInfos[2];
+    bool haveRegionPipelines = true;
+    for (uint32 side = 0; side < 2; ++side)
     {
-        regionInfos[region] = BuildRegionExecuteInfo(pc, region, frameIndex);
-        if (!regionInfos[region].renderPipeline)
-            return;
+        regionInfos[side] = BuildRegionExecuteInfo(pc, pass * 2 + side, frameIndex);
+        if (!regionInfos[side].renderPipeline)
+            haveRegionPipelines = false;
     }
 
     // WAR: the previous use of this frame slot's bundle may still be replaying on the GPU when this
@@ -286,90 +419,161 @@ void SceneRenderer::PrepareIndirectBundles(agfx::CommandBuffer& cmd, GPUScene& g
     cmd.MemoryBarrier(agfx::ResourceState::IndirectArgument, agfx::ResourceState::UnorderedAccess);
 
     {
-        agfx::ComputePass pass = cmd.BeginComputePass("Populate Opaque Indirect Bundle");
+        agfx::ComputePass computePass = cmd.BeginComputePass(pass == kPassEarly ? "Cull Early" : "Cull Late");
 
-        // Only the count slots need resetting every frame -- stale commands beyond the live counts
-        // are never executed (SKILL.md gotcha 7).
-        agfxComputePassCopyBufferToBuffer(pass, m_ZeroBuffer, bundle.CountBuffer(), 0, 0, kOpaqueRegionCount * sizeof(uint32));
-        cmd.MemoryBarrier(agfx::ResourceState::CopyDest, agfx::ResourceState::UnorderedAccess);
+        if (pass == kPassEarly)
+        {
+            // All four slots, not just this pass's two: the late cull appends into the same count
+            // buffer and must not reset it, or it would drop the early pass's draws. Stale commands
+            // beyond the live counts are never executed (SKILL.md gotcha 7).
+            agfxComputePassCopyBufferToBuffer(computePass, m_ZeroBuffer, bundle.CountBuffer(), 0, 0, kOpaqueRegionCount * sizeof(uint32));
+            cmd.MemoryBarrier(agfx::ResourceState::CopyDest, agfx::ResourceState::UnorderedAccess);
+        }
 
-        PopulatePushConstants populatePC{};
-        populatePC.rInstanceBuffer = pc.rInstanceBuffer;
-        populatePC.uInstanceCount = count;
-        populatePC.uBundleHandle = bundle.GetHandle();
-        populatePC.rDrawIndirection = pc.rDrawIndirection;
-        populatePC.rFrameConstants = pc.rFrameConstants;
-        populatePC.rInstanceLodTable = pc.rInstanceLodTable;
-        populatePC.rSelectedLodBuffer = pc.rSelectedLodBuffer;
-        populatePC.fLodBaseDistance = *cv_LodBaseDistance.AsFloatPtr();
-        populatePC.fLodDistanceMultiplier = *cv_LodDistanceMultiplier.AsFloatPtr();
-        populatePC.rMaterialBuffer = pc.rMaterialBuffer;
-        populatePC.uRegionCapacity = m_OpaqueCapacities[frameIndex];
+        if (populatePipeline)
+        {
+            PopulatePushConstants populatePC{};
+            populatePC.rInstanceBuffer = pc.rInstanceBuffer;
+            populatePC.uInstanceCount = count;
+            populatePC.uBundleHandle = bundle.GetHandle();
+            populatePC.rDrawIndirection = pc.rDrawIndirection;
+            populatePC.rFrameConstants = pc.rFrameConstants;
+            populatePC.rInstanceLodTable = pc.rInstanceLodTable;
+            populatePC.rSelectedLodBuffer = pc.rSelectedLodBuffer;
+            populatePC.fLodBaseDistance = kLodBaseDistance;
+            populatePC.fLodDistanceMultiplier = kLodDistanceMultiplier;
+            populatePC.rMaterialBuffer = pc.rMaterialBuffer;
+            populatePC.uRegionCapacity = m_OpaqueCapacities[frameIndex];
+            populatePC.uPass = pass;
+            populatePC.rVisibilityBuffer = (uint32)m_InstanceVisibilityView.GetHandle();
+            populatePC.uCullFlags = pc.uCullFlags | (m_VisibilityDirty ? 0u : kCullFlagVisibilityValid);
+            populatePC.rHZB = pc.rHZB;
+            populatePC.uHZBWidth = pc.uHZBWidth;
+            populatePC.uHZBHeight = pc.uHZBHeight;
+            populatePC.uHZBMipCount = pc.uHZBMipCount;
 
-        pass.SetPipeline(*populatePipeline);
-        pass.PushConstants(populatePC);
-        pass.Dispatch((count + kPopulateThreadGroupSize - 1) / kPopulateThreadGroupSize, 1, 1);
+            computePass.SetPipeline(*populatePipeline);
+            computePass.PushConstants(populatePC);
+            computePass.Dispatch((count + kPopulateThreadGroupSize - 1) / kPopulateThreadGroupSize, 1, 1);
+        }
 
-        // The prepare step below reads what the populate dispatch just wrote.
-        pass.BufferUAVBarrier(bundle.CommandsBuffer());
-        pass.BufferUAVBarrier(bundle.CountBuffer());
+        // The prepare step below reads what the populate dispatch just wrote. Emitted unconditionally:
+        // these are the only per-resource barriers either bundle buffer ever gets, and D3D12 needs to
+        // have seen one before it will honour the global UnorderedAccess -> IndirectArgument
+        // transition at ExecuteIndirect instead of assuming a legacy state.
+        computePass.BufferUAVBarrier(bundle.CommandsBuffer());
+        computePass.BufferUAVBarrier(bundle.CountBuffer());
 
         // No-op on D3D12/Vulkan; builds the Metal ICB. Push constants/pipeline must match the
         // execute call exactly -- Metal bakes them into the ICB at this point (SKILL.md gotcha 2).
-        for (uint32 region = 0; region < kOpaqueRegionCount; ++region)
-            pass.PrepareIndirectBundle(bundle, regionInfos[region]);
+        if (haveRegionPipelines)
+        {
+            for (uint32 side = 0; side < 2; ++side)
+                computePass.PrepareIndirectBundle(bundle, regionInfos[side]);
+        }
     }
 
     cmd.MemoryBarrier(agfx::ResourceState::UnorderedAccess, agfx::ResourceState::IndirectArgument);
 
-    // Populate just wrote m_SelectedLod via a UAV; SceneAS reads it as a plain structured-buffer SRV
-    // in the render pass's task-shader stage, which is a *different* consumer sync scope than
-    // IndirectArgument above -- that needs its own MemoryBarrier call, not reuse of the bundle's.
+    // Populate just wrote m_SelectedLod and m_InstanceVisibility via UAVs; SceneAS reads the former
+    // as a plain structured-buffer SRV in the render pass's task-shader stage, and the late cull
+    // reads the latter, which is a *different* consumer sync scope than IndirectArgument above --
+    // that needs its own MemoryBarrier call, not reuse of the bundle's.
     cmd.MemoryBarrier(agfx::ResourceState::UnorderedAccess, agfx::ResourceState::NonPixelShaderResource);
+
+    if (pass == kPassLate)
+        m_VisibilityDirty = false;
 }
 
-void SceneRenderer::Render(agfx::RenderPass& renderPass, GPUScene& gpuScene,
-                           const Camera& camera, uint32 width, uint32 height, uint32 frameIndex)
+void SceneRenderer::CullEarly(agfx::CommandBuffer& cmd, GPUScene& gpuScene, const HZBResources& hzb, uint32 frameIndex)
 {
-    uint32 count = gpuScene.GetInstanceCount();
-    if (count == 0)
+    RecordCullPass(cmd, gpuScene, hzb, frameIndex, kPassEarly);
+}
+
+void SceneRenderer::CullLate(agfx::CommandBuffer& cmd, GPUScene& gpuScene, const HZBResources& hzb, uint32 frameIndex)
+{
+    RecordCullPass(cmd, gpuScene, hzb, frameIndex, kPassLate);
+}
+
+void SceneRenderer::BuildHZB(agfx::CommandBuffer& cmd, const HZBResources& hzb)
+{
+    if (!*cv_BuildHZB.AsBoolPtr())
         return;
 
+    agfx::ComputePipeline* pipeline = ShaderServer::GetComputePipeline(kBuildHZBShaderPath);
+    if (!pipeline)
+        return;
+
+    uint32 groupsX = (hzb.width + kHZBTileSize - 1) / kHZBTileSize;
+    uint32 groupsY = (hzb.height + kHZBTileSize - 1) / kHZBTileSize;
+
+    BuildHZBPushConstants pc{};
+    pc.rSrcDepth = hzb.depthHandle;
+    pc.rCounter = (uint32)m_HZBCounterView.GetHandle();
+    for (uint32 mip = 0; mip < 16; ++mip)
+        pc.rHZBMips[mip] = hzb.mipHandles[mip < kMaxHZBMips ? mip : kMaxHZBMips - 1];
+    pc.uSrcDepthWidth = hzb.depthWidth;
+    pc.uSrcDepthHeight = hzb.depthHeight;
+    pc.uHZBWidth = hzb.width;
+    pc.uHZBHeight = hzb.height;
+    pc.uMipCount = hzb.mipCount;
+    pc.uNumWorkGroups = groupsX * groupsY;
+
     {
-        float aspectRatio = height != 0 ? (float)width / (float)height : 1.0f;
+        agfx::ComputePass computePass = cmd.BeginComputePass("Build HZB");
 
-        FrameConstants constants;
-        // Always live: this is the only field SceneMS actually reads to place geometry on screen,
-        // so it has to keep tracking the real camera even while everything else below is frozen --
-        // otherwise flying away from a frozen frustum to inspect culling would freeze the view too.
-        constants.viewProjection = camera.GetViewProjection(aspectRatio);
+        // The ticket counter decides which group finishes the bottom of the pyramid, so it has to
+        // start at zero every frame. It is a single buffer shared across frame slots and the previous
+        // frame's dispatch left it in UnorderedAccess, so the copy needs its own transition first.
+        cmd.MemoryBarrier(agfx::ResourceState::UnorderedAccess, agfx::ResourceState::CopyDest);
+        agfxComputePassCopyBufferToBuffer(computePass, m_ZeroBuffer, m_HZBCounter, 0, 0, sizeof(uint32));
+        cmd.MemoryBarrier(agfx::ResourceState::CopyDest, agfx::ResourceState::UnorderedAccess);
 
-        if (!*cv_FreezeFrustum.AsBoolPtr())
-        {
-            m_FrozenView = camera.GetView();
-            m_FrozenProjection = camera.GetProjection(aspectRatio);
-            m_FrozenInvView = glm::inverse(m_FrozenView);
-            m_FrozenInvProjection = glm::inverse(m_FrozenProjection);
-            m_FrozenInvViewProjection = glm::inverse(constants.viewProjection);
-            camera.GetFrustumPlanes(aspectRatio, m_FrozenFrustumPlanes);
-            m_FrozenFrustumViewProjection = constants.viewProjection;
-            m_FrozenCameraPosition = camera.GetPosition();
-            m_FrozenNearPlane = camera.GetNearPlane();
-            m_FrozenFarPlane = camera.GetFarPlane();
-        }
-
-        constants.view = m_FrozenView;
-        constants.projection = m_FrozenProjection;
-        constants.invView = m_FrozenInvView;
-        constants.invProjection = m_FrozenInvProjection;
-        constants.invViewProjection = m_FrozenInvViewProjection;
-        std::memcpy(constants.frustumPlanes, m_FrozenFrustumPlanes, sizeof(constants.frustumPlanes));
-        constants.cameraPosition = m_FrozenCameraPosition;
-        constants.nearPlane = m_FrozenNearPlane;
-        constants.farPlane = m_FrozenFarPlane;
-        agfx::MappedBuffer mapped(m_CameraBuffers[frameIndex]);
-        std::memcpy(mapped.Get(), &constants, sizeof(constants));
+        computePass.SetPipeline(*pipeline);
+        computePass.PushConstants(pc);
+        computePass.Dispatch(groupsX, groupsY, 1);
     }
+
+    m_HZBValid = true;
+}
+
+void SceneRenderer::BeginFrame(const Camera& camera, uint32 width, uint32 height, uint32 frameIndex)
+{
+    float aspectRatio = height != 0 ? (float)width / (float)height : 1.0f;
+
+    FrameConstants constants;
+    constants.viewProjection = camera.GetViewProjection(aspectRatio);
+
+    if (*cv_BuildHZB.AsBoolPtr())
+        m_HZBViewProjection = constants.viewProjection;
+    constants.hzbViewProjection = m_HZBViewProjection;
+
+    if (!*cv_FreezeFrustum.AsBoolPtr())
+    {
+        m_FrozenView = camera.GetView();
+        m_FrozenProjection = camera.GetProjection(aspectRatio);
+        m_FrozenInvView = glm::inverse(m_FrozenView);
+        m_FrozenInvProjection = glm::inverse(m_FrozenProjection);
+        m_FrozenInvViewProjection = glm::inverse(constants.viewProjection);
+        camera.GetFrustumPlanes(aspectRatio, m_FrozenFrustumPlanes);
+        m_FrozenFrustumViewProjection = constants.viewProjection;
+        m_FrozenCameraPosition = camera.GetPosition();
+        m_FrozenNearPlane = camera.GetNearPlane();
+        m_FrozenFarPlane = camera.GetFarPlane();
+    }
+
+    constants.view = m_FrozenView;
+    constants.projection = m_FrozenProjection;
+    constants.invView = m_FrozenInvView;
+    constants.invProjection = m_FrozenInvProjection;
+    constants.invViewProjection = m_FrozenInvViewProjection;
+    std::memcpy(constants.frustumPlanes, m_FrozenFrustumPlanes, sizeof(constants.frustumPlanes));
+    constants.cameraPosition = m_FrozenCameraPosition;
+    constants.nearPlane = m_FrozenNearPlane;
+    constants.farPlane = m_FrozenFarPlane;
+
+    agfx::MappedBuffer mapped(m_CameraBuffers[frameIndex]);
+    std::memcpy(mapped.Get(), &constants, sizeof(constants));
 
     if (*cv_FreezeFrustum.AsBoolPtr())
     {
@@ -378,45 +582,44 @@ void SceneRenderer::Render(agfx::RenderPass& renderPass, GPUScene& gpuScene,
         style.depthTest = false;
         DebugRenderer::Get().Frustum(m_FrozenFrustumViewProjection, style);
     }
+}
 
-    if (*cv_ShowInstanceAABBs.AsBoolPtr())
-    {
-        DebugStyle style;
-        style.color = glm::vec4(0.0f, 1.0f, 0.4f, 1.0f);
-        style.depthTest = false;
+void SceneRenderer::RenderEarly(agfx::RenderPass& renderPass, GPUScene& gpuScene, const HZBResources& hzb, uint32 width, uint32 height, uint32 frameIndex)
+{
+    uint32 count = gpuScene.GetInstanceCount();
+    if (count == 0 || m_OpaqueCapacities[frameIndex] == 0)
+        return;
 
-        for (const GPUInstance& instance : gpuScene.GetInstances())
-        {
-            glm::vec3 worldMin(FLT_MAX);
-            glm::vec3 worldMax(-FLT_MAX);
-            for (uint32 corner = 0; corner < 8; ++corner)
-            {
-                glm::vec3 localCorner(
-                    (corner & 1) ? instance.boundsMax.x : instance.boundsMin.x,
-                    (corner & 2) ? instance.boundsMax.y : instance.boundsMin.y,
-                    (corner & 4) ? instance.boundsMax.z : instance.boundsMin.z);
-                glm::vec3 worldCorner = glm::vec3(instance.transform * glm::vec4(localCorner, 1.0f));
-                worldMin = glm::min(worldMin, worldCorner);
-                worldMax = glm::max(worldMax, worldCorner);
-            }
-            DebugRenderer::Get().Box(worldMin, worldMax, style);
-        }
-    }
-
-    ScenePushConstants pc = BuildPushConstants(gpuScene, frameIndex);
-    agfx::IndirectBundleExecuteInfo regionInfos[kOpaqueRegionCount];
-    for (uint32 region = 0; region < kOpaqueRegionCount; ++region)
-    {
-        regionInfos[region] = BuildRegionExecuteInfo(pc, region, frameIndex);
-        if (!regionInfos[region].renderPipeline)
-            return;
-    }
+    ScenePushConstants pc = BuildPushConstants(gpuScene, hzb, frameIndex);
 
     renderPass.SetViewport(0.0f, 0.0f, (float)width, (float)height);
     renderPass.SetScissor(0, 0, width, height);
 
     // ExecuteIndirectBundle sets both the pipeline and push constants itself, from executeInfo, on
     // every backend -- no separate SetPipeline/PushConstants call here.
-    for (uint32 region = 0; region < kOpaqueRegionCount; ++region)
-        renderPass.ExecuteIndirectBundle(m_OpaqueBundles[frameIndex], regionInfos[region]);
+    for (uint32 side = 0; side < 2; ++side)
+    {
+        agfx::IndirectBundleExecuteInfo info = BuildRegionExecuteInfo(pc, kPassEarly * 2 + side, frameIndex);
+        if (info.renderPipeline)
+            renderPass.ExecuteIndirectBundle(m_OpaqueBundles[frameIndex], info);
+    }
+}
+
+void SceneRenderer::RenderLate(agfx::RenderPass& renderPass, GPUScene& gpuScene, const HZBResources& hzb, uint32 width, uint32 height, uint32 frameIndex)
+{
+    uint32 count = gpuScene.GetInstanceCount();
+    if (count == 0 || m_OpaqueCapacities[frameIndex] == 0)
+        return;
+
+    ScenePushConstants pc = BuildPushConstants(gpuScene, hzb, frameIndex);
+
+    renderPass.SetViewport(0.0f, 0.0f, (float)width, (float)height);
+    renderPass.SetScissor(0, 0, width, height);
+
+    for (uint32 side = 0; side < 2; ++side)
+    {
+        agfx::IndirectBundleExecuteInfo info = BuildRegionExecuteInfo(pc, kPassLate * 2 + side, frameIndex);
+        if (info.renderPipeline)
+            renderPass.ExecuteIndirectBundle(m_OpaqueBundles[frameIndex], info);
+    }
 }

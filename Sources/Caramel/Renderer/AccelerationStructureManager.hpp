@@ -89,4 +89,7 @@ private:
     uint32 m_MaxInstanceCount = 256;
     bool m_TLASNeedsGrow = false;
     uint32 m_LastTLASInstanceCount = 0;
+
+    // Scratch for RecordTLASBuild's parallel fill, kept as a member to reuse its capacity.
+    TArray<agfx::AccelerationStructureInstance> m_PendingInstances;
 };

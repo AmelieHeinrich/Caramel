@@ -310,6 +310,7 @@ struct agfxDescriptorManager {
 struct agfxAccelerationStructure {
     agfxAccelerationStructureCreateInfo createInfo;
     ID3D12Resource* d3d12Resource = nullptr;
+    D3D12_GPU_VIRTUAL_ADDRESS gpuVirtualAddress = 0;
     D3D12_RAYTRACING_ACCELERATION_STRUCTURE_PREBUILD_INFO prebuildInfo = {};
     agfxDescriptorAllocation descriptor = { {0}, {0}, UINT64_MAX }; // Bindless SRV slot, top level only
 
@@ -1031,6 +1032,10 @@ static D3D12_RESOURCE_DESC agfxTextureResourceDesc(const agfxTextureCreateInfo* 
     resourceDesc.SampleDesc.Count = 1;
     resourceDesc.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
     resourceDesc.Format = agfxTextureFormatToDXGIFormat(createInfo->format);
+    // A D32_FLOAT resource cannot carry an SRV. A depth texture that is also sampled has to be
+    // created typeless so the DSV can stay D32_FLOAT while the SRV reinterprets it as R32_FLOAT.
+    if (createInfo->format == AGFX_TEXTURE_FORMAT_DEPTH32F && (createInfo->usage & AGFX_TEXTURE_USAGE_SAMPLED))
+        resourceDesc.Format = DXGI_FORMAT_R32_TYPELESS;
     resourceDesc.Flags = agfxTextureUsageToD3D12ResourceFlags(createInfo->usage);
     return resourceDesc;
 }
@@ -1359,13 +1364,14 @@ agfxAccelerationStructure* agfxAccelerationStructureCreate(agfxDevice* device, c
         device->createInfo.free(accelerationStructure);
         return NULL;
     }
+    accelerationStructure->gpuVirtualAddress = accelerationStructure->d3d12Resource->GetGPUVirtualAddress();
 
     if (createInfo->type == AGFX_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL) {
         D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc = {};
         srvDesc.Format = DXGI_FORMAT_UNKNOWN;
         srvDesc.ViewDimension = D3D12_SRV_DIMENSION_RAYTRACING_ACCELERATION_STRUCTURE;
         srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
-        srvDesc.RaytracingAccelerationStructure.Location = accelerationStructure->d3d12Resource->GetGPUVirtualAddress();
+        srvDesc.RaytracingAccelerationStructure.Location = accelerationStructure->gpuVirtualAddress;
         accelerationStructure->descriptor = device->descriptorManager->writeSRV(nullptr, &srvDesc);
     }
 
@@ -1409,13 +1415,14 @@ agfxAccelerationStructure* agfxAccelerationStructureCreateCompacted(agfxDevice* 
         device->createInfo.free(accelerationStructure);
         return NULL;
     }
+    accelerationStructure->gpuVirtualAddress = accelerationStructure->d3d12Resource->GetGPUVirtualAddress();
 
     if (createInfo->type == AGFX_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL) {
         D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc = {};
         srvDesc.Format = DXGI_FORMAT_UNKNOWN;
         srvDesc.ViewDimension = D3D12_SRV_DIMENSION_RAYTRACING_ACCELERATION_STRUCTURE;
         srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
-        srvDesc.RaytracingAccelerationStructure.Location = accelerationStructure->d3d12Resource->GetGPUVirtualAddress();
+        srvDesc.RaytracingAccelerationStructure.Location = accelerationStructure->gpuVirtualAddress;
         accelerationStructure->descriptor = device->descriptorManager->writeSRV(nullptr, &srvDesc);
     }
 
@@ -1458,7 +1465,7 @@ void agfxAccelerationStructureAddInstances(agfxAccelerationStructure* accelerati
         d3d12Instance.InstanceMask = 0xFF;
         d3d12Instance.InstanceContributionToHitGroupIndex = 0;
         d3d12Instance.Flags = instance->opaque ? D3D12_RAYTRACING_INSTANCE_FLAG_FORCE_OPAQUE : D3D12_RAYTRACING_INSTANCE_FLAG_FORCE_NON_OPAQUE;
-        d3d12Instance.AccelerationStructure = instance->blas->d3d12Resource->GetGPUVirtualAddress();
+        d3d12Instance.AccelerationStructure = instance->blas->gpuVirtualAddress;
     }
     accelerationStructure->currentInstanceCount += instanceCount;
 }
@@ -2666,8 +2673,12 @@ D3D12_SAMPLER_DESC agfxSamplerCreateInfoToD3D12SamplerDesc(agfxSamplerCreateInfo
 }
 
 D3D12_SHADER_RESOURCE_VIEW_DESC agfxTextureViewTypeToD3D12ShaderResourceViewDesc(agfxTextureViewCreateInfo* createInfo) {
+    agfxTextureFormat format = createInfo->format == AGFX_TEXTURE_FORMAT_UNKNOWN ? createInfo->texture->createInfo.format : createInfo->format;
+
     D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc = {};
-    srvDesc.Format = createInfo->format == AGFX_TEXTURE_FORMAT_UNKNOWN ? agfxTextureFormatToDXGIFormat(createInfo->texture->createInfo.format) : agfxTextureFormatToDXGIFormat(createInfo->format);
+    // The resource behind a sampled depth texture is R32_TYPELESS (see agfxTextureResourceDesc), so
+    // the SRV has to name the color-typed member of that family -- D32_FLOAT is not a valid SRV format.
+    srvDesc.Format = format == AGFX_TEXTURE_FORMAT_DEPTH32F ? DXGI_FORMAT_R32_FLOAT : agfxTextureFormatToDXGIFormat(format);
     srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
     switch (createInfo->type) {
         case AGFX_TEXTURE_TYPE_1D:

@@ -16,6 +16,7 @@
 
 #include "AGFX.hlsli"
 #include "GPUScene.hlsli"
+#include "HZB.hlsli"
 
 #pragma task SceneAS
 #pragma mesh SceneMS
@@ -51,6 +52,7 @@ struct FrameConstants {
     float    fNearPlane;
     float    fFarPlane;
     float3   _Pad;
+    float4x4 mHZBViewProjection; // the camera the current pyramid was rasterized from
 };
 
 // Mirrors ScenePushConstants in Sources/Caramel/Renderer/SceneRenderer.cpp. rSchemeParams points at
@@ -65,13 +67,35 @@ struct ScenePushConstants {
     ResourceHandle rDrawIndirection; // valid on every backend; only read on Vulkan
     ResourceHandle rSampler;
     ResourceHandle rFallbackTexture; // handle held by a material texture slot with nothing bound
-    uint uDebugFlags; // bit 0: scene.show_primitive_id (see Core/CVar.hpp), read by DebugMeshletID.hlsl
+    uint uDebugId; // scene.debug_id (see Core/CVar.hpp), read by DebugMeshletID.hlsl
     ResourceHandle rInstanceLodTable;  // GPULodInfo per (instance, lod) -- see GPUScene.hlsli
     ResourceHandle rSelectedLodBuffer; // uint per instance, written by PopulateOpaqueIndirectBundleCS
-    uint uDrawIndirectionBase;         // start of this execute's bundle region in rDrawIndirection
-                                       // (0 = single-sided, capacity = double-sided); Vulkan only
+    uint uDrawIndirectionBase;         // start of this execute's bundle region in rDrawIndirection;
+                                       // region * capacity, see SceneRenderer's region table. Vulkan only
+    uint uCullFlags;                   // bit0 = culling enabled, bit1 = the pyramid holds real data
+    ResourceHandle rHZB;
+    uint2 uHZBSize;
+    uint uHZBMipCount;
+    ResourceHandle rInstanceVisibility; // uint per instance, layout below -- written by the populate CS
+    ResourceHandle rMeshletVisibility;  // raw bitfield, uMeshletVisStride words per instance
+    uint uMeshletVisStride;
 };
 AGFX_PUSH_CONSTANTS(ScenePushConstants, g_Constants);
+
+static const uint kSceneDebugIdMeshlet = 0;
+static const uint kSceneDebugIdPrimitive = 1;
+static const uint kSceneDebugIdInstance = 2;
+
+static const uint kSceneCullFlagEnabled = 1u;
+static const uint kSceneCullFlagHZBValid = 2u;
+// Set only on the late pass's bundle regions -- see SceneAS.
+static const uint kSceneCullFlagLatePass = 4u;
+
+// Bits of the per-instance visibility word, written by PopulateOpaqueIndirectBundle.hlsl (see the
+// full layout there). SceneAS reads DrawnEarly/BitsLodValid to decide which meshlets the early pass
+// already drew and whether the meshlet bits describe this frame's LOD.
+static const uint kSceneInstanceVisDrawnEarly = 2u;
+static const uint kSceneInstanceVisBitsLodValid = 4u;
 
 // AGFX_DRAW_ID() is the value the populate compute shader wrote as drawId on D3D12/Metal, but on
 // Vulkan it is the linear position within the compacted indirect bundle instead (SKILL.md gotcha
@@ -187,6 +211,27 @@ bool FrustumCullMeshlet(GPUInstance instance, MeshletCullData data, FrameConstan
     return true;
 }
 
+// Boxes the meshlet's world bounding sphere and hands it to the same pyramid test the instance-level
+// cull uses.
+//
+// Late pass only. The early pass draws before the pyramid is rebuilt, so it would be projecting
+// bounds into a pyramid that predates this frame's depth -- and a meshlet it wrongly culled would be
+// missing for the frame, which reads as flickering under camera motion. Instead the early pass
+// replays the per-meshlet visibility bits this test wrote last frame, and the late pass re-tests
+// every meshlet of every visible instance to repair what the early pass skipped. See SceneAS.
+bool OcclusionCullMeshlet(GPUInstance instance, MeshletCullData data, FrameConstants frame) {
+    const uint required = kSceneCullFlagHZBValid | kSceneCullFlagLatePass;
+    if ((g_Constants.uCullFlags & required) != required)
+        return true;
+
+    float3 center;
+    float radius;
+    SceneGetMeshletBoundingSphere(instance, data, center, radius);
+
+    HZBParams hzb = HZBMakeParams(g_Constants.rHZB, g_Constants.uHZBSize.x, g_Constants.uHZBSize.y, g_Constants.uHZBMipCount);
+    return !HZBIsOccluded(center - radius, center + radius, frame.mHZBViewProjection, hzb);
+}
+
 bool ConeCullMeshlet(GPUInstance instance, MeshletCullData data, FrameConstants frame) {
     float3 apex;
     float3 axis;
@@ -216,9 +261,39 @@ void SceneAS(uint3 uGroupID : SV_GroupID, uint3 uGroupThreadID : SV_GroupThreadI
     GPUMaterial material = SceneLoadMaterial(instance.uMaterialSlot);
 
     bool visible = meshletIndex < lodInfo.uMeshletCount;
-    visible &= FrustumCullMeshlet(instance, cull, frame);
-    visible &= GPUMaterialIsDoubleSided(material) || ConeCullMeshlet(instance, cull, frame);
-    visible &= ContributionCullMeshlet(instance, cull, frame);
+    if ((g_Constants.uCullFlags & kSceneCullFlagEnabled) != 0) {
+        visible &= FrustumCullMeshlet(instance, cull, frame);
+        visible &= GPUMaterialIsDoubleSided(material) || ConeCullMeshlet(instance, cull, frame);
+        visible &= ContributionCullMeshlet(instance, cull, frame);
+
+        // Two-pass at meshlet granularity. Early regions replay the bits the late pass wrote last
+        // frame (or everything, if the bits don't describe this LOD). Late regions re-test every
+        // meshlet of every visible instance against the fresh pyramid, rewrite its bit, and draw
+        // only what the early pass skipped -- the frustum/cone/contribution results above are
+        // deterministic within a frame, so "skipped" reduces to the instance's drawn-early flag and
+        // the meshlet's previous bit.
+        uint instFlags = AGFXStructuredBuffer<uint>::Create(g_Constants.rInstanceVisibility).Load(instanceIndex);
+        uint wordAddress = (instanceIndex * g_Constants.uMeshletVisStride + (meshletIndex >> 5)) * 4;
+        uint mask = 1u << (meshletIndex & 31u);
+
+        if ((g_Constants.uCullFlags & kSceneCullFlagLatePass) != 0) {
+            visible &= OcclusionCullMeshlet(instance, cull, frame);
+
+            AGFXRWByteAddressBuffer bits = AGFXRWByteAddressBuffer::Create(g_Constants.rMeshletVisibility);
+            uint previous;
+            if (visible)
+                bits.InterlockedOr(wordAddress, mask, previous);
+            else
+                bits.InterlockedAnd(wordAddress, ~mask, previous);
+
+            bool drawnEarly = (instFlags & kSceneInstanceVisDrawnEarly) != 0
+                           && ((instFlags & kSceneInstanceVisBitsLodValid) == 0 || (previous & mask) != 0);
+            visible = visible && !drawnEarly;
+        } else if ((instFlags & kSceneInstanceVisBitsLodValid) != 0) {
+            AGFXByteAddressBuffer bits = AGFXByteAddressBuffer::Create(g_Constants.rMeshletVisibility);
+            visible = visible && (bits.Load(wordAddress) & mask) != 0;
+        }
+    }
 
     // Compaction assumes the whole group executes as one SIMD wave (kMeshletTaskGroupSize == 32,
     // the wave width this engine targets) -- Wave*() intrinsics only see the calling lane's wave,

@@ -12,7 +12,7 @@ Caramel is an experimental research renderer powered by [AGFX](https://github.co
 - Multiple material support with binning
 - Cook-Torrance BRDF + Burley diffuse
 - Render graph with transient resource allocator
-- GPU driven mesh shaded visibility buffer with instance frustum/occlusion cull + LOD (cross fade dither + hysteresis), cluster cone/contribution/frustum/occlusion cull, primitive frustum/occlusion cull
+- GPU driven mesh shaded visibility buffer with instance frustum/occlusion cull + LOD (distance based), cluster cone/contribution/frustum/occlusion cull
 
 ## Planned
 - Clustered light culling

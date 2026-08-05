@@ -1633,6 +1633,9 @@ struct agfxAccelerationStructure {
     std::vector<uint32_t> primitiveCounts;
     VkAccelerationStructureBuildSizesInfoKHR buildSizes = { VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_SIZES_INFO_KHR };
     VkAccelerationStructureKHR vkAccelerationStructure = VK_NULL_HANDLE;
+    // Cached at create: querying it per TLAS instance per frame is a driver call hot enough to show
+    // up on the CPU profile.
+    VkDeviceAddress deviceAddress = 0;
     // Backing storage the VkAccelerationStructureKHR lives in.
     VkBuffer storageBuffer = VK_NULL_HANDLE;
     VkDeviceMemory storageMemory = VK_NULL_HANDLE;
@@ -1779,6 +1782,10 @@ static bool agfxVkFinalizeAccelerationStructure(agfxDevice* device, agfxAccelera
         return false;
     }
 
+    VkAccelerationStructureDeviceAddressInfoKHR deviceAddressInfo = { VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_DEVICE_ADDRESS_INFO_KHR };
+    deviceAddressInfo.accelerationStructure = accelerationStructure->vkAccelerationStructure;
+    accelerationStructure->deviceAddress = vkGetAccelerationStructureDeviceAddressKHR(device->device, &deviceAddressInfo);
+
     // Only a TLAS is traced from shaders (__rt_as_array, set 0 binding 2), matching D3D12 where
     // only the TLAS gets an SRV.
     if (accelerationStructure->createInfo.type == AGFX_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL) {
@@ -1898,17 +1905,12 @@ void agfxAccelerationStructureAddInstances(agfxAccelerationStructure* accelerati
     for (uint32_t i = 0; i < instanceCount; ++i) {
         const agfxAccelerationStructureInstance* instance = &instances[i];
         VkAccelerationStructureInstanceKHR& vkInstance = accelerationStructure->mappedInstances[accelerationStructure->currentInstanceCount + i];
-        // Both sides are row-major 3x4, so this is a straight copy (unlike Metal's packed
-        // column-major type, which needs a transpose).
         memcpy(&vkInstance.transform, instance->transform, sizeof(float) * 12);
         vkInstance.instanceCustomIndex = instance->userID; // What CommittedInstanceID() returns.
         vkInstance.mask = 0xFF;
         vkInstance.instanceShaderBindingTableRecordOffset = 0;
         vkInstance.flags = instance->opaque ? VK_GEOMETRY_INSTANCE_FORCE_OPAQUE_BIT_KHR : VK_GEOMETRY_INSTANCE_FORCE_NO_OPAQUE_BIT_KHR;
-
-        VkAccelerationStructureDeviceAddressInfoKHR addressInfo = { VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_DEVICE_ADDRESS_INFO_KHR };
-        addressInfo.accelerationStructure = instance->blas->vkAccelerationStructure;
-        vkInstance.accelerationStructureReference = vkGetAccelerationStructureDeviceAddressKHR(accelerationStructure->device->device, &addressInfo);
+        vkInstance.accelerationStructureReference = instance->blas->deviceAddress;
     }
     accelerationStructure->currentInstanceCount += instanceCount;
 }

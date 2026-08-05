@@ -7,6 +7,7 @@
 #include "AccelerationStructureManager.hpp"
 
 #include <Caramel/Core/Logger.hpp>
+#include <Caramel/Core/JobSystem.hpp>
 #include <Caramel/Asset/StreamingModel.hpp>
 
 #include <glm/glm.hpp>
@@ -151,45 +152,61 @@ void AccelerationStructureManager::RecordBLASBuilds(agfx::CommandBuffer& cmd)
 
 void AccelerationStructureManager::RecordTLASBuild(agfx::CommandBuffer& cmd, const TArray<RenderInstance>& renderInstances)
 {
-    TArray<agfxAccelerationStructureInstance> pendingInstances;
-    pendingInstances.Reserve(renderInstances.Size());
+    uint32 candidateCount = (uint32)renderInstances.Size();
+    m_PendingInstances.Resize(candidateCount);
 
-    for (const RenderInstance& instance : renderInstances)
+    // m_BLASEntries is read-only here -- registration and ready flags were finalized earlier this
+    // frame (ScanForNewlyResidentModels / RecordBLASBuilds) -- so the lookups can run in parallel.
+    // Instances without a ready BLAS are marked with a null blas and compacted out below.
+    JobSystem::Get().ParallelFor(candidateCount, 256, [&](uint32 start, uint32 end, uint32) {
+        for (uint32 i = start; i < end; ++i)
+        {
+            const RenderInstance& instance = renderInstances[i];
+            agfx::AccelerationStructureInstance& inst = m_PendingInstances[i];
+
+            StreamingModel* model = instance.mesh;
+            auto it = model ? m_BLASEntries.Find(model) : m_BLASEntries.End();
+            if (it == m_BLASEntries.End() || !it->second.ready)
+            {
+                inst.blas = nullptr;
+                continue;
+            }
+
+            // glm is column-major by default; AGFX wants a row-major 3x4.
+            glm::mat4 t = glm::transpose(instance.transform);
+            float rowMajor[12] = {
+                t[0][0], t[0][1], t[0][2], t[0][3],
+                t[1][0], t[1][1], t[1][2], t[1][3],
+                t[2][0], t[2][1], t[2][2], t[2][3],
+            };
+
+            inst.SetBLAS(it->second.blas.Get()).SetTransform(rowMajor).SetUserID(instance.instanceIndex).SetOpaque(true);
+        }
+    });
+
+    uint32 liveCount = 0;
+    for (uint32 i = 0; i < candidateCount; ++i)
     {
-        StreamingModel* model = instance.mesh;
-        if (!model)
+        if (!m_PendingInstances[i].blas)
             continue;
-
-        auto it = m_BLASEntries.Find(model);
-        if (it == m_BLASEntries.End() || !it->second.ready)
-            continue;
-
-        // glm is column-major by default; AGFX wants a row-major 3x4.
-        glm::mat4 t = glm::transpose(instance.transform);
-        float rowMajor[12] = {
-            t[0][0], t[0][1], t[0][2], t[0][3],
-            t[1][0], t[1][1], t[1][2], t[1][3],
-            t[2][0], t[2][1], t[2][2], t[2][3],
-        };
-
-        agfx::AccelerationStructureInstance inst;
-        inst.SetBLAS(it->second.blas.Get()).SetTransform(rowMajor).SetUserID(instance.instanceIndex).SetOpaque(true);
-        pendingInstances.PushBack(inst);
+        if (liveCount != i)
+            m_PendingInstances[liveCount] = m_PendingInstances[i];
+        ++liveCount;
     }
 
-    m_LastTLASInstanceCount = (uint32)pendingInstances.Size();
+    m_LastTLASInstanceCount = liveCount;
 
-    if (pendingInstances.Size() > m_MaxInstanceCount)
+    if (liveCount > m_MaxInstanceCount)
     {
         if (!m_TLASNeedsGrow)
-            CARAMEL_WARN("AccelerationStructureManager: TLAS instance count {} exceeds capacity {}, growing next frame", pendingInstances.Size(), m_MaxInstanceCount);
+            CARAMEL_WARN("AccelerationStructureManager: TLAS instance count {} exceeds capacity {}, growing next frame", liveCount, m_MaxInstanceCount);
         m_TLASNeedsGrow = true;
-        pendingInstances.Resize(m_MaxInstanceCount);
+        liveCount = m_MaxInstanceCount;
     }
 
     m_TLAS.ResetInstances();
-    if (!pendingInstances.IsEmpty())
-        m_TLAS.AddInstances(pendingInstances.Data(), (uint32)pendingInstances.Size());
+    if (liveCount > 0)
+        m_TLAS.AddInstances(m_PendingInstances.Data(), liveCount);
 
     {
         agfx::ComputePass pass = cmd.BeginComputePass("TLAS Build");

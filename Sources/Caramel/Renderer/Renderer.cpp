@@ -70,6 +70,7 @@ Renderer::Renderer(SDL_Window* window, bool vsync)
 
     CreateDepthTexture(m_ViewportWidth, m_ViewportHeight);
     CreateSceneColorTexture(m_ViewportWidth, m_ViewportHeight);
+    CreateHZBTexture(m_ViewportWidth, m_ViewportHeight);
 
     ShaderServer::Initialize(m_Device, *this);
 
@@ -88,15 +89,82 @@ Renderer::Renderer(SDL_Window* window, bool vsync)
 
 void Renderer::CreateDepthTexture(uint32 width, uint32 height)
 {
+    // Sampled is what lets the HZB build read this in a compute shader. On D3D12 that also forces
+    // the underlying resource typeless (see agfxTextureResourceDesc) so the SRV can be R32_FLOAT.
     agfx::TextureCreateInfo depthInfo;
     depthInfo.SetSize(width, height)
              .SetFormat(kDepthFormat)
              .SetType(agfx::TextureType::Texture2D)
-             .SetUsage(agfx::TextureUsage::DepthStencilAttachment)
+             .SetUsage(agfx::TextureUsage::DepthStencilAttachment | agfx::TextureUsage::Sampled)
              .SetMipLevels(1);
     m_ImportedResourceState.Erase(m_DepthTexture.Get());
     m_DepthTexture = m_Device.CreateTexture(depthInfo);
     m_DepthTexture.SetName("Scene Depth Buffer");
+
+    agfx::TextureViewCreateInfo depthViewInfo = agfx::TextureViewCreateInfo().SetTexture(m_DepthTexture)
+                                                                            .SetFormat(kDepthFormat)
+                                                                            .SetMipRange(0, 1)
+                                                                            .SetWriteable(false);
+    m_DepthView = m_Device.CreateTextureView(depthViewInfo);
+    m_HZB.depthHandle = (uint32)m_DepthView.GetHandle();
+    m_HZB.depthWidth = width;
+    m_HZB.depthHeight = height;
+
+    m_Device.MakeResourcesResident();
+}
+
+void Renderer::CreateHZBTexture(uint32 width, uint32 height)
+{
+    // Power-of-two dimensions, rounded *down* from the depth buffer. Every mip is then exactly half
+    // the previous one with no rounding, which is what lets the downsampler's 64x64 tile grid line up
+    // with mip 6 exactly and keeps the whole chain free of partial-tile edge cases. Rounding down
+    // also means one mip-0 texel covers between one and two depth texels, so a 2x2 max at the scaled
+    // coordinate always over-covers -- the safe direction, since a too-large max culls less.
+    uint32 hzbWidth = 1;
+    while (hzbWidth * 2 <= width)
+        hzbWidth *= 2;
+    uint32 hzbHeight = 1;
+    while (hzbHeight * 2 <= height)
+        hzbHeight *= 2;
+
+    uint32 mipCount = 1;
+    for (uint32 size = hzbWidth > hzbHeight ? hzbWidth : hzbHeight; size > 1; size /= 2)
+        ++mipCount;
+    if (mipCount > kMaxHZBMips)
+        mipCount = kMaxHZBMips;
+
+    agfx::TextureCreateInfo hzbInfo;
+    hzbInfo.SetSize(hzbWidth, hzbHeight)
+           .SetFormat(agfx::TextureFormat::R32F)
+           .SetType(agfx::TextureType::Texture2D)
+           .SetUsage(agfx::TextureUsage::Storage | agfx::TextureUsage::Sampled)
+           .SetMipLevels(mipCount);
+    m_ImportedResourceState.Erase(m_HZBTexture.Get());
+    m_HZBTexture = m_Device.CreateTexture(hzbInfo);
+    m_HZBTexture.SetName("Scene HZB");
+
+    agfx::TextureViewCreateInfo readViewInfo = agfx::TextureViewCreateInfo().SetTexture(m_HZBTexture)
+                                                                           .SetFormat(agfx::TextureFormat::R32F)
+                                                                           .SetMipRange(0, mipCount)
+                                                                           .SetWriteable(false);
+    m_HZBView = m_Device.CreateTextureView(readViewInfo);
+
+    m_HZB.hzbHandle = (uint32)m_HZBView.GetHandle();
+    m_HZB.width = hzbWidth;
+    m_HZB.height = hzbHeight;
+    m_HZB.mipCount = mipCount;
+
+    for (uint32 mip = 0; mip < kMaxHZBMips; ++mip) {
+        // Slots past the real chain still need a valid handle: the downsampler's push constants
+        // carry all kMaxHZBMips of them and the shader only guards on uMipCount at store time.
+        uint32 viewMip = mip < mipCount ? mip : mipCount - 1;
+        agfx::TextureViewCreateInfo mipViewInfo = agfx::TextureViewCreateInfo().SetTexture(m_HZBTexture)
+                                                                               .SetFormat(agfx::TextureFormat::R32F)
+                                                                               .SetMipRange(viewMip, 1)
+                                                                               .SetWriteable(true);
+        m_HZBMipViews[mip] = m_Device.CreateTextureView(mipViewInfo);
+        m_HZB.mipHandles[mip] = (uint32)m_HZBMipViews[mip].GetHandle();
+    }
 
     m_Device.MakeResourcesResident();
 }
@@ -140,6 +208,10 @@ void Renderer::PollViewportResize()
     m_Device.WaitIdle();
     CreateSceneColorTexture(m_ViewportWidth, m_ViewportHeight);
     CreateDepthTexture(m_ViewportWidth, m_ViewportHeight);
+    CreateHZBTexture(m_ViewportWidth, m_ViewportHeight);
+    // The fresh pyramid holds garbage and the visibility flags now describe a different projection,
+    // so both have to be rebuilt from scratch before anything culls against them.
+    m_SceneRenderer->InvalidateOcclusionState();
 }
 
 Renderer::~Renderer()
@@ -208,8 +280,12 @@ void Renderer::Render(const Camera& camera, StreamingManager& streamingManager, 
     RGTextureHandle sceneColorHandle = graph.ImportTexture("Scene Color", m_SceneColorTexture, GetImportedState(m_SceneColorTexture.Get()));
     RGTextureHandle depthHandle = graph.ImportTexture("Scene Depth", m_DepthTexture, GetImportedState(m_DepthTexture.Get()));
     RGTextureHandle backbufferHandle = graph.ImportTexture("Back Buffer", backBuffer, agfx::ResourceState::Present);
+    RGTextureHandle hzbHandle = graph.ImportTexture("Scene HZB", m_HZBTexture, GetImportedState(m_HZBTexture.Get()));
 
-    graph.AddPass("Prepare Indirect Bundles",
+    // Both cull dispatches read the camera constants, so they have to exist before the graph runs.
+    m_SceneRenderer->BeginFrame(camera, m_ViewportWidth, m_ViewportHeight, (uint32)m_FrameSlot);
+
+    graph.AddPass("Cull Early",
         [&](RGPassBuilder& builder) {
             // Touches no RG-tracked resource (the bundles are raw agfx objects with their own
             // manual barrier sequence), so it would otherwise be culled -- same reasoning as the
@@ -217,10 +293,10 @@ void Renderer::Render(const Camera& camera, StreamingManager& streamingManager, 
             builder.AlwaysExecute();
         },
         [&](agfx::CommandBuffer& cmd, RGResolveContext&) {
-            m_SceneRenderer->PrepareIndirectBundles(cmd, m_GPUScene, (uint32)m_FrameSlot);
+            m_SceneRenderer->CullEarly(cmd, m_GPUScene, m_HZB, (uint32)m_FrameSlot);
         });
 
-    graph.AddAttachmentPass("Scene Pass",
+    graph.AddAttachmentPass("Scene Early",
         [&](RGPassBuilder& builder) {
             RGAttachmentDesc colorAttachment{};
             colorAttachment.texture = sceneColorHandle;
@@ -238,9 +314,54 @@ void Renderer::Render(const Camera& camera, StreamingManager& streamingManager, 
             depthAttachment.storeOp = agfx::StoreOp::Store;
             depthAttachment.clearDepth = 1.0f;
             builder.SetDepthAttachment(depthAttachment);
+
+            // SceneAS occlusion-culls meshlets against whatever the pyramid holds at this point,
+            // which is the one last frame left behind.
+            builder.ReadTexture(hzbHandle, agfx::ResourceState::NonPixelShaderResource);
         },
         [&](agfx::RenderPass& pass, RGResolveContext&) {
-            m_SceneRenderer->Render(pass, m_GPUScene, camera, m_ViewportWidth, m_ViewportHeight, (uint32)m_FrameSlot);
+            m_SceneRenderer->RenderEarly(pass, m_GPUScene, m_HZB, m_ViewportWidth, m_ViewportHeight, (uint32)m_FrameSlot);
+        });
+
+    graph.AddPass("Build HZB",
+        [&](RGPassBuilder& builder) {
+            builder.ReadTexture(depthHandle, agfx::ResourceState::NonPixelShaderResource);
+            builder.WriteTexture(hzbHandle, agfx::ResourceState::UnorderedAccess);
+            // The pyramid outlives the graph: next frame's early pass samples it before anything
+            // rebuilds it, so it has to be left in a readable state, not in UnorderedAccess.
+            builder.MarkAsExternallyRead(hzbHandle, agfx::ResourceState::NonPixelShaderResource);
+        },
+        [&](agfx::CommandBuffer& cmd, RGResolveContext&) {
+            m_SceneRenderer->BuildHZB(cmd, m_HZB);
+        });
+
+    graph.AddPass("Cull Late",
+        [&](RGPassBuilder& builder) {
+            builder.ReadTexture(hzbHandle, agfx::ResourceState::NonPixelShaderResource);
+            builder.AlwaysExecute();
+        },
+        [&](agfx::CommandBuffer& cmd, RGResolveContext&) {
+            m_SceneRenderer->CullLate(cmd, m_GPUScene, m_HZB, (uint32)m_FrameSlot);
+        });
+
+    graph.AddAttachmentPass("Scene Late",
+        [&](RGPassBuilder& builder) {
+            RGAttachmentDesc colorAttachment{};
+            colorAttachment.texture = sceneColorHandle;
+            colorAttachment.loadOp = agfx::LoadOp::Load;
+            colorAttachment.storeOp = agfx::StoreOp::Store;
+            builder.AddColorAttachment(colorAttachment);
+
+            RGAttachmentDesc depthAttachment{};
+            depthAttachment.texture = depthHandle;
+            depthAttachment.loadOp = agfx::LoadOp::Load;
+            depthAttachment.storeOp = agfx::StoreOp::Store;
+            builder.SetDepthAttachment(depthAttachment);
+
+            builder.ReadTexture(hzbHandle, agfx::ResourceState::NonPixelShaderResource);
+        },
+        [&](agfx::RenderPass& pass, RGResolveContext&) {
+            m_SceneRenderer->RenderLate(pass, m_GPUScene, m_HZB, m_ViewportWidth, m_ViewportHeight, (uint32)m_FrameSlot);
         });
 
     graph.AddPass("Debug Draw",
@@ -301,6 +422,7 @@ void Renderer::Render(const Camera& camera, StreamingManager& streamingManager, 
 
     SetImportedState(m_SceneColorTexture.Get(), graph.GetFinalState(sceneColorHandle));
     SetImportedState(m_DepthTexture.Get(), graph.GetFinalState(depthHandle));
+    SetImportedState(m_HZBTexture.Get(), graph.GetFinalState(hzbHandle));
     m_LastGraphDebugInfo = graph.GetDebugInfo();
     m_TimingSlotNames[m_FrameSlot] = graph.GetTimedPassNames();
     m_TimingSlotHasData[m_FrameSlot] = true;

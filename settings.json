@@ -2,10 +2,8 @@
     "debug.show_colliders": false,
     "debug.show_gpu_timing_panel": false,
     "debug.show_rendergraph_panel": false,
-    "scene.freeze_frustum": false,
-    "scene.lod_base_distance": 20.0,
-    "scene.lod_distance_multiplier": 2.0,
-    "scene.show_instance_aabbs": false,
-    "scene.show_primitive_id": true,
-    "scene.show_selected_lod": false
+    "scene.build_hzb": true,
+    "scene.debug_id": 2,
+    "scene.enable_culling": true,
+    "scene.freeze_frustum": false
 }

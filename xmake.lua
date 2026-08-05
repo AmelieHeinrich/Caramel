@@ -12,6 +12,7 @@ add_requires("imgui v1.92.7-docking", { configs = { sdl3 = true } })
 set_rundir(".")
 set_languages("cxx20")
 add_includedirs("Sources", "Sources/ThirdParty", { public = true })
+add_defines("GLM_FORCE_DEPTH_ZERO_TO_ONE", { public = true })
 
 if is_plat("windows") then
     add_defines("CARAMEL_WINDOWS", "USE_PIX", { public = true })

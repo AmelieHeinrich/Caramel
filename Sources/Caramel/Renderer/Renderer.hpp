@@ -96,7 +96,17 @@ private:
     // (barrierAfterQueueStages), so the PixelShaderResource -> RenderTarget transition below orders
     // this frame's scene pass against the previous frame's ImGui pass reading the same texture.
     agfx::Texture m_DepthTexture;
+    agfx::TextureView m_DepthView;
     void CreateDepthTexture(uint32 width, uint32 height);
+
+    // Max-reduction depth pyramid, half the depth buffer's resolution at mip 0. Persistent rather
+    // than a render-graph transient: the early cull/draw of frame N samples the pyramid frame N-1
+    // left behind, and per-mip writeable views have no render-graph equivalent.
+    agfx::Texture m_HZBTexture;
+    agfx::TextureView m_HZBView;
+    agfx::TextureView m_HZBMipViews[kMaxHZBMips];
+    HZBResources m_HZB{};
+    void CreateHZBTexture(uint32 width, uint32 height);
 
     agfx::Texture m_SceneColorTexture;
     agfx::TextureView m_SceneColorView;

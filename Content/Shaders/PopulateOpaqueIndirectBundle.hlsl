@@ -5,10 +5,12 @@
  */
 
 // Populates the Opaque indirect bundle: one DrawMesh command per resident scene instance that
-// passes frustum culling against the instance's world-space AABB.
+// survives culling. Dispatched twice per frame, once per pass of the two-pass occlusion scheme --
+// see the uPass comment below.
 
 #include "Common/AGFX.hlsli"
 #include "Common/GPUScene.hlsli"
+#include "Common/HZB.hlsli"
 
 #pragma compute PopulateOpaqueIndirectBundleCS
 
@@ -24,6 +26,7 @@ struct FrameConstants {
     float    fNearPlane;
     float    fFarPlane;
     float3   _Pad;
+    float4x4 mHZBViewProjection; // the camera the current pyramid was rasterized from
 };
 
 struct PopulatePushConstants {
@@ -34,12 +37,43 @@ struct PopulatePushConstants {
     ResourceHandle rFrameConstants;
     ResourceHandle rInstanceLodTable;    // GPULodInfo per (instance, lod) -- see GPUScene.hlsli
     ResourceHandle rSelectedLodBuffer;   // uint per instance; this shader writes it
-    float          fLodBaseDistance;     // mirrors scene.lod_base_distance
-    float          fLodDistanceMultiplier; // mirrors scene.lod_distance_multiplier
+    float          fLodBaseDistance;     // first LOD boundary distance
+    float          fLodDistanceMultiplier; // geometric falloff per successive boundary
     ResourceHandle rMaterialBuffer;      // GPUMaterial per slot; read for the doubleSided flag
-    uint           uRegionCapacity;      // commandOffset of the double-sided region (region 1)
+    uint           uRegionCapacity;      // commands per bundle region
+
+    // 0 = early pass (redraw what was visible last frame), 1 = late pass (everything that is visible
+    // now against the freshly built pyramid, minus whatever the early pass already drew).
+    uint           uPass;
+    ResourceHandle rVisibilityBuffer;    // uint per instance, persists across frames
+    uint           uCullFlags;           // bit0 = culling enabled, bit1 = the pyramid holds real data
+    ResourceHandle rHZB;
+    uint2          uHZBSize;
+    uint           uHZBMipCount;
 };
 AGFX_PUSH_CONSTANTS(PopulatePushConstants, g_Constants);
+
+static const uint kPopulatePassEarly = 0;
+static const uint kPopulatePassLate = 1;
+
+static const uint kCullFlagEnabled = 1u;
+static const uint kCullFlagHZBValid = 2u;
+// Clear on the first frame, after a resize, and after the visibility buffers are reallocated: the
+// flags describe an instance set or a projection that no longer exists. The early pass then draws
+// nothing and zeroes them, and the late pass rebuilds them from scratch against the fresh pyramid.
+static const uint kCullFlagVisibilityValid = 4u;
+
+// Instance visibility word layout, shared with SceneMesh.hlsli's SceneAS (which reads bits 1/2 to
+// decide what the early pass already drew):
+//  bit 0: passed the late pass's instance tests -- next frame's early pass redraws it
+//  bit 1: drawn by this frame's early pass
+//  bit 2: the meshlet visibility bits describe this frame's selected LOD
+//  bits 8-15: (LOD the meshlet bits were last written for) + 1, 0 = never written
+static const uint kInstanceVisVisible = 1u;
+static const uint kInstanceVisDrawnEarly = 2u;
+static const uint kInstanceVisBitsLodValid = 4u;
+static const uint kInstanceVisLodShift = 8;
+static const uint kInstanceVisLodMask = 0xFF00u;
 
 // Transforming just the min/max corners through a rotated instance transform does not yield the
 // world-space AABB (it only forms a valid box for axis-aligned/translation-only transforms) --
@@ -87,20 +121,10 @@ bool IsInstanceVisible(float3 worldMin, float3 worldMax, FrameConstants frame)
     return true;
 }
 
-[numthreads(64, 1, 1)]
-void PopulateOpaqueIndirectBundleCS(uint3 dtid : SV_DispatchThreadID) {
-    uint index = dtid.x;
-    if (index >= g_Constants.uInstanceCount)
-        return;
-
-    GPUInstance instance = AGFXStructuredBuffer<GPUInstance>::Create(g_Constants.rInstanceBuffer).Load(index);
-    FrameConstants frame = AGFXStructuredBuffer<FrameConstants>::Create(g_Constants.rFrameConstants).Load(0);
-
-    float3 worldMin, worldMax;
-    ComputeWorldBounds(instance, worldMin, worldMax);
-    if (!IsInstanceVisible(worldMin, worldMax, frame))
-        return;
-
+// Appends the instance's draw into the region matching this pass and this material's sidedness.
+// Returns the LOD it selected, which both passes need for the meshlet-bits LOD bookkeeping.
+uint EmitDraw(uint index, GPUInstance instance, FrameConstants frame, float3 worldMin, float3 worldMax)
+{
     // Stateless distance-threshold LOD ladder -- no hysteresis (deferred to a future dithered
     // cross-fade). Recomputed fresh every frame. desiredLod starts at the finest LOD and drops one
     // level for every boundary the distance exceeds; boundary b separates LOD (kLodCount-1-b) from
@@ -130,16 +154,16 @@ void PopulateOpaqueIndirectBundleCS(uint3 dtid : SV_DispatchThreadID) {
     uint taskGroupCount = (lodInfo.uMeshletCount + kMeshletTaskGroupSize - 1) / kMeshletTaskGroupSize;
 
     // Cull mode is fixed-function pipeline state, so double-sided materials cannot share a
-    // backface-culling pipeline with single-sided ones. The bundle is split into two regions
-    // (SKILL.md gotcha 4): region 0 (offset 0, count slot 0) replays with CullMode::Back, region 1
-    // (offset uRegionCapacity, count slot 1) with CullMode::None.
+    // backface-culling pipeline with single-sided ones. The bundle is split into four regions
+    // (SKILL.md gotcha 4): region = uPass * 2 + doubleSided, each replayed by its own execute call
+    // with its own count slot and its own pipeline.
     GPUMaterial material = AGFXStructuredBuffer<GPUMaterial>::Create(g_Constants.rMaterialBuffer).Load(instance.uMaterialSlot);
     bool doubleSided = GPUMaterialIsDoubleSided(material);
-    uint countIndex = doubleSided ? 1 : 0;
-    uint commandOffset = doubleSided ? g_Constants.uRegionCapacity : 0;
+    uint region = g_Constants.uPass * 2 + (doubleSided ? 1 : 0);
+    uint commandOffset = region * g_Constants.uRegionCapacity;
 
     AGFXIndirectDrawMeshBundle bundle = AGFXIndirectDrawMeshBundle::Create(g_Constants.uBundleHandle);
-    uint slot = bundle.DrawMesh(commandOffset, countIndex, index, taskGroupCount, 1, 1);
+    uint slot = bundle.DrawMesh(commandOffset, region, index, taskGroupCount, 1, 1);
 
 #if defined(AGFX_VULKAN)
     // Vulkan's AGFX_DRAW_ID() in the consuming mesh shader is the linear slot, not the drawId
@@ -149,4 +173,82 @@ void PopulateOpaqueIndirectBundleCS(uint3 dtid : SV_DispatchThreadID) {
     AGFXRWByteAddressBuffer indirection = AGFXRWByteAddressBuffer::Create(g_Constants.rDrawIndirection);
     indirection.Store((commandOffset + slot) * 4, index);
 #endif
+
+    return finalLod;
+}
+
+[numthreads(64, 1, 1)]
+void PopulateOpaqueIndirectBundleCS(uint3 dtid : SV_DispatchThreadID) {
+    uint index = dtid.x;
+    if (index >= g_Constants.uInstanceCount)
+        return;
+
+    GPUInstance instance = AGFXStructuredBuffer<GPUInstance>::Create(g_Constants.rInstanceBuffer).Load(index);
+    FrameConstants frame = AGFXStructuredBuffer<FrameConstants>::Create(g_Constants.rFrameConstants).Load(0);
+
+    bool cullEnabled = (g_Constants.uCullFlags & kCullFlagEnabled) != 0;
+
+    float3 worldMin, worldMax;
+    ComputeWorldBounds(instance, worldMin, worldMax);
+    bool frustumVisible = !cullEnabled || IsInstanceVisible(worldMin, worldMax, frame);
+
+    AGFXRWStructuredBuffer<uint> visibility = AGFXRWStructuredBuffer<uint>::Create(g_Constants.rVisibilityBuffer);
+
+    if (g_Constants.uPass == kPopulatePassEarly) {
+        // No occlusion test here: the flag left behind by last frame's late pass already encodes
+        // one, and there is no fresh pyramid to test against until this pass's depth exists. The LOD
+        // field is preserved (the meshlet bits still describe that LOD) unless the flags are not
+        // trustworthy, in which case the whole word resets to a known zero.
+        uint old = visibility.Load(index);
+        bool flagsValid = (g_Constants.uCullFlags & kCullFlagVisibilityValid) != 0;
+        bool wasVisible = flagsValid && (old & kInstanceVisVisible) != 0;
+        bool drawnEarly = wasVisible && frustumVisible;
+
+        uint next = 0;
+        if (drawnEarly) {
+            uint lod = EmitDraw(index, instance, frame, worldMin, worldMax);
+            bool bitsMatchLod = (old & kInstanceVisLodMask) == ((lod + 1) << kInstanceVisLodShift);
+            next = (old & kInstanceVisLodMask) | kInstanceVisVisible | kInstanceVisDrawnEarly
+                 | (bitsMatchLod ? kInstanceVisBitsLodValid : 0u);
+        } else if (flagsValid) {
+            next = old & kInstanceVisLodMask;
+        }
+        visibility.Store(index, next);
+        return;
+    }
+
+    uint old = visibility.Load(index);
+    bool drawnEarly = (old & kInstanceVisDrawnEarly) != 0;
+
+    // The occlusion test projects with the pyramid's own camera (mHZBViewProjection), never the
+    // frozen frustum. scene.freeze_frustum still freezes the frustum planes and the LOD camera
+    // position, which is what it is for.
+    bool occluded = false;
+    if (cullEnabled && (g_Constants.uCullFlags & kCullFlagHZBValid) != 0 && frustumVisible) {
+        HZBParams hzb = HZBMakeParams(g_Constants.rHZB, g_Constants.uHZBSize.x, g_Constants.uHZBSize.y, g_Constants.uHZBMipCount);
+        occluded = HZBIsOccluded(worldMin, worldMax, frame.mHZBViewProjection, hzb);
+    }
+
+    if (!frustumVisible || occluded) {
+        visibility.Store(index, old & kInstanceVisLodMask);
+        return;
+    }
+
+    if (cullEnabled) {
+        // Emit every visible instance, drawn early or not: SceneAS re-tests all its meshlets against
+        // the fresh pyramid, draws only the ones the early pass skipped, and rewrites the meshlet
+        // visibility bits for the LOD recorded here.
+        uint lod = EmitDraw(index, instance, frame, worldMin, worldMax);
+        bool bitsMatchLod = (old & kInstanceVisLodMask) == ((lod + 1) << kInstanceVisLodShift);
+        visibility.Store(index, ((lod + 1) << kInstanceVisLodShift) | kInstanceVisVisible
+                              | (drawnEarly ? kInstanceVisDrawnEarly : 0u)
+                              | (bitsMatchLod ? kInstanceVisBitsLodValid : 0u));
+        return;
+    }
+
+    // Culling disabled: the early pass already drew everything visible last frame in full, so only
+    // emit the difference, and mark the meshlet bits stale so re-enabling culling starts conservative.
+    visibility.Store(index, kInstanceVisVisible | (drawnEarly ? kInstanceVisDrawnEarly : 0u));
+    if (!drawnEarly)
+        EmitDraw(index, instance, frame, worldMin, worldMax);
 }
