@@ -74,7 +74,11 @@ public:
     bool RebuildModule(const String& path);
 
     static constexpr float32 kPollInterval = 0.25f;
+    // OnUpdate runs every single frame, so it keeps a tight leash to avoid hanging the render loop.
     static constexpr float64 kExecutionBudgetSeconds = 0.005;
+    // OnStart runs once (including a manual Run on a [RunOnce] component), so it can afford to
+    // burn real time on one-shot setup work like spawning thousands of instances.
+    static constexpr float64 kOnStartExecutionBudgetSeconds = 5.0;
     static constexpr uint32 kMaxPooledContexts = 8;
 
 private:
@@ -88,7 +92,7 @@ private:
     void ReflectModule(ScriptModuleInfo& info, CScriptBuilder& builder);
     void ReflectClass(ScriptClassInfo& out, CScriptBuilder& builder, asITypeInfo* type);
     void CaptureDefaults(ScriptClassInfo& classInfo);
-    EScriptCallResult Execute(asIScriptContext* ctx, String& outError);
+    EScriptCallResult Execute(asIScriptContext* ctx, String& outError, float64 budgetSeconds);
 
     static uint64 ReadFileTime(const String& path);
 

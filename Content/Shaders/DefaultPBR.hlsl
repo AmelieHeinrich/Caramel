@@ -58,8 +58,8 @@ float4 DefaultPBRPS(VSOut input) : SV_Target {
         normal = normalize(mul(tangentNormal, mTBN));
     }
 
-    AGFXStructuredBuffer<FrameConstants> bFrame = AGFXStructuredBuffer<FrameConstants>::Create(g_Constants.rFrameConstants);
-    float3 cameraPosition = bFrame.Load(0).vCameraPosition;
+    FrameConstants frame = AGFXStructuredBuffer<FrameConstants>::Create(g_Constants.rFrameConstants).Load(0);
+    float3 cameraPosition = frame.vCameraPosition;
 
     float3 viewDir = normalize(cameraPosition - input.vWorldPosition);
     float3 lightDir = normalize(float3(0.0f, 1.0f, 0.0f));

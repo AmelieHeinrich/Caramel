@@ -24,6 +24,7 @@ namespace
     struct ExecutionBudget
     {
         std::chrono::steady_clock::time_point start;
+        float64 limitSeconds = 0.0;
         bool aborted = false;
     };
 
@@ -176,7 +177,7 @@ void ScriptEngine::LineCallback(asIScriptContext* ctx, void* param)
 
     std::chrono::steady_clock::time_point now = std::chrono::steady_clock::now();
     float64 elapsed = std::chrono::duration<float64>(now - budget->start).count();
-    if (elapsed > kExecutionBudgetSeconds) {
+    if (elapsed > budget->limitSeconds) {
         budget->aborted = true;
         ctx->Abort();
     }
@@ -480,7 +481,7 @@ asIScriptObject* ScriptEngine::Instantiate(const ScriptClassInfo& classInfo)
     asIScriptObject* result = nullptr;
     if (ctx->Prepare(classInfo.factory) >= 0) {
         String error;
-        if (Execute(ctx, error) == EScriptCallResult::Ok) {
+        if (Execute(ctx, error, kExecutionBudgetSeconds) == EScriptCallResult::Ok) {
             result = *(asIScriptObject**)ctx->GetAddressOfReturnValue();
             if (result)
                 result->AddRef();
@@ -499,10 +500,11 @@ void ScriptEngine::ReleaseObject(asIScriptObject* object)
         object->Release();
 }
 
-EScriptCallResult ScriptEngine::Execute(asIScriptContext* ctx, String& outError)
+EScriptCallResult ScriptEngine::Execute(asIScriptContext* ctx, String& outError, float64 budgetSeconds)
 {
     ExecutionBudget budget;
     budget.start = std::chrono::steady_clock::now();
+    budget.limitSeconds = budgetSeconds;
 
     ctx->SetLineCallback(asFUNCTION(LineCallback), &budget, asCALL_CDECL);
 
@@ -543,7 +545,7 @@ EScriptCallResult ScriptEngine::CallVoidMethod(asIScriptObject* object, asIScrip
     EScriptCallResult result = EScriptCallResult::NoObject;
     if (ctx->Prepare(method) >= 0) {
         ctx->SetObject(object);
-        result = Execute(ctx, outError);
+        result = Execute(ctx, outError, kOnStartExecutionBudgetSeconds);
     }
 
     m_Engine->ReturnContext(ctx);
@@ -563,7 +565,7 @@ EScriptCallResult ScriptEngine::CallUpdate(asIScriptObject* object, asIScriptFun
     if (ctx->Prepare(method) >= 0) {
         ctx->SetObject(object);
         ctx->SetArgFloat(0, deltaTime);
-        result = Execute(ctx, outError);
+        result = Execute(ctx, outError, kExecutionBudgetSeconds);
     }
 
     m_Engine->ReturnContext(ctx);

@@ -17,6 +17,7 @@
 #include "AGFX.hlsli"
 #include "GPUScene.hlsli"
 
+#pragma task SceneAS
 #pragma mesh SceneMS
 
 AGFX_DECLARE_DRAW_ID();
@@ -39,9 +40,17 @@ struct MeshletDesc {
 
 // Mirrors FrameConstants in Sources/Caramel/Renderer/SceneRenderer.cpp field-for-field.
 struct FrameConstants {
-    float4x4 mViewProj;
+    float4x4 mView;
+    float4x4 mProjection;
+    float4x4 mViewProjection;
+    float4x4 mInvView;
+    float4x4 mInvProjection;
+    float4x4 mInvViewProjection;
+    float4   vFrustumPlanes[6]; // Left/Right/Bottom/Top/Near/Far, xyz = normal, w = distance
     float3   vCameraPosition;
-    float    _Pad;
+    float    fNearPlane;
+    float    fFarPlane;
+    float3   _Pad;
 };
 
 // Mirrors ScenePushConstants in Sources/Caramel/Renderer/SceneRenderer.cpp. rSchemeParams points at
@@ -56,6 +65,11 @@ struct ScenePushConstants {
     ResourceHandle rDrawIndirection; // valid on every backend; only read on Vulkan
     ResourceHandle rSampler;
     ResourceHandle rFallbackTexture; // handle held by a material texture slot with nothing bound
+    uint uDebugFlags; // bit 0: scene.show_primitive_id (see Core/CVar.hpp), read by DebugMeshletID.hlsl
+    ResourceHandle rInstanceLodTable;  // GPULodInfo per (instance, lod) -- see GPUScene.hlsli
+    ResourceHandle rSelectedLodBuffer; // uint per instance, written by PopulateOpaqueIndirectBundleCS
+    uint uDrawIndirectionBase;         // start of this execute's bundle region in rDrawIndirection
+                                       // (0 = single-sided, capacity = double-sided); Vulkan only
 };
 AGFX_PUSH_CONSTANTS(ScenePushConstants, g_Constants);
 
@@ -64,7 +78,7 @@ AGFX_PUSH_CONSTANTS(ScenePushConstants, g_Constants);
 // 6), so it must be resolved through the indirection buffer the populate shader wrote alongside it.
 uint SceneResolveInstanceIndex() {
 #if defined(AGFX_VULKAN)
-    return AGFXByteAddressBuffer::Create(g_Constants.rDrawIndirection).Load(AGFX_DRAW_ID() * 4);
+    return AGFXByteAddressBuffer::Create(g_Constants.rDrawIndirection).Load((g_Constants.uDrawIndirectionBase + AGFX_DRAW_ID()) * 4);
 #else
     return AGFX_DRAW_ID();
 #endif
@@ -74,30 +88,26 @@ struct VSOut {
     float4 vPosition : SV_POSITION;
     float3 vWorldNormal : NORMAL0;
     float2 vUV : TEXCOORD0;
-    // The instance is read in the mesh shader, so the material index has to be forwarded. It is
-    // constant across the meshlet -- nointerpolation keeps it exact.
     nointerpolation uint uMaterialSlot : TEXCOORD1;
     float3 vWorldPosition : TEXCOORD2;
-    float4 vWorldTangent : TEXCOORD3; // xyz = world-space tangent, w = handedness (passthrough)
-    nointerpolation uint uMeshletID : TEXCOORD4; // index into the instance's meshlet buffer (SV_GroupID.x)
-    nointerpolation uint uInstanceIndex : TEXCOORD5; // resolved via SceneResolveInstanceIndex, forwarded because AGFX_DRAW_ID() is only valid in vertex/mesh/task stages on Vulkan
+    float4 vWorldTangent : TEXCOORD3;
+    nointerpolation uint uMeshletID : TEXCOORD4;
+    nointerpolation uint uInstanceIndex : TEXCOORD5;
+    nointerpolation uint uLOD : TEXCOORD6;
 };
 
-// Loads the material of the pixel being shaded. Every scheme's pixel shader starts with this.
+struct PrimOut {
+    nointerpolation uint uPrimitiveID : PRIMITIVEID0;
+};
+
 GPUMaterial SceneLoadMaterial(uint materialSlot) {
     AGFXStructuredBuffer<GPUMaterial> bMaterials = AGFXStructuredBuffer<GPUMaterial>::Create(g_Constants.rMaterialBuffer);
     return bMaterials.Load(materialSlot);
 }
 
-// Scheme parameter buffers are indexed by global material slot, so no separate param index is
-// needed -- see GPUScene.cpp for why that sparseness is deliberate.
 #define SCENE_LOAD_SCHEME_PARAMS(type, materialSlot) \
     (AGFXStructuredBuffer<type>::Create(g_Constants.rSchemeParams).Load(materialSlot))
 
-// meshoptimizer packs meshlet-local triangle indices as 3 consecutive bytes per triangle (no
-// 4-byte alignment between triangles, only meshlet.uTriangleOffset itself is 4-byte aligned), so a
-// triangle's 3 bytes can straddle a 4-byte boundary. Load the 8-byte window starting at the
-// containing aligned word and shift/mask out the 3 bytes we actually want.
 uint3 UnpackTriangle(AGFXByteAddressBuffer buf, uint byteOffset) {
     uint wordOffset = byteOffset & ~3u;
     uint shift = (byteOffset - wordOffset) * 8;
@@ -106,30 +116,151 @@ uint3 UnpackTriangle(AGFXByteAddressBuffer buf, uint byteOffset) {
     return uint3(packed & 0xFF, (packed >> 8) & 0xFF, (packed >> 16) & 0xFF);
 }
 
-// kMeshletMaxVertices / kMeshletMaxTriangles from Sources/CaramelAsset/Format.hpp.
+// One instance's meshlets, compacted down to the ones SceneAS decided to hand to the mesh shader.
+// uMeshletIndices holds the *original* meshlet index (into rMeshletBuffer/rMeshletBoundsBuffer) for
+// each compacted slot, since SV_GroupID.x in SceneMS is only the compacted position.
+struct MeshletPayload {
+    uint uInstanceIndex;
+    uint uSelectedLod; // resolved once in SceneAS, so SceneMS doesn't need its own buffer read
+    uint uMeshletIndices[kMeshletTaskGroupSize];
+};
+
+groupshared MeshletPayload s_Payload;
+
+// Screen-space silhouette extents (left/right in xy, bottom/top in zw) of a view-space bounding
+// sphere, as tangent-plane fractions -- multiply by 0.5 and add 0.5 to turn into UV space, or
+// compare directly against NDC xy. `pos` must already be in view space (this only uses proj's
+// diagonal scale terms, not a full view transform) and the camera must be outside the sphere
+// (pos.x*pos.x + pos.z*pos.z must exceed radius*radius, i.e. never call this on a meshlet whose
+// bounding sphere contains the camera). Ported as-is from a right-handed, camera-looks-down--Z
+// source engine, matching proj._33==1/proj._43==0 (or proj._34==1/proj._44==0 if this matrix turns
+// out to be row_major) -- double-check that against how frame.mProjection is actually laid out
+// before trusting the left/right and bottom/top signs.
+float4 SphereScreenExtents(float3 pos, float radius, float4x4 proj)
+{
+    float rad2 = radius * radius;
+    float d = pos.z * radius;
+
+    float hv = sqrt(pos.x * pos.x + pos.z * pos.z - rad2);
+    float ha = pos.x * hv, hb = pos.x * radius, hc = pos.z * hv;
+
+    float vv = sqrt(pos.y * pos.y + pos.z * pos.z - rad2);
+    float va = pos.y * vv, vb = pos.y * radius, vc = pos.z * vv;
+
+    float4 result;
+    result.x = (ha - d) * proj._11 / (hc + hb); // left
+    result.z = (ha + d) * proj._11 / (hc - hb); // right
+    result.y = (va - d) * proj._22 / (vc + vb); // bottom
+    result.w = (va + d) * proj._22 / (vc - vb); // top
+    return result;
+}
+
+bool ContributionCullMeshlet(GPUInstance instance, MeshletCullData data, FrameConstants frame) {
+    float3 center;
+    float radius;
+    SceneGetMeshletBoundingSphere(instance, data, center, radius);
+
+    float4 lbrt = SphereScreenExtents(center, radius, frame.mProjection);
+    float w = abs(lbrt.z - lbrt.x);
+    float h = abs(lbrt.w - lbrt.y);
+
+    const float minContribution = 0.001f;
+    if (max(w, h) < minContribution)
+        return false;
+    return true;
+}
+
+bool FrustumCullMeshlet(GPUInstance instance, MeshletCullData data, FrameConstants frame) {
+    float3 center;
+    float radius;
+    SceneGetMeshletBoundingSphere(instance, data, center, radius);
+
+    [unroll]
+    for (int plane = 0; plane < 6; ++plane) {
+        float4 frustumPlane = frame.vFrustumPlanes[plane];
+        float3 normal = frustumPlane.xyz;
+        float distance = frustumPlane.w;
+
+        if (dot(normal, center) + distance < -radius)
+            return false;
+    }
+    return true;
+}
+
+bool ConeCullMeshlet(GPUInstance instance, MeshletCullData data, FrameConstants frame) {
+    float3 apex;
+    float3 axis;
+    float cutoff;
+    SceneGetMeshletCone(instance, data, apex, axis, cutoff);
+
+    if (dot(normalize(apex - frame.vCameraPosition), axis) > cutoff)
+        return false;
+    return true;
+}
+
+[numthreads(kMeshletTaskGroupSize, 1, 1)]
+void SceneAS(uint3 uGroupID : SV_GroupID, uint3 uGroupThreadID : SV_GroupThreadID) {
+    uint instanceIndex = SceneResolveInstanceIndex();
+    uint meshletIndex = uGroupID.x * kMeshletTaskGroupSize + uGroupThreadID.x;
+
+    FrameConstants frame = AGFXStructuredBuffer<FrameConstants>::Create(g_Constants.rFrameConstants).Load(0);
+    GPUInstance instance = AGFXStructuredBuffer<GPUInstance>::Create(g_Constants.rInstanceBuffer).Load(instanceIndex);
+
+    uint selectedLod = AGFXStructuredBuffer<uint>::Create(g_Constants.rSelectedLodBuffer).Load(instanceIndex);
+    GPULodInfo lodInfo = SceneLoadLodInfo(g_Constants.rInstanceLodTable, instanceIndex, selectedLod);
+    MeshletCullData cull = SceneLoadMeshletBounds(lodInfo.rMeshletBoundsBuffer, meshletIndex);
+
+    // Cone culling removes meshlets whose every triangle faces away from the camera -- only valid
+    // for single-sided geometry. Double-sided materials (e.g. curtains) legitimately show their
+    // back faces (all scene pipelines rasterize with CullMode::None), so skip the test for them.
+    GPUMaterial material = SceneLoadMaterial(instance.uMaterialSlot);
+
+    bool visible = meshletIndex < lodInfo.uMeshletCount;
+    visible &= FrustumCullMeshlet(instance, cull, frame);
+    visible &= GPUMaterialIsDoubleSided(material) || ConeCullMeshlet(instance, cull, frame);
+    visible &= ContributionCullMeshlet(instance, cull, frame);
+
+    // Compaction assumes the whole group executes as one SIMD wave (kMeshletTaskGroupSize == 32,
+    // the wave width this engine targets) -- Wave*() intrinsics only see the calling lane's wave,
+    // not the full thread group, so this silently drops meshlets if the group ever spans >1 wave.
+    uint compactedIndex = WavePrefixCountBits(visible);
+    if (visible)
+        s_Payload.uMeshletIndices[compactedIndex] = meshletIndex;
+    s_Payload.uInstanceIndex = instanceIndex;
+    s_Payload.uSelectedLod = selectedLod;
+
+    uint visibleCount = WaveActiveCountBits(visible);
+    DispatchMesh(visibleCount, 1, 1, s_Payload);
+}
+
 [numthreads(32, 1, 1)]
 [outputtopology("triangle")]
 void SceneMS(
+    in payload MeshletPayload payload,
     uint3 uGroupID : SV_GroupID,
     uint3 uGroupThreadID : SV_GroupThreadID,
     out indices uint3 outTriangles[124],
-    out vertices VSOut outVertices[64])
+    out vertices VSOut outVertices[64],
+    out primitives PrimOut outPrims[124])
 {
-    uint instanceIndex = SceneResolveInstanceIndex();
+    uint instanceIndex = payload.uInstanceIndex;
+    uint meshletIndex = payload.uMeshletIndices[uGroupID.x];
 
     AGFXStructuredBuffer<GPUInstance> bInstances = AGFXStructuredBuffer<GPUInstance>::Create(g_Constants.rInstanceBuffer);
     GPUInstance instance = bInstances.Load(instanceIndex);
 
-    AGFXStructuredBuffer<MeshletDesc> bMeshlets = AGFXStructuredBuffer<MeshletDesc>::Create(instance.rMeshletBuffer);
-    MeshletDesc meshlet = bMeshlets.Load(uGroupID.x);
+    GPULodInfo lodInfo = SceneLoadLodInfo(g_Constants.rInstanceLodTable, instanceIndex, payload.uSelectedLod);
+
+    AGFXStructuredBuffer<MeshletDesc> bMeshlets = AGFXStructuredBuffer<MeshletDesc>::Create(lodInfo.rMeshletBuffer);
+    MeshletDesc meshlet = bMeshlets.Load(meshletIndex);
 
     SetMeshOutputCounts(meshlet.uVertexCount, meshlet.uTriangleCount);
 
-    AGFXStructuredBuffer<FrameConstants> bFrame = AGFXStructuredBuffer<FrameConstants>::Create(g_Constants.rFrameConstants);
-    float4x4 mViewProj = bFrame.Load(0).mViewProj;
+    FrameConstants frame = AGFXStructuredBuffer<FrameConstants>::Create(g_Constants.rFrameConstants).Load(0);
+    float4x4 mViewProj = frame.mViewProjection;
     float4x4 mModel = instance.mTransform;
 
-    AGFXStructuredBuffer<uint> bMeshletVertices = AGFXStructuredBuffer<uint>::Create(instance.rMeshletVertexBuffer);
+    AGFXStructuredBuffer<uint> bMeshletVertices = AGFXStructuredBuffer<uint>::Create(lodInfo.rMeshletVertexBuffer);
     AGFXStructuredBuffer<Vertex> bVertices = AGFXStructuredBuffer<Vertex>::Create(instance.rVertexBuffer);
 
     for (uint v = uGroupThreadID.x; v < meshlet.uVertexCount; v += 32) {
@@ -145,14 +276,16 @@ void SceneMS(
         o.uMaterialSlot = instance.uMaterialSlot;
         o.vWorldPosition = worldPosition.xyz;
         o.vWorldTangent = float4(mul((float3x3)mModel, vertex.vTangent.xyz), vertex.vTangent.w);
-        o.uMeshletID = uGroupID.x;
+        o.uMeshletID = meshletIndex;
         o.uInstanceIndex = instanceIndex;
+        o.uLOD = payload.uSelectedLod;
         outVertices[v] = o;
     }
 
-    AGFXByteAddressBuffer bTriangles = AGFXByteAddressBuffer::Create(instance.rMeshletTriangleBuffer);
+    AGFXByteAddressBuffer bTriangles = AGFXByteAddressBuffer::Create(lodInfo.rMeshletTriangleBuffer);
     for (uint t = uGroupThreadID.x; t < meshlet.uTriangleCount; t += 32) {
         outTriangles[t] = UnpackTriangle(bTriangles, meshlet.uTriangleOffset + t * 3);
+        outPrims[t].uPrimitiveID = t;
     }
 }
 

@@ -25,6 +25,7 @@ void GPUScene::Init(agfx::Device& device, const SchemeRegistry& schemes, uint32 
     m_Schemes = &schemes;
 
     m_InstanceStream.Init(framesInFlight);
+    m_InstanceLodStream.Init(framesInFlight);
     m_MaterialStream.Init(framesInFlight);
 
     m_SchemeParamStreams.Resize(schemes.Count());
@@ -174,7 +175,10 @@ void GPUScene::WriteMaterial(uint32 slot, const ModelMaterial& source, const Mat
 void GPUScene::Build(StreamingManager& streamingManager, const TArray<RenderInstance>& renderInstances, uint32 frameIndex)
 {
     m_InstanceStaging.Clear();
+    m_InstanceLodStaging.Clear();
     m_Draws.Clear();
+    m_PreCullMeshlets = 0;
+    m_PreCullTriangles = 0;
 
     for (const RenderInstance& instance : renderInstances)
     {
@@ -214,6 +218,24 @@ void GPUScene::Build(StreamingManager& streamingManager, const TArray<RenderInst
         gpu.meshletTriangleBuffer = (uint32)model.GetMeshletTriangleBufferView(lod).GetHandle();
         gpu.meshletCount = meshletCount;
         gpu.lod = lod;
+        gpu.meshletBoundsBuffer = (uint32)model.GetMeshletBoundsBufferView(lod).GetHandle();
+
+        // Every LOD's handles + CPU-known meshlet count, not just the resident one baked into `gpu`
+        // above -- PopulateOpaqueIndirectBundleCS picks the actual LOD per instance per frame from
+        // this. Index parallel to m_InstanceStaging: entry i's LODs occupy [i * kLodCount, (i+1) * kLodCount).
+        for (uint32 lodIdx = 0; lodIdx < CaramelAsset::kLodCount; ++lodIdx)
+        {
+            GPULodInfo lodInfo;
+            lodInfo.meshletBuffer = (uint32)model.GetMeshletBufferView(lodIdx).GetHandle();
+            lodInfo.meshletVertexBuffer = (uint32)model.GetMeshletVertexBufferView(lodIdx).GetHandle();
+            lodInfo.meshletTriangleBuffer = (uint32)model.GetMeshletTriangleBufferView(lodIdx).GetHandle();
+            lodInfo.meshletBoundsBuffer = (uint32)model.GetMeshletBoundsBufferView(lodIdx).GetHandle();
+            lodInfo.meshletCount = model.GetMeshletCount(lodIdx);
+            m_InstanceLodStaging.PushBack(lodInfo);
+        }
+
+        m_PreCullMeshlets += meshletCount;
+        m_PreCullTriangles += model.GetMesh().lods[lod].GetFlatIndexCount() / 3;
 
         m_Draws.PushBack(GPUDraw{ (uint32)m_InstanceStaging.Size(), meshletCount, m_SlotSchemeId[materialSlot], materialSlot });
         m_InstanceStaging.PushBack(gpu);
@@ -231,6 +253,8 @@ void GPUScene::Build(StreamingManager& streamingManager, const TArray<RenderInst
 
     m_InstanceStream.Upload(*m_Device, frameIndex, "GPUScene Instance Buffer", sizeof(GPUInstance),
                             m_InstanceStaging.Data(), m_InstanceStaging.Size() * sizeof(GPUInstance));
+    m_InstanceLodStream.Upload(*m_Device, frameIndex, "GPUScene Instance LOD Table", sizeof(GPULodInfo),
+                               m_InstanceLodStaging.Data(), m_InstanceLodStaging.Size() * sizeof(GPULodInfo));
     m_MaterialStream.Upload(*m_Device, frameIndex, "GPUScene Material Buffer", sizeof(GPUMaterial),
                             m_MaterialStaging.Data(), m_MaterialStaging.Size() * sizeof(GPUMaterial));
     UploadSchemeParams(frameIndex);

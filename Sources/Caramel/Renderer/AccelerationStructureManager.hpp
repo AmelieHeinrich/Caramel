@@ -25,12 +25,16 @@ public:
 
     bool IsSupported() const { return m_RayTracingSupported; }
 
-    // Also reads back frameSlot's timing query pool from its last use, if any -- see
-    // RenderGraph::Execute's computeQueryPool param and SetLastTimedPassNames below. Safe here
-    // because the fence wait this performs is exactly what proves that prior ResolveQueryPool is done.
+    // Waits until the compute queue has executed *every* submitted build, then reads back
+    // frameSlot's timing query pool from its last use, if any -- see RenderGraph::Execute's
+    // computeQueryPool param and SetLastTimedPassNames below. The wait-all (not just frameSlot's
+    // fence) is load-bearing: RecordTLASBuild rewrites the TLAS's single mapped instance buffer on
+    // the CPU every frame, and EnsureTLASCapacity destroys the TLAS + scratch when growing, both of
+    // which race any still-in-flight build. It is nearly always already signaled -- builds are short
+    // and were submitted a full frame ago.
     void WaitForFrameSlot(uint64 frameSlot);
     agfx::CommandBuffer& GetFrameCommandBuffer(uint64 frameSlot);
-    void Submit(agfx::CommandBuffer& commandBuffer, uint64 frameSlot);
+    void Submit(agfx::CommandBuffer& commandBuffer);
 
     agfx::QueryPool& GetTimingQueryPool(uint64 frameSlot) { return m_TimingQueryPools[frameSlot]; }
     // Called after RenderGraph::Execute() records this frame's compute-queue timestamps into
@@ -71,7 +75,6 @@ private:
     agfx::CommandQueue m_ComputeQueue;
     agfx::Fence m_Fence;
     uint64 m_FenceValue = 0;
-    uint64 m_FenceFrameSlots[FRAMES_IN_FLIGHT] = {};
     agfx::CommandBuffer m_CommandBuffers[FRAMES_IN_FLIGHT];
 
     agfx::QueryPool m_TimingQueryPools[FRAMES_IN_FLIGHT];

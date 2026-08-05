@@ -226,9 +226,9 @@ void Renderer::Render(const Camera& camera, StreamingManager& streamingManager, 
             colorAttachment.texture = sceneColorHandle;
             colorAttachment.loadOp = agfx::LoadOp::Clear;
             colorAttachment.storeOp = agfx::StoreOp::Store;
-            colorAttachment.clearColor[0] = 0.1f;
-            colorAttachment.clearColor[1] = 0.1f;
-            colorAttachment.clearColor[2] = 0.1f;
+            colorAttachment.clearColor[0] = 0.0f;
+            colorAttachment.clearColor[1] = 0.0f;
+            colorAttachment.clearColor[2] = 0.0f;
             colorAttachment.clearColor[3] = 1.0f;
             builder.AddColorAttachment(colorAttachment);
 
@@ -309,7 +309,7 @@ void Renderer::Render(const Camera& camera, StreamingManager& streamingManager, 
 
     if (computeCommandBuffer) {
         computeCommandBuffer->End();
-        m_AccelStructManager->Submit(*computeCommandBuffer, m_FrameSlot);
+        m_AccelStructManager->Submit(*computeCommandBuffer);
     }
 
     commandBuffer.End();

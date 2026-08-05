@@ -336,8 +336,21 @@ namespace CaramelAsset
         static constexpr float32 kLodRatios[kLodCount] = { 1.0f, 0.5f, 0.25f, 0.12f, 0.06f };
         static constexpr float32 kLodTargetErrors[kLodCount] = { 0.0f, 0.01f, 0.03f, 0.06f, 0.12f };
 
+        // Meshes this small gain nothing from simplification (a handful of meshlets either way) and
+        // the aggressive coarse ratios just tear holes in them -- every LOD slot gets the full-detail
+        // data instead, which the runtime already handles as a normal LOD chain.
+        static constexpr size_t kLodSimplifyMinTriangles = 2048;
+
         mesh.lods[kLodCount - 1] = BuildMeshletLOD(mesh.vertices, lod0Indices, 0.0f);
         mesh.lods[kLodCount - 1].flatIndices = lod0Indices;
+
+        if (lod0Indices.Size() / 3 < kLodSimplifyMinTriangles)
+        {
+            mesh.colliderData = CookCollider(mesh.vertices, lod0Indices);
+            for (uint32 lodIndex = 1; lodIndex < kLodCount; lodIndex++)
+                mesh.lods[kLodCount - 1 - lodIndex] = mesh.lods[kLodCount - 1];
+            return mesh;
+        }
 
         for (uint32 lodIndex = 1; lodIndex < kLodCount; lodIndex++)
         {
@@ -353,7 +366,7 @@ namespace CaramelAsset
                 targetIndexCount, kLodTargetErrors[lodIndex], meshopt_SimplifyLockBorder, &resultError);
             lodIndices.Resize(newIndexCount);
 
-            if (newIndexCount > targetIndexCount * 2 && newIndexCount < lod0Indices.Size())
+            if (newIndexCount > targetIndexCount * 2)
             {
                 TArray<uint32> sloppyIndices(lod0Indices.Size());
                 size_t sloppyCount = meshopt_simplifySloppy(

@@ -52,6 +52,17 @@ GPUModel::GPUModel(const ModelMesh& mesh)
                                                                                         .SetWriteable(false);
         m_MeshletVertexBufferViews[lod] = device.CreateBufferView(meshletVertexViewInfo);
 
+        agfx::BufferCreateInfo meshletBoundsInfo = agfx::BufferCreateInfo().SetSize(lodDesc.meshletBoundsLength)
+                                                                             .SetStride(sizeof(CaramelAsset::MeshletCullData))
+                                                                             .SetUsage(agfx::BufferUsage::ShaderRead)
+                                                                             .SetMemoryType(agfx::BufferMemoryType::GPUOnly);
+        m_MeshletBoundsBuffers[lod] = device.CreateBuffer(meshletBoundsInfo);
+        agfx::BufferViewCreateInfo meshletBoundsViewInfo = agfx::BufferViewCreateInfo().SetBuffer(m_MeshletBoundsBuffers[lod].Get())
+                                                                                         .SetType(agfx::BufferViewType::Structured)
+                                                                                         .SetOffset(0)
+                                                                                         .SetWriteable(false);
+        m_MeshletBoundsBufferViews[lod] = device.CreateBufferView(meshletBoundsViewInfo);
+
         agfx::BufferCreateInfo meshletTriangleInfo = agfx::BufferCreateInfo().SetSize(lodDesc.meshletTriangleBufferLength + 4)
                                                                               .SetStride(4)
                                                                               .SetUsage(agfx::BufferUsage::ShaderRead)

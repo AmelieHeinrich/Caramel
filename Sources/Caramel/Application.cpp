@@ -9,6 +9,7 @@
 #include <Caramel/Core/Logger.hpp>
 #include <Caramel/Core/Input.hpp>
 #include <Caramel/Core/JobSystem.hpp>
+#include <Caramel/Core/CVar.hpp>
 #include <Caramel/Asset/Model.hpp>
 #include <Caramel/Physics/Physics.hpp>
 #include <Caramel/Physics/JoltMath.hpp>
@@ -30,6 +31,15 @@
 #include <cfloat>
 #include <filesystem>
 #include <fstream>
+
+namespace
+{
+    constexpr const char* kSettingsFilePath = "settings.json";
+
+    CVar cv_ShowColliders("debug.show_colliders", false, "Show Colliders", "Physics", "Draw Jolt physics collider wireframes");
+    CVar cv_ShowRenderGraphPanel("debug.show_rendergraph_panel", false, "Resource Dependency Viewer", "Renderer", "Show the resource dependency viewer");
+    CVar cv_ShowGpuTimingPanel("debug.show_gpu_timing_panel", false, "GPU Timings", "Renderer", "Show per-pass GPU timings");
+}
 
 Application::Application(const ApplicationInfo& info)
     : m_Info(info)
@@ -65,6 +75,7 @@ Application::Application(const ApplicationInfo& info)
 
     m_Window = SDL_CreateWindow(("Caramel | " + apiName).c_str(), info.Width, info.Height, windowFlags);
     assert(m_Window != nullptr && "Failed to create SDL window");
+    Input::SetWindow(m_Window);
     m_EditorContext.Window = m_Window;
     m_EditorContext.Owner = this;
 
@@ -88,10 +99,14 @@ Application::Application(const ApplicationInfo& info)
     m_EditorContext.Scripts = m_ScriptSystem.get();
 
     m_ViewportPanel.SetDropFileCallback([this](const String& path) { HandleDroppedFile(path); });
+
+    CVarRegistry::LoadFromFile(kSettingsFilePath);
 }
 
 Application::~Application()
 {
+    CVarRegistry::SaveToFile(kSettingsFilePath);
+
     JobSystem::Get().WaitAll();
     JobSystem::Shutdown();
 
@@ -165,6 +180,10 @@ void Application::Run()
             m_EditorContext.SelectedMesh = nullptr;
         }
 
+        if (Input::IsKeyPressed(SDL_SCANCODE_F1))
+            m_ConsolePanel.SetOpen(!m_ConsolePanel.IsOpen());
+        m_ConsolePanel.Draw(m_Timer.GetDelta());
+
         m_Camera.Update(m_Timer.GetDelta());
 
         m_ViewportPanel.Draw(m_EditorContext, *m_Renderer);
@@ -172,17 +191,19 @@ void Application::Run()
         TArray<RenderInstance> renderInstances = m_Scene.BuildRenderInstances(*m_StreamingManager);
 
         UpdatePicking(renderInstances);
-        if (m_ShowColliders)
+        if (*cv_ShowColliders.AsBoolPtr())
             DrawColliders(renderInstances);
 
         m_OverlayPanel.Draw(m_EditorContext, *m_StreamingManager, m_Window, m_DeviceInfo);
         m_HierarchyPanel.Draw(m_EditorContext, *m_StreamingManager);
         m_InspectorPanel.Draw(m_EditorContext, *m_StreamingManager);
         m_ContentDrawerPanel.Draw();
-        if (m_ShowRenderGraphPanel)
+        if (*cv_ShowRenderGraphPanel.AsBoolPtr())
             m_RenderGraphPanel.Draw(m_EditorContext, *m_Renderer);
-        if (m_ShowGpuTimingPanel)
+        if (*cv_ShowGpuTimingPanel.AsBoolPtr())
             m_GpuTimingPanel.Draw(*m_Renderer);
+        if (m_ShowSettingsPanel)
+            m_SettingsPanel.Draw();
         ImGui::Render();
 
         renderInstances = m_Scene.BuildRenderInstances(*m_StreamingManager);
@@ -229,7 +250,7 @@ void Application::DrawMainMenuBar()
     // The streaming and collider controls used to sit inside the viewport overlay, mixed in with
     // read-only telemetry. They are commands, so they belong on a menu.
     if (ImGui::BeginMenu(ICON_FA_GEAR " Debug")) {
-        ImGui::MenuItem(ICON_FA_CUBE " Show Colliders", nullptr, &m_ShowColliders);
+        ImGui::MenuItem(ICON_FA_CUBE " Show Colliders", nullptr, cv_ShowColliders.AsBoolPtr());
 
         bool autoStream = m_StreamingManager->GetAutoStream();
         if (ImGui::MenuItem(ICON_FA_DOWNLOAD " Automatic Streaming", nullptr, &autoStream))
@@ -239,8 +260,9 @@ void Application::DrawMainMenuBar()
             m_StreamingManager->PumpStreaming();
 
         ImGui::Separator();
-        ImGui::MenuItem(ICON_FA_DIAGRAM_PROJECT " Resource Dependency Viewer", nullptr, &m_ShowRenderGraphPanel);
-        ImGui::MenuItem(ICON_FA_STOPWATCH " GPU Timings", nullptr, &m_ShowGpuTimingPanel);
+        ImGui::MenuItem(ICON_FA_DIAGRAM_PROJECT " Resource Dependency Viewer", nullptr, cv_ShowRenderGraphPanel.AsBoolPtr());
+        ImGui::MenuItem(ICON_FA_STOPWATCH " GPU Timings", nullptr, cv_ShowGpuTimingPanel.AsBoolPtr());
+        ImGui::MenuItem(ICON_FA_SLIDERS " Settings", nullptr, &m_ShowSettingsPanel);
 
         ImGui::EndMenu();
     }

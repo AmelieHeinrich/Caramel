@@ -58,7 +58,7 @@ namespace
 
     MaterialRef Entity_GetMaterial(int32 materialIndex, const EntityRef* self)
     {
-        return MaterialRef{ self->nodeId, materialIndex };
+        return MaterialRef{ self->nodeId, materialIndex, MaterialOverride::kAllMeshes };
     }
 
     std::string Entity_GetName(const EntityRef* self)
@@ -136,7 +136,7 @@ namespace
 
     MaterialRef Instance_GetMaterial(int32 materialIndex, const InstanceRef* self)
     {
-        return MaterialRef{ self->nodeId, materialIndex };
+        return MaterialRef{ self->nodeId, materialIndex, MaterialOverride::kAllMeshes };
     }
 
     // Reads go through the stored offset when there is one so an unset mesh reports identity rather
@@ -227,7 +227,7 @@ namespace
     {
         StreamingModel* mesh = ScriptSceneBridge::Resolve(*self);
         if (!mesh)
-            return MaterialRef{ self->nodeId, -1 };
+            return MaterialRef{ self->nodeId, -1, MaterialOverride::kAllMeshes };
         return MaterialRef{ self->nodeId, mesh->GetMesh().materialIndex, (int32)self->meshSlot };
     }
 

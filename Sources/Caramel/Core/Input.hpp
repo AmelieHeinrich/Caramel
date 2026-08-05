@@ -22,6 +22,14 @@ public:
     static void ProcessEvent(const SDL_Event& event);
     static void NewFrame();
 
+    // Must be called once, right after the window is created, before any relative-mouse-mode calls.
+    static void SetWindow(SDL_Window* window);
+
+    // Relative mode hides the OS cursor and reports raw, unbounded mouse motion as deltas (no
+    // clamping at screen edges) -- used while dragging the camera view so a fast look-around swipe
+    // doesn't hit the edge of the monitor and stop tracking further motion.
+    static void SetRelativeMouseMode(bool enabled);
+
     static bool IsKeyDown(SDL_Scancode key);
     static bool IsKeyPressed(SDL_Scancode key);
     static bool IsKeyReleased(SDL_Scancode key);
@@ -52,6 +60,8 @@ private:
     static glm::vec2 s_MouseDeltaAccum;
     static glm::vec2 s_MouseScrollDelta;
     static glm::vec2 s_MouseScrollAccum;
+
+    static SDL_Window* s_Window;
 
     static SDL_Gamepad* s_Gamepad;
     static SDL_JoystickID s_GamepadInstanceID;

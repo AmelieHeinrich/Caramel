@@ -33,7 +33,6 @@ AccelerationStructureManager::AccelerationStructureManager(agfx::Device& device)
     agfx::QueryPoolCreateInfo timingQueryPoolInfo = agfx::QueryPoolCreateInfo().SetCount(RenderGraph::kMaxTimedPasses * 2);
     for (uint64 i = 0; i < FRAMES_IN_FLIGHT; ++i)
     {
-        m_FenceFrameSlots[i] = 0;
         m_CommandBuffers[i] = device.CreateCommandBuffer(m_ComputeQueue);
         m_TimingQueryPools[i] = device.CreateQueryPool(m_ComputeQueue, timingQueryPoolInfo);
     }
@@ -62,7 +61,7 @@ void AccelerationStructureManager::WaitForFrameSlot(uint64 frameSlot)
 {
     if (!m_RayTracingSupported)
         return;
-    m_Fence.Wait(m_FenceFrameSlots[frameSlot]);
+    m_Fence.Wait(m_FenceValue);
 
     if (m_TimingSlotHasData[frameSlot] && !m_TimingSlotNames[frameSlot].IsEmpty())
     {
@@ -84,11 +83,10 @@ agfx::CommandBuffer& AccelerationStructureManager::GetFrameCommandBuffer(uint64 
     return m_CommandBuffers[frameSlot];
 }
 
-void AccelerationStructureManager::Submit(agfx::CommandBuffer& commandBuffer, uint64 frameSlot)
+void AccelerationStructureManager::Submit(agfx::CommandBuffer& commandBuffer)
 {
     m_ComputeQueue.Submit(commandBuffer);
-    m_FenceFrameSlots[frameSlot] = ++m_FenceValue;
-    m_ComputeQueue.Signal(m_Fence, m_FenceValue);
+    m_ComputeQueue.Signal(m_Fence, ++m_FenceValue);
 }
 
 void AccelerationStructureManager::ScanForNewlyResidentModels(const TArray<RenderInstance>& renderInstances)

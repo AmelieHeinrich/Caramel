@@ -18,11 +18,31 @@
 #include <imgui.h>
 #include <FontAwesome/FA.h>
 
+#include <cstdio>
+#include <cstring>
+
 namespace
 {
     bool BeginStatBlock(const char* id)
     {
         return ImGui::BeginTable(id, 2, ImGuiTableFlags_SizingFixedFit);
+    }
+
+    void HumanCount(uint64 value, char out[32])
+    {
+        double scaled = 0.0;
+        const char* suffix = nullptr;
+
+        if (value >= 1000000000ull) { scaled = value / 1e9; suffix = " billion"; }
+        else if (value >= 1000000ull) { scaled = value / 1e6; suffix = " million"; }
+        else if (value >= 10000ull) { scaled = value / 1e3; suffix = "k"; }
+        else { snprintf(out, 32, "%llu", (unsigned long long)value); return; }
+
+        snprintf(out, 32, "%.2f", scaled);
+        char* end = out + strlen(out) - 1;
+        while (*end == '0') *end-- = '\0';
+        if (*end == '.') *end = '\0';
+        strcat(out, suffix);
     }
 }
 
@@ -86,7 +106,13 @@ void OverlayPanel::Draw(EditorContext& context, StreamingManager& streaming, SDL
         // Scheme buckets == pipeline switches per frame. Material batches change no GPU state yet;
         // they are shown because they are the unit that becomes one indirect bundle region later.
         const GPUScene& gpuScene = Renderer::Get().GetGPUScene();
-        EditorTheme::StatRow("Draws", "%d", (int)gpuScene.GetDraws().Size());
+        char count[32];
+        HumanCount(gpuScene.GetInstanceCount(), count);
+        EditorTheme::StatRow("Pre-cull instances", "%s", count);
+        HumanCount(gpuScene.GetPreCullMeshletCount(), count);
+        EditorTheme::StatRow("Pre-cull meshlets", "%s", count);
+        HumanCount(gpuScene.GetPreCullTriangleCount(), count);
+        EditorTheme::StatRow("Pre-cull triangles", "%s", count);
         EditorTheme::StatRow("Material batches", "%d", (int)gpuScene.GetBatches().Size());
         EditorTheme::StatRow("Scheme buckets", "%d", (int)gpuScene.GetBuckets().Size());
         ImGui::EndTable();

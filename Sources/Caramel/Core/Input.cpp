@@ -20,6 +20,8 @@ glm::vec2 Input::s_MouseDeltaAccum{};
 glm::vec2 Input::s_MouseScrollDelta{};
 glm::vec2 Input::s_MouseScrollAccum{};
 
+SDL_Window* Input::s_Window = nullptr;
+
 SDL_Gamepad* Input::s_Gamepad = nullptr;
 SDL_JoystickID Input::s_GamepadInstanceID = 0;
 std::array<bool, SDL_GAMEPAD_BUTTON_COUNT> Input::s_GamepadButtonsPrevious{};
@@ -40,6 +42,20 @@ void Input::Shutdown()
         SDL_CloseGamepad(s_Gamepad);
         s_Gamepad = nullptr;
     }
+}
+
+void Input::SetWindow(SDL_Window* window)
+{
+    s_Window = window;
+}
+
+void Input::SetRelativeMouseMode(bool enabled)
+{
+    SDL_SetWindowRelativeMouseMode(s_Window, enabled);
+    if (enabled)
+        SDL_HideCursor();
+    else
+        SDL_ShowCursor();
 }
 
 void Input::ProcessEvent(const SDL_Event& event)

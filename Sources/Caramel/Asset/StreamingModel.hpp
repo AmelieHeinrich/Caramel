@@ -49,6 +49,7 @@ public:
     agfx::BufferView& GetMeshletBufferView(uint32 lod) { return m_Gpu.GetMeshletBufferView(lod); }
     agfx::BufferView& GetMeshletVertexBufferView(uint32 lod) { return m_Gpu.GetMeshletVertexBufferView(lod); }
     agfx::BufferView& GetMeshletTriangleBufferView(uint32 lod) { return m_Gpu.GetMeshletTriangleBufferView(lod); }
+    agfx::BufferView& GetMeshletBoundsBufferView(uint32 lod) { return m_Gpu.GetMeshletBoundsBufferView(lod); }
 
     agfx::Buffer& GetVertexBuffer() { return m_Gpu.GetVertexBuffer(); }
     agfx::Buffer& GetFlatIndexBuffer(uint32 lod) { return m_Gpu.GetFlatIndexBuffer(lod); }

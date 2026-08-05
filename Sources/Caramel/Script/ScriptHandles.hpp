@@ -18,32 +18,39 @@ struct MaterialOverride;
 // Script-visible handles are plain ids, never pointers: Instance lives inside a TArray that
 // reallocates on AddInstance, and a SceneNode can be deleted while a script still holds a
 // reference. Everything resolves through the bridge on every single access.
+// No default member initializers here: AngelScript's x64 MSVC calling convention glue treats a
+// non-trivial default constructor as reason enough to return the type through a hidden pointer
+// (COMPLEX_RETURN_MASK includes asOBJ_APP_CLASS_CONSTRUCTOR), even though the real ABI returns an
+// 8-byte-or-smaller trivially-copyable struct like this one in a register. That mismatch silently
+// shifts every argument of any native function returning one of these types by one slot. Every
+// construction site already uses brace-init, which value-initializes (i.e. zeroes) omitted
+// members, so trivial default construction changes no observable behavior.
 struct EntityRef
 {
-    uint64 nodeId = 0;
+    uint64 nodeId;
 };
 
 struct InstanceRef
 {
-    uint64 nodeId = 0;
-    uint32 index = 0;
+    uint64 nodeId;
+    uint32 index;
 };
 
 struct MeshRef
 {
-    uint64 nodeId = 0;
-    uint32 meshSlot = 0;
+    uint64 nodeId;
+    uint32 meshSlot;
 };
 
 struct MaterialRef
 {
-    uint64 nodeId = 0;
-    int32 materialIndex = -1;
+    uint64 nodeId;
+    int32 materialIndex;
 
     // -1 (MaterialOverride::kAllMeshes) when the handle came from an Entity or EntityInstance: those
     // address the material as a whole. A handle obtained from a Mesh carries that mesh's slot, so a
     // mesh-scoped script only repaints its own mesh.
-    int32 meshSlot = -1;
+    int32 meshSlot;
 };
 
 class ScriptSceneBridge
