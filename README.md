@@ -43,10 +43,10 @@ xmake run Caramel
 ### Lighting & Shadows
 - Clustered light culling
 - IES profiles
-- Cascaded shadow maps, VSMs (maybe), RT soft shadows
+- Cascaded shadow maps, local shadow mapping
 
 ### Global Illumination & Ray Tracing
-- ReSTIR DI / ReSTIR GI
+- ReSTIR DI
 - DDGI
 - SSRT reflections
 - RTAO
@@ -59,13 +59,13 @@ xmake run Caramel
 - HDR output with luminosity heatmap and CIE diagram visualizer
 - Auto-exposure
 - Motion blur
+- Depth of field
 - Upsample/downsample bloom
 - Physically based camera
 
 ### Misc
 - Simple animation playback with bounding volume updates for the culling pass
 - Moment-based OIT
-- Deferred decals
 - Volumetric clouds
 
 See [Notes/TODO.md](Notes/TODO.md) for the full wishlist.
