@@ -511,6 +511,14 @@ void GPUScene::Build(StreamingManager& streamingManager, const TArray<RenderInst
                 gpu.prevTransform = state.prevTransform;
                 gpu.stateSlot = state.stateSlot;
                 gpu.stateFresh = (flags & kItemStateFresh) ? 1u : 0u;
+
+                // Columns, matching the shader's mul(M, axis) convention.
+                float32 sx = glm::length(glm::vec3(gpu.transform[0]));
+                float32 sy = glm::length(glm::vec3(gpu.transform[1]));
+                float32 sz = glm::length(glm::vec3(gpu.transform[2]));
+                gpu.boundsScaleMax = std::max(sx, std::max(sy, sz));
+                gpu.boundsScaleMin = std::min(sx, std::min(sy, sz));
+
                 m_InstanceStaging[dst] = gpu;
 
                 // Rolled forward in place rather than into a map rebuilt every frame. The entry

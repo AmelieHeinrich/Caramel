@@ -59,7 +59,8 @@ struct GPUInstance {
     uint     uStateSlot;        // index into the persistent per-instance state buffers -- NOT the
                                 // instance index, which changes meaning across frames (see below)
     uint     uStateFresh;       // 1 = the slot was just handed out, its contents are someone else's
-    uint2    uStatePad;
+    float    fBoundsScaleMax;   // longest and shortest transformed basis axis of mTransform, baked
+    float    fBoundsScaleMin;   // CPU-side so meshlet culling does not redo it per meshlet
 };
 
 // The instance buffer is compacted every frame: an instance whose model has no resident LOD is

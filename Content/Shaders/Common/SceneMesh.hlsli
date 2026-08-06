@@ -18,6 +18,7 @@
 #include "GPUScene.hlsli"
 #include "SceneGeometry.hlsli"
 #include "HZB.hlsli"
+#include "VisibilityBuffer.hlsli"
 
 #pragma task SceneAS
 #pragma mesh SceneMS
@@ -48,6 +49,7 @@ struct ScenePushConstants {
     ResourceHandle rInstanceVisibility; // uint per *state slot*, layout below -- written by the populate CS
     ResourceHandle rMeshletVisibility;  // raw bitfield, uMeshletVisStride words per state slot
     uint uMeshletVisStride;
+    float fMinContribution;             // NDC extent below which a meshlet is not worth rasterizing
 };
 AGFX_PUSH_CONSTANTS(ScenePushConstants, g_Constants);
 
@@ -68,15 +70,12 @@ uint SceneResolveDrawWord() {
 struct VSOut {
     float4 vPosition : SV_POSITION;
     float2 vUV : TEXCOORD0;
-    nointerpolation uint uMaterialSlot : TEXCOORD1;
-    nointerpolation uint uMeshletID : TEXCOORD2;
-    nointerpolation uint uInstanceIndex : TEXCOORD3;
-    nointerpolation uint uLOD : TEXCOORD4;
-    nointerpolation uint uFade : TEXCOORD5; // fade nibble | outgoing << 4, see SceneLodDither
+    nointerpolation uint uDrawWord : TEXCOORD1;
+    nointerpolation uint uMaterialSlot : TEXCOORD2;
 };
 
 struct PrimOut {
-    nointerpolation uint uPrimitiveID : PRIMITIVEID0;
+    nointerpolation uint uPrimIndex : PRIMITIVEID0;
 };
 
 GPUMaterial SceneLoadMaterial(uint materialSlot) {
@@ -94,8 +93,8 @@ GPUMaterial SceneLoadMaterial(uint materialSlot) {
 // screen-space white-noise hash, which read as crawling salt-and-pepper noise now that the resolve
 // shades real materials instead of the flat normal debug view.
 void SceneLodDither(VSOut input) {
-    uint fade = input.uFade & 0xFu;
-    bool outgoing = (input.uFade & 0x10u) != 0u;
+    uint fade = SceneDrawWordFade(input.uDrawWord);
+    bool outgoing = SceneDrawWordOutgoing(input.uDrawWord);
     if (!outgoing && fade == kDrawWordFadeOpaque)
         return;
     static const uint bayer[16] = {
@@ -152,11 +151,10 @@ struct MeshletBoundsWS {
 
 MeshletBoundsWS SceneTransformMeshletBounds(GPUInstance instance, MeshletCullData data) {
     float3x3 rs = (float3x3)instance.mTransform;
-    float sx = length(mul(rs, float3(1.0, 0.0, 0.0)));
-    float sy = length(mul(rs, float3(0.0, 1.0, 0.0)));
-    float sz = length(mul(rs, float3(0.0, 0.0, 1.0)));
-    float sMin = min(sx, min(sy, sz));
-    float sMax = max(sx, max(sy, sz));
+    // Per-instance, so GPUScene bakes them into the instance rather than having every meshlet
+    // thread recompute three length(mul(...)) for a value the whole instance shares.
+    float sMin = instance.fBoundsScaleMin;
+    float sMax = instance.fBoundsScaleMax;
 
     MeshletBoundsWS bounds;
     bounds.vCenter = mul(instance.mTransform, float4(data.vCenter, 1.0)).xyz;
@@ -179,8 +177,7 @@ bool ContributionCullMeshlet(MeshletBoundsWS bounds, FrameConstants frame) {
     float w = abs(lbrt.z - lbrt.x);
     float h = abs(lbrt.w - lbrt.y);
 
-    const float minContribution = 0.001f;
-    if (max(w, h) < minContribution)
+    if (max(w, h) < g_Constants.fMinContribution)
         return false;
     return true;
 }
@@ -310,9 +307,8 @@ void SceneMS(
 {
     uint instanceIndex = payload.uInstanceIndex;
     uint meshletIndex = payload.uMeshletIndices[uGroupID.x];
-    uint selectedLod = SceneDrawWordLod(payload.uDrawWord);
-    uint fade = SceneDrawWordFade(payload.uDrawWord)
-              | (SceneDrawWordOutgoing(payload.uDrawWord) ? 0x10u : 0u);
+    uint drawWord = payload.uDrawWord;
+    uint selectedLod = SceneDrawWordLod(drawWord);
 
     AGFXStructuredBuffer<GPUInstance> bInstances = AGFXStructuredBuffer<GPUInstance>::Create(g_Constants.rInstanceBuffer);
     GPUInstance instance = bInstances.Load(instanceIndex);
@@ -340,18 +336,15 @@ void SceneMS(
         VSOut o;
         o.vPosition = mul(mViewProj, worldPosition);
         o.vUV = vertex.vUV;
+        o.uDrawWord = drawWord;
         o.uMaterialSlot = instance.uMaterialSlot;
-        o.uMeshletID = meshletIndex;
-        o.uInstanceIndex = instanceIndex;
-        o.uLOD = selectedLod;
-        o.uFade = fade;
         outVertices[v] = o;
     }
 
     AGFXByteAddressBuffer bTriangles = AGFXByteAddressBuffer::Create(lodInfo.rMeshletTriangleBuffer);
     for (uint t = uGroupThreadID.x; t < meshlet.uTriangleCount; t += 32) {
         outTriangles[t] = UnpackTriangle(bTriangles, meshlet.uTriangleOffset + t * 3);
-        outPrims[t].uPrimitiveID = t;
+        outPrims[t].uPrimIndex = VisPack(meshletIndex, t);
     }
 }
 

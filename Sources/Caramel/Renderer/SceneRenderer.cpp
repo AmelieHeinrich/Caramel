@@ -72,16 +72,28 @@ namespace
     // nominal capacity is enough to keep them real, usable objects for now.
     constexpr uint32 kNominalUnusedBundleCapacity = 1024;
 
-    // Distance (world units) from the camera at which the finest LOD begins stepping down; each
-    // further boundary scales geometrically. The committed LOD sticks inside a relative dead-band
-    // around each boundary (hysteresis), and every switch is a dithered cross-fade over a fixed
-    // number of frames -- see AdvanceLodState in PopulateOpaqueIndirectBundleCS.
-    // First boundary, i.e. how far the finest LOD survives. The ladder is geometric, so raising this
-    // pushes every later boundary out with it.
-    constexpr float32 kLodBaseDistance = 5.0f;
-    constexpr float32 kLodDistanceMultiplier = 2.0f;
+    // LOD is selected by the instance's *projected screen size*, not its distance from the camera.
+    // Distance alone is blind to object scale, FOV and resolution: on a world-unit ladder a one-unit
+    // prop and a cathedral at the same distance get the same LOD, so a field of small props sits at
+    // the finest LOD while covering a handful of pixels each, and the raster pipeline drowns in
+    // sub-pixel triangles (every triangle costs a minimum 2x2 quad however little of it is covered).
+    //
+    // Screen height in pixels of the instance's bounding sphere at which the finest LOD stops being
+    // used. Each further boundary divides by the multiplier, so the ladder steps geometrically
+    // downwards: at kLodCount 5 and the values below the boundaries are 512/171/57/19 pixels.
+    // The committed LOD sticks inside a relative dead-band around each boundary (hysteresis), and
+    // every switch is a dithered cross-fade over a fixed duration -- see AdvanceLodState in
+    // PopulateOpaqueIndirectBundleCS.
+    constexpr float32 kLodBaseScreenSize = 512.0f;
+    constexpr float32 kLodScreenMultiplier = 3.0f;
     constexpr float32 kLodHysteresis = 0.1f;
     constexpr float32 kLodFadeSeconds = 0.25f;
+
+    // A meshlet projecting to fewer than this many pixels contributes almost nothing but quad
+    // overshading -- the raster shades a full 2x2 quad per triangle no matter how little of it is
+    // covered. Expressed in pixels rather than as the raw NDC extent ContributionCullMeshlet
+    // compares against, so it does not silently get stricter every time the resolution goes up.
+    constexpr float32 kMinContributionPixels = 2.0f;
 
     // 16 bits of fade progress in the LOD state word -- mirrors kLodStateFadeMax in
     // PopulateOpaqueIndirectBundle.hlsl.
@@ -114,8 +126,8 @@ namespace
         uint32 rFrameConstants;
         uint32 rInstanceLodTable;
         uint32 rLodStateBuffer;
-        float32 fLodBaseDistance;
-        float32 fLodDistanceMultiplier;
+        float32 fLodBaseScreenSize;
+        float32 fLodScreenMultiplier;
         uint32 rMaterialBuffer;
         uint32 uRegionCapacity;
         uint32 uPass;
@@ -127,6 +139,7 @@ namespace
         uint32 uHZBMipCount;
         float32 fLodHysteresis;
         uint32 uLodFadeStep;
+        float32 fLodProjScaleY;
     };
 
     // Mirrors BuildHZBPushConstants in Content/Shaders/BuildHZB.hlsl. The mip handles are a uint4[4]
@@ -170,6 +183,7 @@ struct ScenePushConstants
     uint32 rInstanceVisibility;
     uint32 rMeshletVisibility;
     uint32 uMeshletVisStride;
+    float32 fMinContribution;
 };
 
 // Mirrors GBufferResolvePushConstants in Content/Shaders/GBufferResolve.hlsl.
@@ -399,6 +413,7 @@ ScenePushConstants SceneRenderer::BuildPushConstants(GPUScene& gpuScene, const H
     pc.rInstanceVisibility = (uint32)m_InstanceVisibilityView.GetHandle();
     pc.rMeshletVisibility = (uint32)m_MeshletVisibilityView.GetHandle();
     pc.uMeshletVisStride = m_MeshletVisStride;
+    pc.fMinContribution = m_MinContribution;
     return pc;
 }
 
@@ -486,8 +501,8 @@ void SceneRenderer::RecordCullPass(agfx::CommandBuffer& cmd, GPUScene& gpuScene,
             populatePC.rFrameConstants = pc.rFrameConstants;
             populatePC.rInstanceLodTable = pc.rInstanceLodTable;
             populatePC.rLodStateBuffer = (uint32)m_LodStateView.GetHandle();
-            populatePC.fLodBaseDistance = kLodBaseDistance;
-            populatePC.fLodDistanceMultiplier = kLodDistanceMultiplier;
+            populatePC.fLodBaseScreenSize = kLodBaseScreenSize;
+            populatePC.fLodScreenMultiplier = kLodScreenMultiplier;
             populatePC.rMaterialBuffer = pc.rMaterialBuffer;
             populatePC.uRegionCapacity = m_OpaqueCapacities[frameIndex];
             populatePC.uPass = pass;
@@ -499,6 +514,7 @@ void SceneRenderer::RecordCullPass(agfx::CommandBuffer& cmd, GPUScene& gpuScene,
             populatePC.uHZBMipCount = pc.uHZBMipCount;
             populatePC.fLodHysteresis = kLodHysteresis;
             populatePC.uLodFadeStep = m_LodFadeStep;
+            populatePC.fLodProjScaleY = m_LodProjScaleY;
 
             computePass.SetPipeline(*populatePipeline);
             computePass.PushConstants(populatePC);
@@ -630,6 +646,17 @@ void SceneRenderer::BeginFrame(const Camera& camera, uint32 width, uint32 height
     constants.cameraPosition = m_FrozenCameraPosition;
     constants.nearPlane = m_FrozenNearPlane;
     constants.farPlane = m_FrozenFarPlane;
+
+    // Everything the projected-size LOD metric needs that is not per instance. A sphere of radius r
+    // at view depth d covers `2 * r * projScaleY / d` pixels vertically, so folding the viewport
+    // height and the projection's vertical scale into one constant leaves the shader with a single
+    // multiply and divide. Taken from the frozen projection so scene.freeze_frustum freezes LOD
+    // selection along with culling, which is the point of the freeze.
+    m_LodProjScaleY = (float32)height * 0.5f * m_FrozenProjection[1][1];
+
+    // SphereScreenExtents reports NDC extents, and NDC spans 2.0 across the viewport, so a pixel
+    // budget converts with 2 / height. Keyed on height for the same reason m_LodProjScaleY is.
+    m_MinContribution = height != 0 ? 2.0f * kMinContributionPixels / (float32)height : 0.0f;
 
     agfx::MappedBuffer mapped(m_CameraBuffers[frameIndex]);
     std::memcpy(mapped.Get(), &constants, sizeof(constants));

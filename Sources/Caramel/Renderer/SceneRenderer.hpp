@@ -119,6 +119,13 @@ private:
     Timer m_FrameTimer;
     uint32 m_LodFadeStep = 0xFFFFu;
 
+    // viewportHeight * 0.5 * projection[1][1] -- converts a world-space radius over view depth into
+    // a height in pixels, which is what the LOD ladder is keyed on. See BeginFrame.
+    float32 m_LodProjScaleY = 1.0f;
+
+    // kMinContributionPixels converted into the NDC extent ContributionCullMeshlet compares against.
+    float32 m_MinContribution = 0.0f;
+
     // The downsampler's cross-workgroup ticket counter. Zeroed from m_ZeroBuffer every frame.
     agfx::Buffer m_HZBCounter;
     agfx::BufferView m_HZBCounterView;

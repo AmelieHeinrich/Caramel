@@ -37,8 +37,8 @@ struct PopulatePushConstants {
     ResourceHandle rFrameConstants;
     ResourceHandle rInstanceLodTable;    // GPULodInfo per (instance, lod) -- see GPUScene.hlsli
     ResourceHandle rLodStateBuffer;      // uint per state slot, persists across frames (layout below)
-    float          fLodBaseDistance;     // first LOD boundary distance
-    float          fLodDistanceMultiplier; // geometric falloff per successive boundary
+    float          fLodBaseScreenSize;   // first LOD boundary, in pixels of projected height
+    float          fLodScreenMultiplier; // geometric falloff per successive boundary
     ResourceHandle rMaterialBuffer;      // GPUMaterial per slot; read for the doubleSided flag
     uint           uRegionCapacity;      // commands per bundle region
 
@@ -51,8 +51,9 @@ struct PopulatePushConstants {
     uint           uHZBWidth;   // scalars, not a uint2: a uint2 may not straddle a 16-byte boundary
     uint           uHZBHeight;  // under cbuffer packing, so adding a field above silently shifts it
     uint           uHZBMipCount;
-    float          fLodHysteresis;       // relative distance dead-band around each LOD boundary
+    float          fLodHysteresis;       // relative dead-band around each LOD boundary
     uint           uLodFadeStep;         // fade progress added per frame; kLodStateFadeMax = a full fade
+    float          fLodProjScaleY;       // viewportHeight * 0.5 * projection._22, see SceneRenderer
 };
 AGFX_PUSH_CONSTANTS(PopulatePushConstants, g_Constants);
 
@@ -139,16 +140,30 @@ static const uint kLodStateOutgoingShift = 4;
 static const uint kLodStateFadeShift = 8;
 static const uint kLodStateFadeMax = 0xFFFFu;
 
-// Distance-threshold LOD ladder: starts at the finest LOD and drops one level for every boundary
-// the distance exceeds; boundary b separates LOD (kLodCount-1-b) from LOD (kLodCount-2-b), at
-// threshold fLodBaseDistance * fLodDistanceMultiplier^b.
-uint LodFromDistance(float distance)
+// Height in pixels that a world-space sphere of `radius` covers at view depth `depth`. Depth is the
+// distance along the view axis rather than to the camera, which is what the perspective divide
+// actually uses; clamped so an instance straddling the camera reports a huge size and stays at the
+// finest LOD instead of dividing by zero.
+float ProjectedScreenSize(float radius, float depth)
+{
+    return 2.0f * radius * g_Constants.fLodProjScaleY / max(depth, 1e-4f);
+}
+
+// Screen-size LOD ladder: starts at the finest LOD and drops one level for every boundary the
+// projected size falls below; boundary b separates LOD (kLodCount-1-b) from LOD (kLodCount-2-b), at
+// threshold fLodBaseScreenSize / fLodScreenMultiplier^b.
+//
+// Keyed on projected size rather than raw distance so the ladder is independent of object scale,
+// FOV and resolution -- a distance ladder puts a one-unit prop and a cathedral at the same LOD when
+// they sit the same distance away, which leaves fields of small objects at the finest LOD covering a
+// few pixels each.
+uint LodFromScreenSize(float pixels)
 {
     uint lod = kLodCount - 1;
     [unroll]
     for (uint b = 0; b < kLodCount - 1; ++b) {
-        float threshold = g_Constants.fLodBaseDistance * pow(g_Constants.fLodDistanceMultiplier, (float)b);
-        if (distance > threshold)
+        float threshold = g_Constants.fLodBaseScreenSize / pow(g_Constants.fLodScreenMultiplier, (float)b);
+        if (pixels < threshold)
             lod = min(lod, kLodCount - 2 - b);
     }
     return lod;
@@ -159,7 +174,16 @@ uint AdvanceLodState(uint slot, GPUInstance instance, FrameConstants frame, floa
     AGFXRWStructuredBuffer<uint> lodStates = AGFXRWStructuredBuffer<uint>::Create(g_Constants.rLodStateBuffer);
     uint state = stateValid ? lodStates.Load(slot) : 0u;
 
-    float distance = length((worldMin + worldMax) * 0.5f - frame.vCameraPosition);
+    // worldMin/worldMax already have the instance transform applied, so the radius carries the
+    // instance's scale and the metric needs nothing else per instance. Half the box diagonal
+    // overestimates the sphere for non-cubic bounds, which biases towards the finer LOD -- the safe
+    // direction. Distance to the camera rather than view-space depth: the two differ by a cosine
+    // that only matters at the screen edge, and this makes no assumption about the view matrix's
+    // handedness.
+    float3 center = (worldMin + worldMax) * 0.5f;
+    float radius = length(worldMax - worldMin) * 0.5f;
+    float pixels = ProjectedScreenSize(radius, length(center - frame.vCameraPosition));
+
     uint committed = state & kLodStateCommittedMask;
     uint outgoing = (state >> kLodStateOutgoingShift) & 0xFu;
     uint fadeProgress = (state >> kLodStateFadeShift) & kLodStateFadeMax;
@@ -167,7 +191,7 @@ uint AdvanceLodState(uint slot, GPUInstance instance, FrameConstants frame, floa
     if (committed == 0 || committed - 1 > instance.uLod) {
         // First sight of this instance, or the residency ceiling dropped below the committed LOD
         // (that data is gone) -- snap, no fade.
-        state = min(LodFromDistance(distance), instance.uLod) + 1;
+        state = min(LodFromScreenSize(pixels), instance.uLod) + 1;
     } else if (outgoing != 0) {
         // Mid-fade: just advance. Retargets wait until the fade completes, which together with the
         // dead-band below prevents thrash; a multi-level jump fades in one go.
@@ -177,9 +201,11 @@ uint AdvanceLodState(uint slot, GPUInstance instance, FrameConstants frame, floa
               : committed | (outgoing << kLodStateOutgoingShift) | (fadeProgress << kLodStateFadeShift);
     } else {
         // Hysteresis: the committed LOD sticks while it stays inside the dead-band [lo, hi] formed
-        // by biasing the distance both ways; only a crossing past the band starts a fade.
-        uint lo = LodFromDistance(distance * (1.0f + g_Constants.fLodHysteresis));
-        uint hi = LodFromDistance(distance * (1.0f - g_Constants.fLodHysteresis));
+        // by biasing the projected size both ways; only a crossing past the band starts a fade.
+        // Shrinking the size gives the coarser end of the band and growing it the finer end -- the
+        // opposite way round from the distance metric this replaced, where farther meant coarser.
+        uint lo = LodFromScreenSize(pixels * (1.0f - g_Constants.fLodHysteresis));
+        uint hi = LodFromScreenSize(pixels * (1.0f + g_Constants.fLodHysteresis));
         uint target = min(clamp(committed - 1, lo, hi), instance.uLod) + 1;
         if (target != committed)
             state = target | (committed << kLodStateOutgoingShift);

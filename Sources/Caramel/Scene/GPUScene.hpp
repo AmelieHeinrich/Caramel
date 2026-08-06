@@ -64,7 +64,13 @@ struct GPUInstance
     uint32    stateSlot = 0;                                // 192
     uint32    stateFresh = 0;                               // 196  1 = slot just allocated, whatever
                                                             //      it holds belonged to someone else
-    glm::uvec2 statePad{ 0u };                              // 200
+
+    // Longest and shortest transformed basis axis of `transform`. Baked here rather than derived in
+    // the shader: they are per-instance, but SceneAS needed them per meshlet to widen meshlet
+    // bounding spheres and cones, so every meshlet thread was paying three length(mul(...)) for a
+    // value shared by the whole instance.
+    float32   boundsScaleMax = 1.0f;                        // 200
+    float32   boundsScaleMin = 1.0f;                        // 204
 };
 static_assert(sizeof(GPUInstance) == 208, "GPUInstance must stay 16-byte aligned and match GPUScene.hlsli");
 

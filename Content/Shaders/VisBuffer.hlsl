@@ -24,7 +24,8 @@ uint2 VisBufferPS(VSOut input, PrimOut prim) : SV_Target {
             discard;
     }
 
-    uint r = SceneMakeDrawWord(input.uInstanceIndex, input.uLOD, input.uFade & 0xFu, (input.uFade & 0x10u) != 0u);
-    uint g = (input.uMeshletID << 7) | prim.uPrimitiveID;
-    return uint2(r, g);
+    // Both channels are now carried verbatim: the draw word arrives whole instead of being unpacked
+    // into five interpolants and rebuilt here, and the mesh shader packs the meshlet/triangle pair
+    // per primitive.
+    return uint2(input.uDrawWord, prim.uPrimIndex);
 }
