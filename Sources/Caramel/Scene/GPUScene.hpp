@@ -37,7 +37,7 @@ struct GPUMaterial
 };
 static_assert(sizeof(GPUMaterial) == 80, "GPUMaterial must stay 16-byte aligned and match GPUScene.hlsli");
 
-/// @brief Mirrors `GPUInstance` in Content/Shaders/Common/GPUScene.hlsli field-for-field. 128 bytes.
+/// @brief Mirrors `GPUInstance` in Content/Shaders/Common/GPUScene.hlsli field-for-field. 208 bytes.
 ///
 /// Bounds are vec4 rather than vec3 on purpose: a glm::vec3 in an HLSL structured buffer is a
 /// classic alignment trap.
@@ -54,8 +54,19 @@ struct GPUInstance
     uint32    meshletCount = 0;                             // 116
     uint32    lod = 0;                                      // 120
     uint32    meshletBoundsBuffer = 0;                      // 124  handle for this instance's *resident* LOD
+    glm::mat4 prevTransform{ 1.0f };                        // 128  last frame's transform, for motion vectors
+
+    // Index into the renderer's persistent per-instance state (LOD cross-fade state, instance and
+    // meshlet visibility). NOT the instance index: Build compacts by residency, so an instance's
+    // position in the instance buffer changes whenever any earlier model streams in or out, and
+    // state indexed that way silently migrates to a different object. Allocated from a free list
+    // keyed by the same stable entity identity as prevTransform, so it survives compaction.
+    uint32    stateSlot = 0;                                // 192
+    uint32    stateFresh = 0;                               // 196  1 = slot just allocated, whatever
+                                                            //      it holds belonged to someone else
+    glm::uvec2 statePad{ 0u };                              // 200
 };
-static_assert(sizeof(GPUInstance) == 128, "GPUInstance must stay 16-byte aligned and match GPUScene.hlsli");
+static_assert(sizeof(GPUInstance) == 208, "GPUInstance must stay 16-byte aligned and match GPUScene.hlsli");
 
 /// @brief Mirrors `GPULodInfo` in Content/Shaders/Common/GPUScene.hlsli field-for-field. 20 bytes,
 /// tight-packed (no forced 16-byte alignment needed -- structured buffers in this codebase's HLSL
@@ -150,6 +161,11 @@ public:
     /// sizes the per-instance stride of the renderer's meshlet visibility bitfield.
     uint32 GetMaxMeshletCount() const { return m_MaxMeshletCount; }
 
+    /// @brief High-water mark of allocated state slots -- how many entries the renderer's persistent
+    /// per-instance buffers need. Always >= GetInstanceCount(), since freed slots stay reserved
+    /// until they are recycled.
+    uint32 GetStateSlotCount() const { return m_StateSlotCount; }
+
     /// @brief CPU-side view of this frame's compacted instance buffer (transform + local bounds),
     /// e.g. for debug-drawing instance AABBs.
     const TArray<GPUInstance>& GetInstances() const { return m_InstanceStaging; }
@@ -187,6 +203,10 @@ private:
         uint32 lod = 0;
         uint32 meshletCount = 0;
         uint32 materialSlot = 0;
+        glm::mat4 prevTransform{ 1.0f };
+        uint64 identity = 0;
+        uint32 stateSlot = 0;
+        bool stateFresh = false;
     };
 
     // First instance seen using a slot this frame -- WriteMaterial runs once per slot, not once per
@@ -230,6 +250,21 @@ private:
     // slot-remapping layer, and at a handful of schemes it costs tens of KB.
     TArray<StreamBuffer> m_SchemeParamStreams;
     TArray<TArray<uint8>> m_SchemeParamStaging;
+
+    // Last frame's transform per render instance, keyed by stable entity identity rather than
+    // instance index (Build compacts by residency, so indices change meaning across frames).
+    // Key: (owner->id << 24) | (meshSlot << 12) | instanceIndex, mesh pointer when ownerless.
+    TDictionary<uint64, glm::mat4> m_PrevTransforms;
+
+    // Stable state-slot allocation, same identity key as m_PrevTransforms and for the same reason:
+    // the renderer's persistent per-instance buffers outlive a single Build, so they cannot be
+    // indexed by the compacted instance index. Slots freed by instances that disappeared are
+    // recycled, and a recycled slot is handed out marked fresh so its stale contents are ignored.
+    TDictionary<uint64, uint32> m_StateSlots;
+    TDictionary<uint64, uint32> m_NextStateSlots;
+    TArray<uint32> m_FreeStateSlots;
+    uint32 m_StateSlotCount = 0;
+    bool m_WarnedStateSlotCollision = false;
 
     // Slots persist across frames so bucketing gets temporal coherence; contents are rewritten each
     // frame. Key: (requestId << 32) | (uint32)materialIndex.

@@ -46,6 +46,10 @@ public:
     void RenderEarly(agfx::RenderPass& renderPass, GPUScene& gpuScene, const HZBResources& hzb, uint32 width, uint32 height, uint32 frameIndex);
     void RenderLate(agfx::RenderPass& renderPass, GPUScene& gpuScene, const HZBResources& hzb, uint32 width, uint32 height, uint32 frameIndex);
 
+    /// @brief Fullscreen visibility-buffer resolve: reads the visibility + depth targets and writes
+    /// the whole gbuffer, with the scene-color attachment carrying the scene.gbuffer_debug view.
+    void RenderGBufferResolve(agfx::RenderPass& renderPass, GPUScene& gpuScene, uint32 visibilityHandle, uint32 depthHandle, uint32 width, uint32 height, uint32 frameIndex);
+
     /// @brief Call when the HZB is recreated (viewport resize): the new pyramid holds garbage and the
     /// visibility flags describe a projection that no longer exists.
     void InvalidateOcclusionState();
@@ -150,4 +154,7 @@ private:
 
     glm::mat4 m_FrozenFrustumViewProjection{ 1.0f };
     glm::mat4 m_HZBViewProjection{ 1.0f };
+
+    glm::mat4 m_PrevViewProjection{ 1.0f };
+    bool m_HasPrevViewProjection = false;
 };

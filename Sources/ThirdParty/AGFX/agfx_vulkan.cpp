@@ -1129,6 +1129,7 @@ static VkFormat agfxTextureFormatToVkFormat(agfxTextureFormat format)
         case AGFX_TEXTURE_FORMAT_R32F:              return VK_FORMAT_R32_SFLOAT;
         case AGFX_TEXTURE_FORMAT_RG32F:              return VK_FORMAT_R32G32_SFLOAT;
         case AGFX_TEXTURE_FORMAT_RGBA32F:           return VK_FORMAT_R32G32B32A32_SFLOAT;
+        case AGFX_TEXTURE_FORMAT_RG32_UINT:         return VK_FORMAT_R32G32_UINT;
         case AGFX_TEXTURE_FORMAT_DEPTH32F:          return VK_FORMAT_D32_SFLOAT;
         case AGFX_TEXTURE_FORMAT_BC1_UNORM:         return VK_FORMAT_BC1_RGBA_UNORM_BLOCK;
         case AGFX_TEXTURE_FORMAT_BC1_UNORM_SRGB:    return VK_FORMAT_BC1_RGBA_SRGB_BLOCK;
@@ -1170,6 +1171,7 @@ static void agfxTextureFormatGetBlockInfo(agfxTextureFormat format, uint32_t* by
         case AGFX_TEXTURE_FORMAT_R32F:              *bytesPerBlock = 4;  break;
         case AGFX_TEXTURE_FORMAT_RG32F:             *bytesPerBlock = 8;  break;
         case AGFX_TEXTURE_FORMAT_RGBA32F:           *bytesPerBlock = 16; break;
+        case AGFX_TEXTURE_FORMAT_RG32_UINT:         *bytesPerBlock = 8;  break;
         case AGFX_TEXTURE_FORMAT_DEPTH32F:          *bytesPerBlock = 4;  break;
         case AGFX_TEXTURE_FORMAT_BC1_UNORM:
         case AGFX_TEXTURE_FORMAT_BC1_UNORM_SRGB:

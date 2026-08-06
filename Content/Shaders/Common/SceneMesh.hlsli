@@ -16,44 +16,13 @@
 
 #include "AGFX.hlsli"
 #include "GPUScene.hlsli"
+#include "SceneGeometry.hlsli"
 #include "HZB.hlsli"
 
 #pragma task SceneAS
 #pragma mesh SceneMS
 
 AGFX_DECLARE_DRAW_ID();
-
-// Mirrors CaramelAsset::Vertex (Sources/CaramelAsset/Format.hpp) field-for-field.
-struct Vertex {
-    float3 vPosition;
-    float3 vNormal;
-    float4 vTangent; // xyz = tangent, w = handedness
-    float2 vUV;
-};
-
-// Mirrors CaramelAsset::MeshletDesc / meshopt_Meshlet exactly.
-struct MeshletDesc {
-    uint uVertexOffset;
-    uint uTriangleOffset; // byte offset into the meshlet-triangle buffer, already 4-byte aligned
-    uint uVertexCount;
-    uint uTriangleCount;
-};
-
-// Mirrors FrameConstants in Sources/Caramel/Renderer/SceneRenderer.cpp field-for-field.
-struct FrameConstants {
-    float4x4 mView;
-    float4x4 mProjection;
-    float4x4 mViewProjection;
-    float4x4 mInvView;
-    float4x4 mInvProjection;
-    float4x4 mInvViewProjection;
-    float4   vFrustumPlanes[6]; // Left/Right/Bottom/Top/Near/Far, xyz = normal, w = distance
-    float3   vCameraPosition;
-    float    fNearPlane;
-    float    fFarPlane;
-    float3   _Pad;
-    float4x4 mHZBViewProjection; // the camera the current pyramid was rasterized from
-};
 
 struct ScenePushConstants {
     ResourceHandle rFrameConstants;
@@ -63,24 +32,25 @@ struct ScenePushConstants {
     ResourceHandle rDrawIndirection; // valid on every backend; only read on Vulkan
     ResourceHandle rSampler;
     ResourceHandle rFallbackTexture; // handle held by a material texture slot with nothing bound
-    uint uDebugId; // scene.debug_id (see Core/CVar.hpp), read by DebugMeshletID.hlsl
     ResourceHandle rInstanceLodTable;  // GPULodInfo per (instance, lod) -- see GPUScene.hlsli
     uint uDrawIndirectionBase;         // start of this execute's bundle region in rDrawIndirection;
                                        // region * capacity, see SceneRenderer's region table. Vulkan only
     uint uCullFlags;                   // bit0 = culling enabled, bit1 = the pyramid holds real data
     ResourceHandle rHZB;
-    uint2 uHZBSize;
+    // Two scalars, deliberately not a uint2. Push constants pack by cbuffer rules, where a uint2 may
+    // not straddle a 16-byte boundary -- at this offset it would be bumped forward by one slot, and
+    // every field after it would then read its neighbour's value (garbage HZB dimensions, and the
+    // two visibility handles below shifted onto the wrong resources). Scalars cannot straddle, so
+    // this stays correct no matter what is added or removed above it.
+    uint uHZBWidth;
+    uint uHZBHeight;
     uint uHZBMipCount;
-    ResourceHandle rInstanceVisibility; // uint per instance, layout below -- written by the populate CS
-    ResourceHandle rMeshletVisibility;  // raw bitfield, uMeshletVisStride words per instance
+    ResourceHandle rInstanceVisibility; // uint per *state slot*, layout below -- written by the populate CS
+    ResourceHandle rMeshletVisibility;  // raw bitfield, uMeshletVisStride words per state slot
     uint uMeshletVisStride;
 };
 AGFX_PUSH_CONSTANTS(ScenePushConstants, g_Constants);
 
-static const uint kSceneDebugIdMeshlet = 0;
-static const uint kSceneDebugIdPrimitive = 1;
-static const uint kSceneDebugIdInstance = 2;
-static const uint kSceneDebugIdLod = 3;
 static const uint kSceneCullFlagEnabled = 1u;
 static const uint kSceneCullFlagHZBValid = 2u;
 static const uint kSceneCullFlagLatePass = 4u;
@@ -97,15 +67,12 @@ uint SceneResolveDrawWord() {
 
 struct VSOut {
     float4 vPosition : SV_POSITION;
-    float3 vWorldNormal : NORMAL0;
     float2 vUV : TEXCOORD0;
     nointerpolation uint uMaterialSlot : TEXCOORD1;
-    float3 vWorldPosition : TEXCOORD2;
-    float4 vWorldTangent : TEXCOORD3;
-    nointerpolation uint uMeshletID : TEXCOORD4;
-    nointerpolation uint uInstanceIndex : TEXCOORD5;
-    nointerpolation uint uLOD : TEXCOORD6;
-    nointerpolation uint uFade : TEXCOORD7; // fade nibble | outgoing << 4, see SceneLodDither
+    nointerpolation uint uMeshletID : TEXCOORD2;
+    nointerpolation uint uInstanceIndex : TEXCOORD3;
+    nointerpolation uint uLOD : TEXCOORD4;
+    nointerpolation uint uFade : TEXCOORD5; // fade nibble | outgoing << 4, see SceneLodDither
 };
 
 struct PrimOut {
@@ -120,23 +87,27 @@ GPUMaterial SceneLoadMaterial(uint materialSlot) {
 #define SCENE_LOAD_SCHEME_PARAMS(type, materialSlot) \
     (AGFXStructuredBuffer<type>::Create(g_Constants.rSchemeParams).Load(materialSlot))
 
+// 4x4 ordered Bayer dissolve: 16 thresholds map 1:1 onto the 16 fade levels, so coverage grows by
+// exactly one pixel per 4x4 tile per level and every pixel flips exactly once over a fade. The
+// incoming and outgoing halves partition the thresholds exactly (threshold < fade vs >= fade), so
+// a cross-fading surface never shows holes or double-covered pixels. Replaced the previous
+// screen-space white-noise hash, which read as crawling salt-and-pepper noise now that the resolve
+// shades real materials instead of the flat normal debug view.
 void SceneLodDither(VSOut input) {
     uint fade = input.uFade & 0xFu;
     bool outgoing = (input.uFade & 0x10u) != 0u;
     if (!outgoing && fade == kDrawWordFadeOpaque)
         return;
-    float f = (float)fade / (float)kDrawWordFadeOpaque;
-    float n = frac(52.9829189f * frac(dot(input.vPosition.xy, float2(0.06711056f, 0.00583715f))));
-    if (outgoing ? (n < f) : (n >= f))
+    static const uint bayer[16] = {
+        0, 8, 2, 10,
+        12, 4, 14, 6,
+        3, 11, 1, 9,
+        15, 7, 5, 13
+    };
+    uint2 p = (uint2)input.vPosition.xy & 3u;
+    uint threshold = bayer[p.y * 4 + p.x];
+    if (outgoing ? (threshold < fade) : (threshold >= fade))
         discard;
-}
-
-uint3 UnpackTriangle(AGFXByteAddressBuffer buf, uint byteOffset) {
-    uint wordOffset = byteOffset & ~3u;
-    uint shift = (byteOffset - wordOffset) * 8;
-    uint2 words = buf.Load2(wordOffset);
-    uint packed = (shift == 0) ? words.x : ((words.x >> shift) | (words.y << (32 - shift)));
-    return uint3(packed & 0xFF, (packed >> 8) & 0xFF, (packed >> 16) & 0xFF);
 }
 
 struct MeshletPayload {
@@ -212,7 +183,7 @@ bool OcclusionCullMeshlet(GPUInstance instance, MeshletCullData data, FrameConst
     float radius;
     SceneGetMeshletBoundingSphere(instance, data, center, radius);
 
-    HZBParams hzb = HZBMakeParams(g_Constants.rHZB, g_Constants.uHZBSize.x, g_Constants.uHZBSize.y, g_Constants.uHZBMipCount);
+    HZBParams hzb = HZBMakeParams(g_Constants.rHZB, g_Constants.uHZBWidth, g_Constants.uHZBHeight, g_Constants.uHZBMipCount);
     return !HZBIsOccluded(center - radius, center + radius, frame.mHZBViewProjection, hzb);
 }
 
@@ -247,11 +218,29 @@ void SceneAS(uint3 uGroupID : SV_GroupID, uint3 uGroupThreadID : SV_GroupThreadI
         visible &= GPUMaterialIsDoubleSided(material) || ConeCullMeshlet(instance, cull, frame);
         visible &= ContributionCullMeshlet(instance, cull, frame);
 
-        if (SceneDrawWordOutgoing(drawWord)) {
-            visible &= OcclusionCullMeshlet(instance, cull, frame);
-        } else {
-            uint instFlags = AGFXStructuredBuffer<uint>::Create(g_Constants.rInstanceVisibility).Load(instanceIndex);
-            uint wordAddress = (instanceIndex * g_Constants.uMeshletVisStride + (meshletIndex >> 5)) * 4;
+        // The outgoing half of a cross-fade deliberately skips the occlusion test, unlike every
+        // other draw here. Two reasons, both specific to it:
+        //
+        // The pyramid it would be tested against was built from this frame's early-pass depth, which
+        // during a fade holds the dithered *incoming* half of this same surface at a different LOD.
+        // Occlusion culling assumes the pyramid contains occluders; here it contains the candidate
+        // itself, one LOD removed, so the two halves of one surface compete and the simplified one
+        // loses wherever the other sits in front of it.
+        //
+        // And it is the one draw with no recovery path. Anything the late pass wrongly culls is
+        // normally either already on screen from the early pass or redrawn next frame once the
+        // visibility bits rebuild -- but the outgoing half is late-pass only, never enters the
+        // meshlet visibility bits, and its depth never reaches the pyramid (built before the late
+        // pass). A single false positive deletes it outright and nothing corrects it. It lives for
+        // under kLodFadeSeconds over a shrinking share of pixels, so frustum + cone + contribution
+        // are enough.
+        if (!SceneDrawWordOutgoing(drawWord)) {
+            // Both of these persist across frames, so they are keyed by the instance's stable state
+            // slot rather than its instance index -- see SceneStateSlot in GPUScene.hlsli. The
+            // populate CS writes them under the same key.
+            uint slot = SceneStateSlot(instance);
+            uint instFlags = AGFXStructuredBuffer<uint>::Create(g_Constants.rInstanceVisibility).Load(slot);
+            uint wordAddress = (slot * g_Constants.uMeshletVisStride + (meshletIndex >> 5)) * 4;
             uint mask = 1u << (meshletIndex & 31u);
 
             if ((g_Constants.uCullFlags & kSceneCullFlagLatePass) != 0) {
@@ -325,11 +314,8 @@ void SceneMS(
 
         VSOut o;
         o.vPosition = mul(mViewProj, worldPosition);
-        o.vWorldNormal = vertex.vNormal;
         o.vUV = vertex.vUV;
         o.uMaterialSlot = instance.uMaterialSlot;
-        o.vWorldPosition = worldPosition.xyz;
-        o.vWorldTangent = float4(mul((float3x3)mModel, vertex.vTangent.xyz), vertex.vTangent.w);
         o.uMeshletID = meshletIndex;
         o.uInstanceIndex = instanceIndex;
         o.uLOD = selectedLod;

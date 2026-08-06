@@ -459,6 +459,9 @@ typedef enum agfxTextureFormat {
     AGFX_TEXTURE_FORMAT_RG32F,
     AGFX_TEXTURE_FORMAT_RGBA32F,
 
+    /// @brief Two-channel 32-bit unsigned integer format. Use for ID/visibility render targets.
+    AGFX_TEXTURE_FORMAT_RG32_UINT,
+
     /// @brief 32-bit floating point depth format, for use as a depth attachment.
     AGFX_TEXTURE_FORMAT_DEPTH32F,
 

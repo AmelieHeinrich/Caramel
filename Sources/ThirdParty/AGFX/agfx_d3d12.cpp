@@ -2812,6 +2812,8 @@ DXGI_FORMAT agfxTextureFormatToDXGIFormat(agfxTextureFormat format) {
             return DXGI_FORMAT_R32G32_FLOAT;
         case AGFX_TEXTURE_FORMAT_RGBA32F:
             return DXGI_FORMAT_R32G32B32A32_FLOAT;
+        case AGFX_TEXTURE_FORMAT_RG32_UINT:
+            return DXGI_FORMAT_R32G32_UINT;
         case AGFX_TEXTURE_FORMAT_DEPTH32F:
             return DXGI_FORMAT_D32_FLOAT;
         case AGFX_TEXTURE_FORMAT_BC1_UNORM:

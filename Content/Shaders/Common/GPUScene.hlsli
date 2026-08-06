@@ -41,7 +41,7 @@ struct GPUMaterial {
     uint2  uPad;
 };
 
-// Mirrors GPUInstance (Sources/Caramel/Scene/GPUScene.hpp) field-for-field. 128 bytes.
+// Mirrors GPUInstance (Sources/Caramel/Scene/GPUScene.hpp) field-for-field. 208 bytes.
 // Bounds are float4 rather than float3 to keep the C++/HLSL layouts trivially identical.
 struct GPUInstance {
     float4x4 mTransform;
@@ -55,7 +55,22 @@ struct GPUInstance {
     uint     uMeshletCount;
     uint     uLod;
     uint     rMeshletBoundsBuffer;
+    float4x4 mPrevTransform;    // last frame's transform, for motion vectors
+    uint     uStateSlot;        // index into the persistent per-instance state buffers -- NOT the
+                                // instance index, which changes meaning across frames (see below)
+    uint     uStateFresh;       // 1 = the slot was just handed out, its contents are someone else's
+    uint2    uStatePad;
 };
+
+// The instance buffer is compacted every frame: an instance whose model has no resident LOD is
+// dropped, so every later instance shifts down. Anything that persists across frames and is keyed
+// per instance -- the LOD cross-fade state, the instance visibility flags, the meshlet visibility
+// bitfield -- must therefore be indexed by uStateSlot, which GPUScene keeps stable across
+// compaction, never by the instance index. Indexing those by instance index makes state migrate to
+// a different object whenever streaming changes residency: LOD fades retrigger on their own and the
+// two-pass occlusion scheme replays the wrong meshlet set.
+uint SceneStateSlot(GPUInstance instance) { return instance.uStateSlot; }
+bool SceneStateIsFresh(GPUInstance instance) { return instance.uStateFresh != 0u; }
 
 // Mirrors CaramelAsset::MeshletCullData (Sources/CaramelAsset/Format.hpp) field-for-field. One
 // entry per meshlet in instance.rMeshletBoundsBuffer, indexed by meshlet index (0..uMeshletCount-1),
@@ -130,16 +145,16 @@ void SceneGetMeshletBoundingSphere(GPUInstance instance, MeshletCullData bounds,
     outRadius = bounds.fRadius * max(sx, max(sy, sz));
 }
 
-// World-space normal cone for one meshlet: every triangle in the meshlet faces within fConeCutoff
-// (a cosine of the half-angle, [-1, 1]) of vConeAxis around vConeApex, so a viewer outside that
-// cone sees the whole meshlet back-facing and it can be culled. fConeCutoff == 1 means meshopt
-// could not build a useful cone (e.g. curved/double-sided geometry) -- never cull on it.
-// vConeAxis uses the same uniform-scale, no-inverse-transpose assumption as vWorldNormal in
-// SceneMesh.hlsli's SceneMS.
 void SceneGetMeshletCone(GPUInstance instance, MeshletCullData bounds, out float3 outApex, out float3 outAxis, out float outCutoff) {
     outApex = mul(instance.mTransform, float4(bounds.vConeApex, 1.0)).xyz;
-    outAxis = normalize(mul((float3x3)instance.mTransform, bounds.vConeAxis));
-    outCutoff = bounds.fConeCutoff;
+    float3x3 rs = (float3x3)instance.mTransform;
+    outAxis = normalize(mul(rs, bounds.vConeAxis));
+    float sx = length(mul(rs, float3(1.0, 0.0, 0.0)));
+    float sy = length(mul(rs, float3(0.0, 1.0, 0.0)));
+    float sz = length(mul(rs, float3(0.0, 0.0, 1.0)));
+    float sMin = min(sx, min(sy, sz));
+    float sMax = max(sx, max(sy, sz));
+    outCutoff = sMax > sMin * 1.001f ? 1.0f : bounds.fConeCutoff;
 }
 
 #endif

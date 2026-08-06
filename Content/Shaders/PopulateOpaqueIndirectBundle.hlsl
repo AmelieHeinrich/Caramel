@@ -36,7 +36,7 @@ struct PopulatePushConstants {
     ResourceHandle rDrawIndirection; // valid on every backend; only read/written on Vulkan
     ResourceHandle rFrameConstants;
     ResourceHandle rInstanceLodTable;    // GPULodInfo per (instance, lod) -- see GPUScene.hlsli
-    ResourceHandle rLodStateBuffer;      // uint per instance, persists across frames (layout below)
+    ResourceHandle rLodStateBuffer;      // uint per state slot, persists across frames (layout below)
     float          fLodBaseDistance;     // first LOD boundary distance
     float          fLodDistanceMultiplier; // geometric falloff per successive boundary
     ResourceHandle rMaterialBuffer;      // GPUMaterial per slot; read for the doubleSided flag
@@ -45,10 +45,11 @@ struct PopulatePushConstants {
     // 0 = early pass (redraw what was visible last frame), 1 = late pass (everything that is visible
     // now against the freshly built pyramid, minus whatever the early pass already drew).
     uint           uPass;
-    ResourceHandle rVisibilityBuffer;    // uint per instance, persists across frames
+    ResourceHandle rVisibilityBuffer;    // uint per state slot, persists across frames
     uint           uCullFlags;           // bit0 = culling enabled, bit1 = the pyramid holds real data
     ResourceHandle rHZB;
-    uint2          uHZBSize;
+    uint           uHZBWidth;   // scalars, not a uint2: a uint2 may not straddle a 16-byte boundary
+    uint           uHZBHeight;  // under cbuffer packing, so adding a field above silently shifts it
     uint           uHZBMipCount;
     float          fLodHysteresis;       // relative distance dead-band around each LOD boundary
     uint           uLodFadeStep;         // fade progress added per frame; kLodStateFadeMax = a full fade
@@ -153,10 +154,10 @@ uint LodFromDistance(float distance)
     return lod;
 }
 
-uint AdvanceLodState(uint index, GPUInstance instance, FrameConstants frame, float3 worldMin, float3 worldMax, bool stateValid)
+uint AdvanceLodState(uint slot, GPUInstance instance, FrameConstants frame, float3 worldMin, float3 worldMax, bool stateValid)
 {
     AGFXRWStructuredBuffer<uint> lodStates = AGFXRWStructuredBuffer<uint>::Create(g_Constants.rLodStateBuffer);
-    uint state = stateValid ? lodStates.Load(index) : 0u;
+    uint state = stateValid ? lodStates.Load(slot) : 0u;
 
     float distance = length((worldMin + worldMax) * 0.5f - frame.vCameraPosition);
     uint committed = state & kLodStateCommittedMask;
@@ -184,7 +185,7 @@ uint AdvanceLodState(uint index, GPUInstance instance, FrameConstants frame, flo
             state = target | (committed << kLodStateOutgoingShift);
     }
 
-    lodStates.Store(index, state);
+    lodStates.Store(slot, state);
     return state;
 }
 
@@ -246,7 +247,13 @@ void PopulateOpaqueIndirectBundleCS(uint3 dtid : SV_DispatchThreadID) {
     FrameConstants frame = AGFXStructuredBuffer<FrameConstants>::Create(g_Constants.rFrameConstants).Load(0);
 
     bool cullEnabled = (g_Constants.uCullFlags & kCullFlagEnabled) != 0;
-    bool flagsValid = (g_Constants.uCullFlags & kCullFlagVisibilityValid) != 0;
+
+    // Everything persisted across frames hangs off the state slot, never off `index` -- see the
+    // comment on SceneStateSlot in GPUScene.hlsli. A freshly handed-out slot still holds whatever
+    // the instance that previously owned it left behind, so it counts as invalid for one frame.
+    uint slot = SceneStateSlot(instance);
+    bool flagsValid = (g_Constants.uCullFlags & kCullFlagVisibilityValid) != 0
+                   && !SceneStateIsFresh(instance);
 
     float3 worldMin, worldMax;
     ComputeWorldBounds(instance, worldMin, worldMax);
@@ -255,8 +262,8 @@ void PopulateOpaqueIndirectBundleCS(uint3 dtid : SV_DispatchThreadID) {
     // The early pass advances the LOD state machine for every instance, visible or not; the late
     // pass reads what it wrote, so both passes agree on committed/outgoing/fade within the frame.
     uint lodState = g_Constants.uPass == kPopulatePassEarly
-                  ? AdvanceLodState(index, instance, frame, worldMin, worldMax, flagsValid)
-                  : AGFXRWStructuredBuffer<uint>::Create(g_Constants.rLodStateBuffer).Load(index);
+                  ? AdvanceLodState(slot, instance, frame, worldMin, worldMax, flagsValid)
+                  : AGFXRWStructuredBuffer<uint>::Create(g_Constants.rLodStateBuffer).Load(slot);
     uint committedLod = (lodState & kLodStateCommittedMask) - 1;
     uint outgoingBiased = (lodState >> kLodStateOutgoingShift) & 0xFu;
     uint fade = LodStateFadeNibble(lodState);
@@ -269,27 +276,36 @@ void PopulateOpaqueIndirectBundleCS(uint3 dtid : SV_DispatchThreadID) {
         // field is preserved (the meshlet bits still describe that LOD) unless the flags are not
         // trustworthy, in which case the whole word resets to a known zero.
         //
-        // Only the committed LOD is drawn here -- the outgoing half of a cross-fade is late-pass
-        // only, so the meshlet visibility bits keep describing exactly one LOD per instance. The
-        // dither holes it leaves in the early depth only make the pyramid conservative.
-        uint old = visibility.Load(index);
+        // Both halves of a cross-fade are drawn here, not just the committed LOD. The two passes only
+        // work because the early one lays down the full depth of everything that was visible last
+        // frame -- the pyramid built from it is what the late pass and every occlusion test rely on.
+        // A dithered instance whose other half is missing punches a hole in that depth exactly the
+        // size of the object, so the pyramid stops occluding anything behind it and the instance's
+        // own late-pass occlusion test has nothing to stand on. The two halves cover complementary
+        // Bayer thresholds, so together they still write each pixel exactly once.
+        //
+        // This stays out of the meshlet visibility bookkeeping: SceneAS skips all of it for outgoing
+        // draws in both passes, so the bits still describe exactly one LOD per instance.
+        uint old = visibility.Load(slot);
         bool wasVisible = flagsValid && (old & kInstanceVisVisible) != 0;
         bool drawnEarly = wasVisible && frustumVisible;
 
         uint next = 0;
         if (drawnEarly) {
             EmitDraw(index, instance, committedLod, fade, false);
+            if (outgoingBiased != 0)
+                EmitDraw(index, instance, min(outgoingBiased - 1, instance.uLod), fade, true);
             bool bitsMatchLod = (old & kInstanceVisLodMask) == ((committedLod + 1) << kInstanceVisLodShift);
             next = (old & kInstanceVisLodMask) | kInstanceVisVisible | kInstanceVisDrawnEarly
                  | (bitsMatchLod ? kInstanceVisBitsLodValid : 0u);
         } else if (flagsValid) {
             next = old & kInstanceVisLodMask;
         }
-        visibility.Store(index, next);
+        visibility.Store(slot, next);
         return;
     }
 
-    uint old = visibility.Load(index);
+    uint old = visibility.Load(slot);
     bool drawnEarly = (old & kInstanceVisDrawnEarly) != 0;
 
     // The occlusion test projects with the pyramid's own camera (mHZBViewProjection), never the
@@ -297,12 +313,12 @@ void PopulateOpaqueIndirectBundleCS(uint3 dtid : SV_DispatchThreadID) {
     // position, which is what it is for.
     bool occluded = false;
     if (cullEnabled && (g_Constants.uCullFlags & kCullFlagHZBValid) != 0 && frustumVisible) {
-        HZBParams hzb = HZBMakeParams(g_Constants.rHZB, g_Constants.uHZBSize.x, g_Constants.uHZBSize.y, g_Constants.uHZBMipCount);
+        HZBParams hzb = HZBMakeParams(g_Constants.rHZB, g_Constants.uHZBWidth, g_Constants.uHZBHeight, g_Constants.uHZBMipCount);
         occluded = HZBIsOccluded(worldMin, worldMax, frame.mHZBViewProjection, hzb);
     }
 
     if (!frustumVisible || occluded) {
-        visibility.Store(index, old & kInstanceVisLodMask);
+        visibility.Store(slot, old & kInstanceVisLodMask);
         return;
     }
 
@@ -310,12 +326,14 @@ void PopulateOpaqueIndirectBundleCS(uint3 dtid : SV_DispatchThreadID) {
         // Emit every visible instance, drawn early or not: SceneAS re-tests all its meshlets against
         // the fresh pyramid, draws only the ones the early pass skipped, and rewrites the meshlet
         // visibility bits for the LOD recorded here. The outgoing half of a cross-fade is a second,
-        // short-lived draw that stays out of the meshlet-bits bookkeeping entirely (see SceneAS).
+        // short-lived draw that stays out of the meshlet-bits bookkeeping entirely (see SceneAS) --
+        // which is exactly why it needs the !drawnEarly guard the incoming half does not: with no
+        // per-meshlet record of what the early pass drew, re-emitting it here would draw it twice.
         EmitDraw(index, instance, committedLod, fade, false);
-        if (outgoingBiased != 0)
+        if (outgoingBiased != 0 && !drawnEarly)
             EmitDraw(index, instance, min(outgoingBiased - 1, instance.uLod), fade, true);
         bool bitsMatchLod = (old & kInstanceVisLodMask) == ((committedLod + 1) << kInstanceVisLodShift);
-        visibility.Store(index, ((committedLod + 1) << kInstanceVisLodShift) | kInstanceVisVisible
+        visibility.Store(slot, ((committedLod + 1) << kInstanceVisLodShift) | kInstanceVisVisible
                               | (drawnEarly ? kInstanceVisDrawnEarly : 0u)
                               | (bitsMatchLod ? kInstanceVisBitsLodValid : 0u));
         return;
@@ -323,9 +341,10 @@ void PopulateOpaqueIndirectBundleCS(uint3 dtid : SV_DispatchThreadID) {
 
     // Culling disabled: the early pass already drew everything visible last frame in full, so only
     // emit the difference, and mark the meshlet bits stale so re-enabling culling starts conservative.
-    visibility.Store(index, kInstanceVisVisible | (drawnEarly ? kInstanceVisDrawnEarly : 0u));
-    if (!drawnEarly)
+    visibility.Store(slot, kInstanceVisVisible | (drawnEarly ? kInstanceVisDrawnEarly : 0u));
+    if (!drawnEarly) {
         EmitDraw(index, instance, committedLod, fade, false);
-    if (outgoingBiased != 0)
-        EmitDraw(index, instance, min(outgoingBiased - 1, instance.uLod), fade, true);
+        if (outgoingBiased != 0)
+            EmitDraw(index, instance, min(outgoingBiased - 1, instance.uLod), fade, true);
+    }
 }

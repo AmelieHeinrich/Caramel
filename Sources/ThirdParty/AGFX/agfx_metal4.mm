@@ -2289,6 +2289,7 @@ MTLPixelFormat agfxPixelFormatToMTL(agfxTextureFormat format) {
         case AGFX_TEXTURE_FORMAT_R32F: return MTLPixelFormatR32Float;
         case AGFX_TEXTURE_FORMAT_RG32F: return MTLPixelFormatRG32Float;
         case AGFX_TEXTURE_FORMAT_RGBA32F: return MTLPixelFormatRGBA32Float;
+        case AGFX_TEXTURE_FORMAT_RG32_UINT: return MTLPixelFormatRG32Uint;
 
         case AGFX_TEXTURE_FORMAT_DEPTH32F: return MTLPixelFormatDepth32Float;
 

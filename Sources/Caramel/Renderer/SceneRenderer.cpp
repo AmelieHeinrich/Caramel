@@ -29,9 +29,10 @@ namespace
     CVar cv_FreezeFrustum("scene.freeze_frustum", false, "Freeze Frustum", "Scene Renderer",
         "Stop updating the camera data culling reads (frustum, position, view/projection) and debug-draw the frustum frozen in place");
 
-    // Which hash DebugMeshletID.hlsl colors by.
-    CVar cv_DebugId("scene.debug_id", 0, 0, 2, "Debug ID", "Scene Renderer",
-        "Color by 0 = meshlet ID, 1 = primitive (triangle) ID, 2 = instance ID");
+    // Which gbuffer channel or ID hash GBufferResolve.hlsl writes into scene color while there is
+    // no deferred shading pass yet.
+    CVar cv_GBufferDebug("scene.gbuffer_debug", 0, 0, 8, "GBuffer Debug", "Scene Renderer",
+        "0 = albedo, 1 = normal, 2 = metallic/roughness, 3 = emissive, 4 = motion, 5 = meshlet ID, 6 = triangle ID, 7 = instance ID, 8 = LOD");
 
     // Off: the depth pyramid stops being rebuilt and freezes at whatever it last held, together with
     // the viewProjection occlusion tests project bounds with (hzbViewProjection). Every occlusion
@@ -40,8 +41,9 @@ namespace
     CVar cv_BuildHZB("scene.build_hzb", true, "Build HZB", "Scene Renderer",
         "Rebuild the depth pyramid every frame. Off freezes it in place for debugging occlusion culling");
 
-    constexpr const char* kDebugMeshletIDShaderPath = "Content/Shaders/DebugMeshletID.hlsl";
-    constexpr const char* kDebugMeshletIDTwoSidedShaderPath = "Content/Shaders/DebugMeshletIDTwoSided.hlsl";
+    constexpr const char* kVisBufferShaderPath = "Content/Shaders/VisBuffer.hlsl";
+    constexpr const char* kVisBufferTwoSidedShaderPath = "Content/Shaders/VisBufferTwoSided.hlsl";
+    constexpr const char* kGBufferResolveShaderPath = "Content/Shaders/GBufferResolve.hlsl";
     constexpr const char* kPopulateOpaqueIndirectBundleShaderPath = "Content/Shaders/PopulateOpaqueIndirectBundle.hlsl";
     constexpr const char* kBuildHZBShaderPath = "Content/Shaders/BuildHZB.hlsl";
 
@@ -74,7 +76,9 @@ namespace
     // further boundary scales geometrically. The committed LOD sticks inside a relative dead-band
     // around each boundary (hysteresis), and every switch is a dithered cross-fade over a fixed
     // number of frames -- see AdvanceLodState in PopulateOpaqueIndirectBundleCS.
-    constexpr float32 kLodBaseDistance = 20.0f;
+    // First boundary, i.e. how far the finest LOD survives. The ladder is geometric, so raising this
+    // pushes every later boundary out with it.
+    constexpr float32 kLodBaseDistance = 45.0f;
     constexpr float32 kLodDistanceMultiplier = 2.0f;
     constexpr float32 kLodHysteresis = 0.1f;
     constexpr float32 kLodFadeSeconds = 0.25f;
@@ -97,6 +101,7 @@ namespace
         float farPlane;
         glm::vec3 pad;
         glm::mat4 hzbViewProjection;
+        glm::mat4 prevViewProjection;
     };
 
     // Mirrors PopulatePushConstants in Content/Shaders/PopulateOpaqueIndirectBundle.hlsl.
@@ -155,7 +160,6 @@ struct ScenePushConstants
     uint32 rDrawIndirection;
     uint32 rSampler;
     uint32 rFallbackTexture;
-    uint32 uDebugId;
     uint32 rInstanceLodTable;
     uint32 uDrawIndirectionBase;
     uint32 uCullFlags;
@@ -168,6 +172,22 @@ struct ScenePushConstants
     uint32 uMeshletVisStride;
 };
 
+// Mirrors GBufferResolvePushConstants in Content/Shaders/GBufferResolve.hlsl.
+struct GBufferResolvePushConstants
+{
+    uint32 rFrameConstants;
+    uint32 rInstanceBuffer;
+    uint32 rMaterialBuffer;
+    uint32 rInstanceLodTable;
+    uint32 rVisibility;
+    uint32 rDepth;
+    uint32 rSampler;
+    uint32 rFallbackTexture;
+    uint32 uDebugMode;
+    uint32 uWidth;
+    uint32 uHeight;
+};
+
 SceneRenderer::SceneRenderer(agfx::Device& device, agfx::TextureFormat colorFormat, agfx::TextureFormat depthFormat, uint32 framesInFlight)
     : m_Device(&device)
 {
@@ -178,23 +198,38 @@ SceneRenderer::SceneRenderer(agfx::Device& device, agfx::TextureFormat colorForm
                .SetLodRange(0.0f, 16.0f);
     m_Sampler = m_Device->CreateSampler(samplerInfo);
 
-    agfx::RenderPipelineCreateInfo debugPipelineInfo;
-    debugPipelineInfo.SetName("Scene Debug Meshlet ID Pipeline")
-                     .SetCullMode(agfx::CullMode::Back)
-                     .SetFrontFace(agfx::FrontFace::CounterClockwise)
-                     .SetTopology(agfx::Topology::Triangles)
-                     .SetDepthState(true, true, agfx::ComparisonFunction::Less)
-                     .SetDepthFormat(depthFormat)
-                     .SetSupportsIndirect(true) // required to replay this pipeline from an indirect bundle on Metal
-                     .AddColorAttachment(colorFormat);
-    ShaderServer::RegisterRenderPipeline(debugPipelineInfo, kDebugMeshletIDShaderPath);
+    agfx::RenderPipelineCreateInfo visBufferPipelineInfo;
+    visBufferPipelineInfo.SetName("Scene Visibility Buffer Pipeline")
+                         .SetCullMode(agfx::CullMode::Back)
+                         .SetFrontFace(agfx::FrontFace::CounterClockwise)
+                         .SetTopology(agfx::Topology::Triangles)
+                         .SetDepthState(true, true, agfx::ComparisonFunction::Less)
+                         .SetDepthFormat(depthFormat)
+                         .SetSupportsIndirect(true) // required to replay this pipeline from an indirect bundle on Metal
+                         .AddColorAttachment(agfx::TextureFormat::RG32Uint);
+    ShaderServer::RegisterRenderPipeline(visBufferPipelineInfo, kVisBufferShaderPath);
 
     // Same shader, no backface culling -- replays the double-sided regions of the opaque bundle
     // (double-sided materials legitimately show their back faces).
-    agfx::RenderPipelineCreateInfo twoSidedPipelineInfo = debugPipelineInfo;
-    twoSidedPipelineInfo.SetName("Scene Debug Meshlet ID Two-Sided Pipeline")
+    agfx::RenderPipelineCreateInfo twoSidedPipelineInfo = visBufferPipelineInfo;
+    twoSidedPipelineInfo.SetName("Scene Visibility Buffer Two-Sided Pipeline")
                         .SetCullMode(agfx::CullMode::None);
-    ShaderServer::RegisterRenderPipeline(twoSidedPipelineInfo, kDebugMeshletIDTwoSidedShaderPath);
+    ShaderServer::RegisterRenderPipeline(twoSidedPipelineInfo, kVisBufferTwoSidedShaderPath);
+
+    // Attachment order is the contract with GBufferOut in GBufferResolve.hlsl and with the
+    // "GBuffer Resolve" pass in Renderer::Render -- all three must match exactly.
+    agfx::RenderPipelineCreateInfo resolvePipelineInfo;
+    resolvePipelineInfo.SetName("GBuffer Resolve Pipeline")
+                       .SetCullMode(agfx::CullMode::None)
+                       .SetFrontFace(agfx::FrontFace::CounterClockwise)
+                       .SetTopology(agfx::Topology::Triangles)
+                       .AddColorAttachment(colorFormat)
+                       .AddColorAttachment(agfx::TextureFormat::RGBA8Unorm)
+                       .AddColorAttachment(agfx::TextureFormat::RGBA16F)
+                       .AddColorAttachment(agfx::TextureFormat::RG8Unorm)
+                       .AddColorAttachment(agfx::TextureFormat::RGBA16F)
+                       .AddColorAttachment(agfx::TextureFormat::RG16F);
+    ShaderServer::RegisterRenderPipeline(resolvePipelineInfo, kGBufferResolveShaderPath);
 
     agfx::ComputePipelineCreateInfo populatePipelineInfo;
     populatePipelineInfo.SetName("Populate Opaque Indirect Bundle Pipeline");
@@ -354,7 +389,6 @@ ScenePushConstants SceneRenderer::BuildPushConstants(GPUScene& gpuScene, const H
     pc.rDrawIndirection = (uint32)m_OpaqueDrawIndirectionViews[frameIndex].GetHandle();
     pc.rSampler = (uint32)m_Sampler.GetHandle();
     pc.rFallbackTexture = gpuScene.GetFallbackTextureHandle();
-    pc.uDebugId = (uint32)*cv_DebugId.AsIntPtr();
     pc.rInstanceLodTable = (uint32)gpuScene.GetInstanceLodTableView(frameIndex).GetHandle();
     pc.uCullFlags = (*cv_EnableCulling.AsBoolPtr() ? kCullFlagEnabled : 0u)
                   | (m_HZBValid ? kCullFlagHZBValid : 0u);
@@ -375,7 +409,7 @@ agfx::IndirectBundleExecuteInfo SceneRenderer::BuildRegionExecuteInfo(const Scen
 {
     uint32 capacity = m_OpaqueCapacities[frameIndex];
     agfx::RenderPipeline* pipeline = ShaderServer::GetPipeline(
-        (region & 1u) ? kDebugMeshletIDTwoSidedShaderPath : kDebugMeshletIDShaderPath, {});
+        (region & 1u) ? kVisBufferTwoSidedShaderPath : kVisBufferShaderPath, {});
 
     ScenePushConstants regionPC = pc;
     regionPC.uDrawIndirectionBase = region * capacity;
@@ -401,7 +435,9 @@ void SceneRenderer::RecordCullPass(agfx::CommandBuffer& cmd, GPUScene& gpuScene,
 
     // Worst case a late region holds two draws per instance while everything cross-fades at once.
     EnsureOpaqueCapacity(frameIndex, count * 2);
-    EnsureVisibilityCapacity(count, gpuScene.GetMaxMeshletCount());
+    // Sized by state slots, not instances: the persistent buffers are indexed by GPUInstance's
+    // stateSlot so they survive Build's compaction, and freed slots stay reserved until recycled.
+    EnsureVisibilityCapacity(gpuScene.GetStateSlotCount(), gpuScene.GetMaxMeshletCount());
 
     agfx::IndirectBundle& bundle = m_OpaqueBundles[frameIndex];
     ScenePushConstants pc = BuildPushConstants(gpuScene, hzb, frameIndex);
@@ -565,6 +601,12 @@ void SceneRenderer::BeginFrame(const Camera& camera, uint32 width, uint32 height
         m_HZBViewProjection = constants.viewProjection;
     constants.hzbViewProjection = m_HZBViewProjection;
 
+    // Always the live viewProjection, never the frozen-culling one: motion vectors describe what
+    // was actually rendered last frame.
+    constants.prevViewProjection = m_HasPrevViewProjection ? m_PrevViewProjection : constants.viewProjection;
+    m_PrevViewProjection = constants.viewProjection;
+    m_HasPrevViewProjection = true;
+
     if (!*cv_FreezeFrustum.AsBoolPtr())
     {
         m_FrozenView = camera.GetView();
@@ -639,4 +681,35 @@ void SceneRenderer::RenderLate(agfx::RenderPass& renderPass, GPUScene& gpuScene,
         if (info.renderPipeline)
             renderPass.ExecuteIndirectBundle(m_OpaqueBundles[frameIndex], info);
     }
+}
+
+void SceneRenderer::RenderGBufferResolve(agfx::RenderPass& renderPass, GPUScene& gpuScene, uint32 visibilityHandle, uint32 depthHandle, uint32 width, uint32 height, uint32 frameIndex)
+{
+    // No instances means GPUScene never created this slot's stream views, and depth stays cleared
+    // so every pixel background-rejects anyway -- the pass still runs for its attachment clears.
+    if (gpuScene.GetInstanceCount() == 0)
+        return;
+
+    agfx::RenderPipeline* pipeline = ShaderServer::GetPipeline(kGBufferResolveShaderPath, {});
+    if (!pipeline)
+        return;
+
+    GBufferResolvePushConstants pc{};
+    pc.rFrameConstants = (uint32)m_CameraBufferViews[frameIndex].GetHandle();
+    pc.rInstanceBuffer = (uint32)gpuScene.GetInstanceBufferView(frameIndex).GetHandle();
+    pc.rMaterialBuffer = (uint32)gpuScene.GetMaterialBufferView(frameIndex).GetHandle();
+    pc.rInstanceLodTable = (uint32)gpuScene.GetInstanceLodTableView(frameIndex).GetHandle();
+    pc.rVisibility = visibilityHandle;
+    pc.rDepth = depthHandle;
+    pc.rSampler = (uint32)m_Sampler.GetHandle();
+    pc.rFallbackTexture = gpuScene.GetFallbackTextureHandle();
+    pc.uDebugMode = (uint32)*cv_GBufferDebug.AsIntPtr();
+    pc.uWidth = width;
+    pc.uHeight = height;
+
+    renderPass.SetViewport(0.0f, 0.0f, (float)width, (float)height);
+    renderPass.SetScissor(0, 0, width, height);
+    renderPass.SetPipeline(*pipeline);
+    renderPass.PushConstants(pc);
+    renderPass.Draw(3);
 }

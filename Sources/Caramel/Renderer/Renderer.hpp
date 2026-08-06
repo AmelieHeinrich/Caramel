@@ -115,6 +115,19 @@ private:
     uint32 m_ViewportHeight = 1;
     void CreateSceneColorTexture(uint32 width, uint32 height);
 
+    // R32 = draw word (instance | LOD | fade), G32 = meshletIndex << 7 | triangleIndex. Written by
+    // Scene Early/Late, consumed by the GBuffer Resolve pass -- see VisBuffer.hlsl.
+    agfx::Texture m_VisibilityTexture;
+    agfx::TextureView m_VisibilityView;
+    void CreateVisibilityTexture(uint32 width, uint32 height);
+
+    // Order is the attachment contract with the GBuffer Resolve pipeline (SceneRenderer) and
+    // GBufferOut in GBufferResolve.hlsl: albedo, normal, metallic/roughness, emissive, motion.
+    static constexpr uint32 kGBufferTextureCount = 5;
+    agfx::Texture m_GBufferTextures[kGBufferTextureCount];
+    agfx::TextureView m_GBufferViews[kGBufferTextureCount];
+    void CreateGBufferTextures(uint32 width, uint32 height);
+
     // Renderer's persistently-owned textures (scene-color, depth) are re-imported into a fresh
     // RenderGraph every frame, but their physical GPU state carries over across frames -- this cache
     // is what makes that correct. Absent entries default to Common, reproducing "a freshly (re)created

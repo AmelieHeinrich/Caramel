@@ -1607,6 +1607,8 @@ namespace agfx::ez
                 return 8;
             case AGFX_TEXTURE_FORMAT_RGBA32F:
                 return 16;
+            case AGFX_TEXTURE_FORMAT_RG32_UINT:
+                return 8;
             case AGFX_TEXTURE_FORMAT_DEPTH32F:
                 return 4;
             default:

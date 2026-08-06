@@ -71,6 +71,8 @@ Renderer::Renderer(SDL_Window* window, bool vsync)
 
     CreateDepthTexture(m_ViewportWidth, m_ViewportHeight);
     CreateSceneColorTexture(m_ViewportWidth, m_ViewportHeight);
+    CreateVisibilityTexture(m_ViewportWidth, m_ViewportHeight);
+    CreateGBufferTextures(m_ViewportWidth, m_ViewportHeight);
     CreateHZBTexture(m_ViewportWidth, m_ViewportHeight);
 
     ShaderServer::Initialize(m_Device, *this);
@@ -192,6 +194,65 @@ void Renderer::CreateSceneColorTexture(uint32 width, uint32 height)
     m_Device.MakeResourcesResident();
 }
 
+void Renderer::CreateVisibilityTexture(uint32 width, uint32 height)
+{
+    agfx::TextureCreateInfo visibilityInfo;
+    visibilityInfo.SetSize(width, height)
+                  .SetFormat(agfx::TextureFormat::RG32Uint)
+                  .SetType(agfx::TextureType::Texture2D)
+                  .SetUsage(agfx::TextureUsage::ColorAttachment | agfx::TextureUsage::Sampled)
+                  .SetMipLevels(1);
+    m_ImportedResourceState.Erase(m_VisibilityTexture.Get());
+    m_VisibilityTexture = m_Device.CreateTexture(visibilityInfo);
+    m_VisibilityTexture.SetName("Visibility Buffer");
+
+    agfx::TextureViewCreateInfo visibilityViewInfo = agfx::TextureViewCreateInfo().SetTexture(m_VisibilityTexture)
+                                                                                  .SetFormat(agfx::TextureFormat::RG32Uint)
+                                                                                  .SetMipRange(0, 1)
+                                                                                  .SetWriteable(false);
+    m_VisibilityView = m_Device.CreateTextureView(visibilityViewInfo);
+
+    m_Device.MakeResourcesResident();
+}
+
+void Renderer::CreateGBufferTextures(uint32 width, uint32 height)
+{
+    constexpr agfx::TextureFormat formats[kGBufferTextureCount] = {
+        agfx::TextureFormat::RGBA8Unorm,
+        agfx::TextureFormat::RGBA16F,
+        agfx::TextureFormat::RG8Unorm,
+        agfx::TextureFormat::RGBA16F,
+        agfx::TextureFormat::RG16F,
+    };
+    constexpr const char* names[kGBufferTextureCount] = {
+        "GBuffer Albedo",
+        "GBuffer Normal",
+        "GBuffer Metallic Roughness",
+        "GBuffer Emissive",
+        "GBuffer Motion",
+    };
+
+    for (uint32 i = 0; i < kGBufferTextureCount; ++i) {
+        agfx::TextureCreateInfo info;
+        info.SetSize(width, height)
+            .SetFormat(formats[i])
+            .SetType(agfx::TextureType::Texture2D)
+            .SetUsage(agfx::TextureUsage::ColorAttachment | agfx::TextureUsage::Sampled)
+            .SetMipLevels(1);
+        m_ImportedResourceState.Erase(m_GBufferTextures[i].Get());
+        m_GBufferTextures[i] = m_Device.CreateTexture(info);
+        m_GBufferTextures[i].SetName(names[i]);
+
+        agfx::TextureViewCreateInfo viewInfo = agfx::TextureViewCreateInfo().SetTexture(m_GBufferTextures[i])
+                                                                            .SetFormat(formats[i])
+                                                                            .SetMipRange(0, 1)
+                                                                            .SetWriteable(false);
+        m_GBufferViews[i] = m_Device.CreateTextureView(viewInfo);
+    }
+
+    m_Device.MakeResourcesResident();
+}
+
 void Renderer::SetViewportSize(uint32 width, uint32 height)
 {
     m_RequestedViewportWidth = width > 0 ? width : 1;
@@ -208,6 +269,8 @@ void Renderer::PollViewportResize()
 
     m_Device.WaitIdle();
     CreateSceneColorTexture(m_ViewportWidth, m_ViewportHeight);
+    CreateVisibilityTexture(m_ViewportWidth, m_ViewportHeight);
+    CreateGBufferTextures(m_ViewportWidth, m_ViewportHeight);
     CreateDepthTexture(m_ViewportWidth, m_ViewportHeight);
     CreateHZBTexture(m_ViewportWidth, m_ViewportHeight);
     // The fresh pyramid holds garbage and the visibility flags now describe a different projection,
@@ -297,6 +360,13 @@ void Renderer::Render(const Camera& camera, StreamingManager& streamingManager, 
     RGTextureHandle depthHandle = graph.ImportTexture("Scene Depth", m_DepthTexture, GetImportedState(m_DepthTexture.Get()));
     RGTextureHandle backbufferHandle = graph.ImportTexture("Back Buffer", backBuffer, agfx::ResourceState::Present);
     RGTextureHandle hzbHandle = graph.ImportTexture("Scene HZB", m_HZBTexture, GetImportedState(m_HZBTexture.Get()));
+    RGTextureHandle visibilityHandle = graph.ImportTexture("Visibility", m_VisibilityTexture, GetImportedState(m_VisibilityTexture.Get()));
+    constexpr const char* gbufferNames[kGBufferTextureCount] = {
+        "GBuffer Albedo", "GBuffer Normal", "GBuffer Metallic Roughness", "GBuffer Emissive", "GBuffer Motion"
+    };
+    RGTextureHandle gbufferHandles[kGBufferTextureCount];
+    for (uint32 i = 0; i < kGBufferTextureCount; ++i)
+        gbufferHandles[i] = graph.ImportTexture(gbufferNames[i], m_GBufferTextures[i], GetImportedState(m_GBufferTextures[i].Get()));
 
     // Both cull dispatches read the camera constants, so they have to exist before the graph runs.
     m_SceneRenderer->BeginFrame(camera, m_ViewportWidth, m_ViewportHeight, (uint32)m_FrameSlot);
@@ -314,14 +384,17 @@ void Renderer::Render(const Camera& camera, StreamingManager& streamingManager, 
 
     graph.AddAttachmentPass("Scene Early",
         [&](RGPassBuilder& builder) {
+            // Zero is the only portable clear value for a uint attachment (Vulkan reinterprets the
+            // float bits) -- background pixels are detected via depth == 1.0 in the resolve, never
+            // via a uint sentinel.
             RGAttachmentDesc colorAttachment{};
-            colorAttachment.texture = sceneColorHandle;
+            colorAttachment.texture = visibilityHandle;
             colorAttachment.loadOp = agfx::LoadOp::Clear;
             colorAttachment.storeOp = agfx::StoreOp::Store;
             colorAttachment.clearColor[0] = 0.0f;
             colorAttachment.clearColor[1] = 0.0f;
             colorAttachment.clearColor[2] = 0.0f;
-            colorAttachment.clearColor[3] = 1.0f;
+            colorAttachment.clearColor[3] = 0.0f;
             builder.AddColorAttachment(colorAttachment);
 
             RGAttachmentDesc depthAttachment{};
@@ -363,7 +436,7 @@ void Renderer::Render(const Camera& camera, StreamingManager& streamingManager, 
     graph.AddAttachmentPass("Scene Late",
         [&](RGPassBuilder& builder) {
             RGAttachmentDesc colorAttachment{};
-            colorAttachment.texture = sceneColorHandle;
+            colorAttachment.texture = visibilityHandle;
             colorAttachment.loadOp = agfx::LoadOp::Load;
             colorAttachment.storeOp = agfx::StoreOp::Store;
             builder.AddColorAttachment(colorAttachment);
@@ -378,6 +451,35 @@ void Renderer::Render(const Camera& camera, StreamingManager& streamingManager, 
         },
         [&](agfx::RenderPass& pass, RGResolveContext&) {
             m_SceneRenderer->RenderLate(pass, m_GPUScene, m_HZB, m_ViewportWidth, m_ViewportHeight, (uint32)m_FrameSlot);
+        });
+
+    graph.AddAttachmentPass("GBuffer Resolve",
+        [&](RGPassBuilder& builder) {
+            // Attachment order is the contract with the GBuffer Resolve pipeline (SceneRenderer)
+            // and GBufferOut in GBufferResolve.hlsl: scene color first, then the gbuffer.
+            RGAttachmentDesc sceneColorAttachment{};
+            sceneColorAttachment.texture = sceneColorHandle;
+            sceneColorAttachment.loadOp = agfx::LoadOp::Clear;
+            sceneColorAttachment.storeOp = agfx::StoreOp::Store;
+            sceneColorAttachment.clearColor[3] = 1.0f;
+            builder.AddColorAttachment(sceneColorAttachment);
+
+            for (uint32 i = 0; i < kGBufferTextureCount; ++i) {
+                RGAttachmentDesc attachment{};
+                attachment.texture = gbufferHandles[i];
+                attachment.loadOp = agfx::LoadOp::Clear;
+                attachment.storeOp = agfx::StoreOp::Store;
+                builder.AddColorAttachment(attachment);
+                // Nothing in-graph reads the gbuffer until deferred shading exists; it persists for
+                // external consumers, which also keeps the pass from being culled as sink-less.
+                builder.MarkAsExternallyRead(gbufferHandles[i], agfx::ResourceState::PixelShaderResource);
+            }
+
+            builder.ReadTexture(visibilityHandle, agfx::ResourceState::PixelShaderResource);
+            builder.ReadTexture(depthHandle, agfx::ResourceState::PixelShaderResource);
+        },
+        [&](agfx::RenderPass& pass, RGResolveContext&) {
+            m_SceneRenderer->RenderGBufferResolve(pass, m_GPUScene, (uint32)m_VisibilityView.GetHandle(), m_HZB.depthHandle, m_ViewportWidth, m_ViewportHeight, (uint32)m_FrameSlot);
         });
 
     graph.AddPass("Debug Draw",
@@ -447,6 +549,9 @@ void Renderer::Render(const Camera& camera, StreamingManager& streamingManager, 
     SetImportedState(m_SceneColorTexture.Get(), graph.GetFinalState(sceneColorHandle));
     SetImportedState(m_DepthTexture.Get(), graph.GetFinalState(depthHandle));
     SetImportedState(m_HZBTexture.Get(), graph.GetFinalState(hzbHandle));
+    SetImportedState(m_VisibilityTexture.Get(), graph.GetFinalState(visibilityHandle));
+    for (uint32 i = 0; i < kGBufferTextureCount; ++i)
+        SetImportedState(m_GBufferTextures[i].Get(), graph.GetFinalState(gbufferHandles[i]));
     m_LastGraphDebugInfo = graph.GetDebugInfo();
     m_TimingSlotNames[m_FrameSlot] = graph.GetTimedPassNames();
     m_TimingSlotHasData[m_FrameSlot] = true;

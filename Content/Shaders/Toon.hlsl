@@ -15,6 +15,8 @@ struct ToonParams {
     float  fRimPower;
 };
 
+// Stub until deferred shading: the scene now goes through VisBuffer.hlsl + GBufferResolve.hlsl,
+// and schemes will be rewritten as deferred shading passes.
 float4 ToonPS(VSOut input) : SV_Target {
     SceneLodDither(input);
 
@@ -28,22 +30,6 @@ float4 ToonPS(VSOut input) : SV_Target {
         discard;
     }
 
-    float3 normal = normalize(input.vWorldNormal);
-    float3 lightDir = normalize(float3(-0.4f, 1.0f, -0.3f));
-    float ndotl = max(dot(normal, lightDir), 0.0f);
-
-    // Quantize the diffuse term into discrete bands -- the whole point of the scheme, and what makes
-    // the pipeline switch visible at a glance.
-    int bands = max(params.iBandCount, 1);
-    float banded = floor(ndotl * bands) / bands;
-    banded = saturate(banded * params.fBrightness);
-
-    float3 shaded = baseColor.rgb * (0.25f + 0.75f * banded);
-
-    // Cheap view-independent rim: brighten where the surface turns away from the light.
-    float rim = pow(saturate(1.0f - ndotl), max(params.fRimPower, 1.0f));
-    shaded += params.vRimColor.rgb * rim * params.vRimColor.a;
-
     float3 emissive = material.vEmissiveFactor.rgb;
-    return pow(float4(shaded + emissive, baseColor.a), 1.0 / 2.2);
+    return float4(baseColor.rgb * saturate(params.fBrightness) + emissive, baseColor.a);
 }

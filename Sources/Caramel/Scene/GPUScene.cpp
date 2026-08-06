@@ -9,6 +9,7 @@
 #include <Caramel/Asset/StreamingManager.hpp>
 #include <Caramel/Core/JobSystem.hpp>
 #include <Caramel/Core/CpuProfiler.hpp>
+#include <Caramel/Core/Logger.hpp>
 #include <Caramel/Scene/SceneNode.hpp>
 
 #include <algorithm>
@@ -226,8 +227,74 @@ void GPUScene::Build(StreamingManager& streamingManager, const TArray<RenderInst
             m_PreCullMeshlets += meshletCount;
             m_PreCullTriangles += model.GetMesh().lods[lod].GetFlatIndexCount() / 3;
 
-            m_BuildItems.PushBack(BuildItem{ &instance, lod, meshletCount, materialSlot });
+            // Field widths matter: this keys the state slot, so two instances colliding here share
+            // one slot and therefore one meshlet-visibility bit range, which ORs their visible sets
+            // together and quietly disables meshlet culling for both. The old 12-bit instanceIndex
+            // field overflowed into meshSlot past 4096 instances under one node.
+            uint64 identity = instance.owner
+                ? (((uint64)instance.owner->id << 40) | ((uint64)instance.meshSlot << 24) | instance.instanceIndex)
+                : ((uint64)(uintptr_t)instance.mesh << 24) | instance.instanceIndex;
+            auto prevIt = m_PrevTransforms.Find(identity);
+            glm::mat4 prevTransform = prevIt != m_PrevTransforms.End() ? prevIt->second : instance.transform;
+
+            // Same identity -> same state slot for as long as the instance keeps being submitted,
+            // whatever the compaction does to its instance index in between.
+            uint32 stateSlot;
+            bool stateFresh;
+            auto slotIt = m_StateSlots.Find(identity);
+            if (slotIt != m_StateSlots.End())
+            {
+                stateSlot = slotIt->second;
+                stateFresh = false;
+            }
+            else if (!m_FreeStateSlots.IsEmpty())
+            {
+                stateSlot = m_FreeStateSlots[m_FreeStateSlots.Size() - 1];
+                m_FreeStateSlots.PopBack();
+                stateFresh = true;
+            }
+            else
+            {
+                stateSlot = m_StateSlotCount++;
+                stateFresh = true;
+            }
+            m_NextStateSlots[identity] = stateSlot;
+
+            m_BuildItems.PushBack(BuildItem{ &instance, lod, meshletCount, materialSlot, prevTransform, identity, stateSlot, stateFresh });
         }
+    }
+
+    {
+        // Rebuilt from scratch so entries for instances that vanished this frame are evicted; a
+        // reappearing instance then gets prev = current, i.e. zero object motion on first sight.
+        CARAMEL_ZONE("Store Prev Transforms");
+        m_PrevTransforms.Clear();
+        for (const BuildItem& item : m_BuildItems)
+            m_PrevTransforms[item.identity] = item.instance->transform;
+    }
+
+    {
+        // Recycle the slots of instances that stopped being submitted (streamed out, despawned).
+        // They are handed back out marked fresh, so the next owner never inherits their state.
+        CARAMEL_ZONE("Recycle State Slots");
+
+        // Fewer slots than instances means two instances hashed to the same identity and are now
+        // sharing persistent state -- silent apart from culling quietly degrading, so say so.
+        if (m_NextStateSlots.Size() < m_BuildItems.Size() && !m_WarnedStateSlotCollision)
+        {
+            m_WarnedStateSlotCollision = true;
+            CARAMEL_WARN("GPUScene: {} instances share only {} state slots -- identity collision, "
+                         "per-instance LOD and visibility state is being shared",
+                         m_BuildItems.Size(), m_NextStateSlots.Size());
+        }
+
+        for (auto it = m_StateSlots.Begin(); it != m_StateSlots.End(); ++it)
+        {
+            if (!m_NextStateSlots.Contains(it->first))
+                m_FreeStateSlots.PushBack(it->second);
+        }
+        m_StateSlots = std::move(m_NextStateSlots);
+        m_NextStateSlots.Clear();
     }
 
     {
@@ -268,6 +335,9 @@ void GPUScene::Build(StreamingManager& streamingManager, const TArray<RenderInst
                 gpu.meshletCount = item.meshletCount;
                 gpu.lod = item.lod;
                 gpu.meshletBoundsBuffer = (uint32)model.GetMeshletBoundsBufferView(item.lod).GetHandle();
+                gpu.prevTransform = item.prevTransform;
+                gpu.stateSlot = item.stateSlot;
+                gpu.stateFresh = item.stateFresh ? 1u : 0u;
                 m_InstanceStaging[i] = gpu;
 
                 // Every LOD's handles + CPU-known meshlet count, not just the resident one baked into
