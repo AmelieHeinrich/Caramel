@@ -11,6 +11,7 @@
 
 #include <nlohmann/json.hpp>
 
+#include <cmath>
 #include <fstream>
 #include <vector>
 
@@ -195,8 +196,87 @@ namespace
         {
             case ESceneNodeType::Entity: return "Entity";
             case ESceneNodeType::Empty:  return "Empty";
+            case ESceneNodeType::Light:  return "Light";
             default:                     return "Folder";
         }
+    }
+
+    // Light type and shape are written as names rather than enum ordinals, so inserting a type later
+    // cannot silently reinterpret every saved light -- the same contract as schemeParams above.
+    const char* LightTypeToString(ELightType type)
+    {
+        switch (type)
+        {
+            case ELightType::Directional: return "Directional";
+            case ELightType::Spot:        return "Spot";
+            case ELightType::Area:        return "Area";
+            default:                      return "Point";
+        }
+    }
+
+    ELightType LightTypeFromString(const String& value)
+    {
+        if (value == "Directional") return ELightType::Directional;
+        if (value == "Spot")        return ELightType::Spot;
+        if (value == "Area")        return ELightType::Area;
+        return ELightType::Point;
+    }
+
+    const char* AreaShapeToString(EAreaShape shape)
+    {
+        switch (shape)
+        {
+            case EAreaShape::Disk: return "Disk";
+            case EAreaShape::Tube: return "Tube";
+            default:               return "Rect";
+        }
+    }
+
+    EAreaShape AreaShapeFromString(const String& value)
+    {
+        if (value == "Disk") return EAreaShape::Disk;
+        if (value == "Tube") return EAreaShape::Tube;
+        return EAreaShape::Rect;
+    }
+
+    nlohmann::json SerializeLight(const LightComponent& light)
+    {
+        nlohmann::json j;
+        j["type"] = LightTypeToString(light.type);
+        j["color"] = { light.color.r, light.color.g, light.color.b };
+        j["intensity"] = light.intensity;
+        j["range"] = light.range;
+        j["innerAngle"] = light.innerAngle;
+        j["outerAngle"] = light.outerAngle;
+        j["shape"] = AreaShapeToString(light.shape);
+        j["size"] = { light.size.x, light.size.y };
+        j["twoSided"] = light.twoSided;
+        j["sourceRadius"] = light.sourceRadius;
+        j["enabled"] = light.enabled;
+        return j;
+    }
+
+    LightComponent ParseLight(const nlohmann::json& j)
+    {
+        LightComponent light;
+        light.type = LightTypeFromString(String(j.value("type", "Point")));
+
+        auto c = j.value("color", std::vector<float32>{ 1.0f, 1.0f, 1.0f });
+        light.color = glm::vec3(c[0], c[1], c[2]);
+
+        light.intensity = j.value("intensity", 1000.0f);
+        light.range = j.value("range", 10.0f);
+        light.innerAngle = j.value("innerAngle", 20.0f);
+        light.outerAngle = j.value("outerAngle", 35.0f);
+        light.shape = AreaShapeFromString(String(j.value("shape", "Rect")));
+
+        auto s = j.value("size", std::vector<float32>{ 1.0f, 1.0f });
+        light.size = glm::vec2(s[0], s[1]);
+
+        light.twoSided = j.value("twoSided", false);
+        light.sourceRadius = j.value("sourceRadius", 0.0f);
+        light.enabled = j.value("enabled", true);
+        return light;
     }
 
     nlohmann::json SerializeNode(const SceneNode& node)
@@ -241,6 +321,9 @@ namespace
                 overridesJson.push_back(SerializeMaterialOverride(matOverride));
             j["materialOverrides"] = overridesJson;
         }
+
+        if (node.type == ESceneNodeType::Light)
+            j["light"] = SerializeLight(node.light);
 
         // Written for every node type -- folders and empties can carry director/spawner scripts.
         if (!node.scripts.IsEmpty())
@@ -295,6 +378,16 @@ namespace
                 scene.AddInstance(node, ParseInstance(instanceJson));
             if (node->instances.IsEmpty())
                 scene.AddInstance(node, Instance());
+        }
+        else if (typeStr == "Light")
+        {
+            node = scene.CreateLight(parent, name, ELightType::Point);
+            node->instances.Clear();
+            for (const auto& instanceJson : j.value("instances", nlohmann::json::array()))
+                scene.AddInstance(node, ParseInstance(instanceJson));
+            if (node->instances.IsEmpty())
+                scene.AddInstance(node, Instance());
+            node->light = ParseLight(j.value("light", nlohmann::json::object()));
         }
         else
         {
@@ -387,9 +480,38 @@ SceneNode* Scene::CreateEmptyEntity(SceneNode* parent, const String& name)
     return raw;
 }
 
+SceneNode* Scene::CreateLight(SceneNode* parent, const String& name, ELightType type)
+{
+    SceneNode* actualParent = parent ? parent : &m_Root;
+
+    TUnique<SceneNode> node = MakeUnique<SceneNode>();
+    node->name = name;
+    node->type = ESceneNodeType::Light;
+    node->parent = actualParent;
+    node->light.type = type;
+    node->light.intensity = LightDefaultIntensity(type);
+
+    SceneNode* raw = node.get();
+    RegisterNode(raw);
+    actualParent->children.PushBack(std::move(node));
+
+    // Above the origin and aimed straight down (-Z rotated by -90 about X), so a freshly created
+    // light lands on the scene instead of shooting off sideways from ground level.
+    Instance instance;
+    instance.position = glm::vec3(0.0f, 3.0f, 0.0f);
+    instance.rotationEuler = glm::vec3(-90.0f, 0.0f, 0.0f);
+    AddInstance(raw, instance);
+    return raw;
+}
+
 void Scene::AddInstance(SceneNode* entity, const Instance& instance)
 {
     if (!entity || !SceneNodeTypeHasInstances(entity->type))
+        return;
+
+    // The one instance a light gets at creation is its transform; a second one would be a light with
+    // two positions and no way to author either.
+    if (entity->type == ESceneNodeType::Light && !entity->instances.IsEmpty())
         return;
 
     Instance copy = instance;
@@ -523,6 +645,119 @@ const TArray<RenderInstance>& Scene::BuildRenderInstances(StreamingManager& stre
     return m_CachedRenderInstances;
 }
 
+void Scene::CollectLights(SceneNode& node, TArray<SceneLight>& out)
+{
+    if (node.type == ESceneNodeType::Light && node.light.enabled && !node.instances.IsEmpty())
+    {
+        const LightComponent& source = node.light;
+        glm::mat4 transform = node.instances[0].GetTransform();
+
+        // Axes are normalized rather than taken with their scale: a light's extent is authored in
+        // LightComponent::size, so letting the transform's scale in too would mean two controls
+        // fighting over the same number.
+        glm::vec3 rightAxis(transform[0]);
+        glm::vec3 upAxis(transform[1]);
+        glm::vec3 forwardAxis(transform[2]);
+        float32 rightLength = glm::length(rightAxis);
+        float32 upLength = glm::length(upAxis);
+        float32 forwardLength = glm::length(forwardAxis);
+
+        SceneLight light;
+        light.type = source.type;
+        light.shape = source.shape;
+        light.position = glm::vec3(transform[3]);
+        light.direction = forwardLength > 0.0f ? -forwardAxis / forwardLength : glm::vec3(0.0f, -1.0f, 0.0f);
+        light.right = rightLength > 0.0f ? rightAxis / rightLength : glm::vec3(1.0f, 0.0f, 0.0f);
+        light.up = upLength > 0.0f ? upAxis / upLength : glm::vec3(0.0f, 1.0f, 0.0f);
+        light.color = source.color;
+        light.size = glm::max(source.size, glm::vec2(0.0f));
+        light.sourceRadius = source.sourceRadius;
+        light.twoSided = source.twoSided;
+        light.outerAngle = source.outerAngle;
+
+        // A directional light has no falloff and no bound, which zero range is the sentinel for.
+        light.range = source.type == ELightType::Directional ? 0.0f : glm::max(source.range, 0.0f);
+
+        constexpr float32 kPi = 3.14159265f;
+        constexpr float32 kFourPi = 4.0f * kPi;
+
+        switch (source.type)
+        {
+            // Lumens spread over the whole sphere even for a spot. Normalising by the cone's solid
+            // angle instead would make dragging the outer angle change how bright the centre of the
+            // beam is, which reads as a bug rather than as energy conservation -- and it would make
+            // switching a light between Point and Spot discontinuous.
+            case ELightType::Point:
+            case ELightType::Spot:
+                light.intensity = source.intensity / kFourPi;
+                break;
+
+            // Nits are luminance; integrating over the emitter's area gives the candela the punctual
+            // approximation in the shading loop needs. LTC will replace that approximation and use
+            // the size directly, but the unit stays right either way.
+            case ELightType::Area:
+            {
+                float32 area = 0.0f;
+                switch (source.shape)
+                {
+                    case EAreaShape::Rect: area = light.size.x * light.size.y; break;
+                    case EAreaShape::Disk: area = kPi * light.size.x * light.size.x; break;
+                    case EAreaShape::Tube: area = 2.0f * kPi * light.size.x * light.size.y; break;
+                }
+                light.intensity = source.intensity * area;
+                break;
+            }
+
+            // Lux is already an illuminance, which is what a directional light delivers.
+            default:
+                light.intensity = source.intensity;
+                break;
+        }
+
+        light.intensity *= kLightExposure;
+
+        if (source.type == ELightType::Spot)
+        {
+            float32 outer = glm::clamp(source.outerAngle, 0.1f, 89.9f);
+            float32 cosOuter = std::cos(glm::radians(outer));
+            float32 cosInner = std::cos(glm::radians(glm::clamp(source.innerAngle, 0.0f, outer)));
+            light.spotScale = 1.0f / glm::max(cosInner - cosOuter, 1e-4f);
+            light.spotOffset = -cosOuter * light.spotScale;
+        }
+        else
+        {
+            // saturate(cosAngle * 0 + 1) == 1, so the shader applies the cone term unconditionally
+            // instead of branching on the type a second time.
+            light.spotScale = 0.0f;
+            light.spotOffset = 1.0f;
+        }
+
+        light.owner = &node;
+        out.PushBack(light);
+    }
+
+    for (TUnique<SceneNode>& child : node.children)
+        CollectLights(*child, out);
+}
+
+const TArray<SceneLight>& Scene::BuildLights()
+{
+    CARAMEL_ZONE("Scene::BuildLights");
+    m_Lights.Clear();
+    CollectLights(m_Root, m_Lights);
+    return m_Lights;
+}
+
+const SceneLight* Scene::FindLight(const SceneNode& node) const
+{
+    for (const SceneLight& light : m_Lights)
+    {
+        if (light.owner == &node)
+            return &light;
+    }
+    return nullptr;
+}
+
 MeshTransform& Scene::GetOrCreateMeshTransform(SceneNode& entity, uint32 meshSlot)
 {
     for (MeshTransform& meshTransform : entity.meshTransforms)
@@ -600,7 +835,7 @@ const MaterialOverride* Scene::FindMaterialOverride(const SceneNode& entity, int
 bool Scene::SaveToFile(const String& path) const
 {
     nlohmann::json j;
-    j["version"] = 2;
+    j["version"] = 3;
     j["root"] = SerializeNode(m_Root);
 
     std::ofstream file(path.CStr());
@@ -623,6 +858,7 @@ bool Scene::LoadFromFile(const String& path, StreamingManager& streamingManager)
     m_Root.children.Clear();
     m_PendingRequests.Clear();
     m_NodesById.Clear();
+    m_Lights.Clear();
     m_NextNodeId = 1;
 
     const auto& rootJson = j.at("root");

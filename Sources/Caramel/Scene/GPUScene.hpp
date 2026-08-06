@@ -11,6 +11,7 @@
 #include <Caramel/Renderer/MaterialScheme.hpp>
 #include <Caramel/Renderer/StreamBuffer.hpp>
 #include <Caramel/Scene/RenderInstance.hpp>
+#include <Caramel/Scene/SceneLight.hpp>
 
 #include <AGFX/agfx.hpp>
 #include <glm/glm.hpp>
@@ -36,6 +37,26 @@ struct GPUMaterial
     uint32    _pad[2]{};                                    // 72
 };
 static_assert(sizeof(GPUMaterial) == 80, "GPUMaterial must stay 16-byte aligned and match GPUScene.hlsli");
+
+/// @brief Mirrors `GPULight` in Content/Shaders/Common/GPUScene.hlsli field-for-field. 96 bytes.
+///
+/// One struct for all four light types, with the fields a type does not use left zeroed. Position
+/// and range are kept as a real bounding sphere for every non-directional light rather than being
+/// packed away, because that is exactly what clustered light culling and ReSTIR reservoir sampling
+/// index on -- neither should have to reconstruct it.
+struct GPULight
+{
+    glm::vec4 positionRange{ 0.0f };        // 0   xyz world position, w range (0 = unbounded)
+    glm::vec4 directionRadius{ 0.0f };      // 16  xyz direction the light points, w source radius
+    glm::vec4 colorIntensity{ 0.0f };       // 32  rgb colour, a intensity (lux / candela / nits)
+    glm::vec4 rightWidth{ 0.0f };           // 48  area: xyz right axis, w width (tube: length)
+    glm::vec4 upHeight{ 0.0f };             // 64  area: xyz up axis, w height (tube/disk: radius)
+    float32   spotScale = 0.0f;             // 80  cone falloff, saturate(cosAngle * scale + offset)
+    float32   spotOffset = 0.0f;            // 84
+    uint32    type = 0;                     // 88  ELightType
+    uint32    flags = 0;                    // 92  bits 0-1 = EAreaShape, bit2 = two-sided
+};
+static_assert(sizeof(GPULight) == 96, "GPULight must stay 16-byte aligned and match GPUScene.hlsli");
 
 /// @brief Mirrors `GPUInstance` in Content/Shaders/Common/GPUScene.hlsli field-for-field. 208 bytes.
 ///
@@ -139,6 +160,10 @@ public:
     /// Instances whose LOD is not yet resident are skipped, so instance indices are compacted.
     void Build(StreamingManager& streamingManager, const TArray<RenderInstance>& renderInstances, uint32 frameIndex);
 
+    /// @brief Packs the scene's lights into `frameIndex`'s light buffer. Separate from Build because
+    /// it shares none of its machinery -- no residency filtering, no material slots, no compaction.
+    void BuildLights(const TArray<SceneLight>& lights, uint32 frameIndex);
+
     /// @brief Draws sorted by (schemeId, materialSlot). Iterate via GetBuckets(), not directly.
     const TArray<GPUDraw>& GetDraws() const { return m_Draws; }
     const TArray<MaterialBatch>& GetBatches() const { return m_Batches; }
@@ -146,6 +171,13 @@ public:
 
     agfx::BufferView& GetInstanceBufferView(uint32 frameIndex) { return m_InstanceStream.views[frameIndex]; }
     agfx::BufferView& GetMaterialBufferView(uint32 frameIndex) { return m_MaterialStream.views[frameIndex]; }
+
+    agfx::BufferView& GetLightBufferView(uint32 frameIndex) { return m_LightStream.views[frameIndex]; }
+
+    /// @brief Lights in this frame's light buffer. The authority on how many entries are readable:
+    /// StreamBuffer::Upload leaves the slot's previous allocation in place when there is nothing to
+    /// write, so on a frame that lost its last light the view still points at the old contents.
+    uint32 GetLightCount() const { return m_LightCount; }
 
     /// @brief Per-instance, per-LOD meshlet buffer handles + counts for every LOD (0..kLodCount-1),
     /// not just the resident one baked into GetInstanceBufferView()'s GPUInstance entries -- lets
@@ -284,6 +316,10 @@ private:
     StreamBuffer m_InstanceStream;
     StreamBuffer m_InstanceLodStream;
     StreamBuffer m_MaterialStream;
+    StreamBuffer m_LightStream;
+
+    TArray<GPULight> m_LightStaging;
+    uint32 m_LightCount = 0;
 
     TArray<GPUInstance> m_InstanceStaging;
     TArray<GPULodInfo> m_InstanceLodStaging; // instanceStagingIndex * CaramelAsset::kLodCount + lod

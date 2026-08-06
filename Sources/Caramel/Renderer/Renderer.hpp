@@ -35,7 +35,8 @@ public:
     Renderer(SDL_Window* window, bool vsync);
     ~Renderer();
 
-    void Render(const Camera& camera, StreamingManager& streamingManager, const TArray<RenderInstance>& renderInstances);
+    void Render(const Camera& camera, StreamingManager& streamingManager, const TArray<RenderInstance>& renderInstances,
+                const TArray<SceneLight>& lights);
     void Resize();
     void WaitIdle() { m_Fence.Wait(m_FenceValue); }
 

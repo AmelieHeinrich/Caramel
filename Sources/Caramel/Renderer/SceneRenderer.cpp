@@ -230,6 +230,8 @@ struct DeferredPushConstants
     // commands buffer, high half its count buffer.
     uint32 uBundleHandleLo;
     uint32 uBundleHandleHi;
+    uint32 rLightBuffer;
+    uint32 uLightCount;
 };
 static_assert(sizeof(DeferredPushConstants) <= 128, "Push constants are capped at 128 bytes by the root signature");
 
@@ -876,6 +878,12 @@ DeferredPushConstants SceneRenderer::BuildDeferredPushConstants(GPUScene& gpuSce
     pc.uWidth = width;
     pc.uHeight = height;
     pc.uSchemeCount = m_Schemes->Count();
+
+    // Null on a frame slot that has never had a light in it. uLightCount covers the other case, where
+    // the view survives a frame that lost its last light -- see GPUScene::GetLightCount.
+    agfx::BufferView& lightView = gpuScene.GetLightBufferView(frameIndex);
+    pc.rLightBuffer = lightView ? (uint32)lightView.GetHandle() : 0u;
+    pc.uLightCount = gpuScene.GetLightCount();
 
     uint64 bundleHandle = m_DeferredBundles[frameIndex].GetHandle();
     pc.uBundleHandleLo = (uint32)(bundleHandle & 0xFFFFFFFFull);

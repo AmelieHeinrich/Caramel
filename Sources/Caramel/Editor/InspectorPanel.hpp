@@ -24,6 +24,7 @@ public:
 private:
     bool DrawTransformRow(const char* label, glm::vec3& v, float speed, float resetTo);
     void DrawTransformSection(EditorContext& context);
+    void DrawLightSection(EditorContext& context);
     void DrawMeshTransformSection(EditorContext& context, StreamingManager& streaming);
     void DrawScriptSection(EditorContext& context, StreamingManager& streaming);
     void DrawMaterialSection(EditorContext& context, StreamingManager& streaming);

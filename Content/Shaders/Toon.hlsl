@@ -22,9 +22,6 @@ struct ToonParams {
     float4 vRimPower;
 };
 
-// Same placeholder sun as DefaultPBR, until the light list exists.
-static const float3 kSunDirection = float3(0.45f, 0.82f, 0.35f);
-
 [numthreads(kShadeGroupSize, 1, 1)]
 void ToonCS(uint3 dispatchThreadID : SV_DispatchThreadID)
 {
@@ -37,7 +34,19 @@ void ToonCS(uint3 dispatchThreadID : SV_DispatchThreadID)
     ToonParams params = DEFERRED_LOAD_SCHEME_PARAMS(ToonParams, materialSlot);
 
     float bands = (float)max(params.vBandCount.x, 1);
-    float NdotL = saturate(dot(surface.vNormal, normalize(kSunDirection)));
+
+    // Banding needs one scalar, not a BRDF, so the same light list collapses into a weighted lambert
+    // term. Radiance is folded down by luminance -- a cel ramp has no per-channel meaning.
+    float NdotL = 0.0f;
+    for (uint i = 0; i < g_Constants.uLightCount; ++i) {
+        float3 lightDir;
+        float3 radiance;
+        if (!LightEvaluate(DeferredLoadLight(i), surface.vWorldPosition, lightDir, radiance))
+            continue;
+
+        NdotL += saturate(dot(surface.vNormal, lightDir)) * dot(radiance, float3(0.2126f, 0.7152f, 0.0722f));
+    }
+    NdotL = saturate(NdotL);
 
     // ceil rather than floor so the brightest band reaches 1.0 and the terminator lands on an actual
     // band edge instead of leaving the lit side capped at (bands-1)/bands.

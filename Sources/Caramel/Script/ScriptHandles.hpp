@@ -13,6 +13,7 @@ class SceneNode;
 class StreamingManager;
 class StreamingModel;
 struct Instance;
+struct LightComponent;
 struct MaterialOverride;
 
 // Script-visible handles are plain ids, never pointers: Instance lives inside a TArray that
@@ -42,6 +43,13 @@ struct MeshRef
     uint32 meshSlot;
 };
 
+// A light node. Separate from EntityRef so the light-only properties cannot be reached on a node
+// that has no LightComponent worth reading.
+struct LightRef
+{
+    uint64 nodeId;
+};
+
 struct MaterialRef
 {
     uint64 nodeId;
@@ -63,6 +71,7 @@ public:
     static SceneNode* Resolve(const EntityRef& ref);
     static Instance* Resolve(const InstanceRef& ref);
     static StreamingModel* Resolve(const MeshRef& ref);
+    static LightComponent* Resolve(const LightRef& ref);
     static MaterialOverride* ResolveOrCreate(const MaterialRef& ref);
 
     static void QueueDestroy(uint64 nodeId);

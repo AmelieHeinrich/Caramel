@@ -41,6 +41,78 @@ struct GPUMaterial {
     uint2  uPad;
 };
 
+// Mirrors ELightType (Sources/Caramel/Scene/SceneNode.hpp).
+static const uint kLightTypeDirectional = 0;
+static const uint kLightTypePoint       = 1;
+static const uint kLightTypeSpot        = 2;
+static const uint kLightTypeArea        = 3;
+
+// Mirrors EAreaShape (Sources/Caramel/Scene/SceneNode.hpp), held in GPULight::uFlags bits 0-1.
+static const uint kAreaShapeRect = 0;
+static const uint kAreaShapeDisk = 1;
+static const uint kAreaShapeTube = 2;
+static const uint kAreaShapeMask = 3;
+static const uint kLightFlagTwoSided = 4;
+
+// Mirrors GPULight (Sources/Caramel/Scene/GPUScene.hpp) field-for-field. 96 bytes.
+// One struct for all four types; a type leaves the fields it does not use zeroed.
+struct GPULight {
+    float4 vPositionRange;      // xyz world position, w range (0 = unbounded, i.e. directional)
+    float4 vDirectionRadius;    // xyz direction the light points, w source radius
+    float4 vColorIntensity;     // rgb colour, a intensity (exposed lux or candela)
+    float4 vRightWidth;         // area: xyz right axis, w width (tube: length)
+    float4 vUpHeight;           // area: xyz up axis, w height (tube/disk: radius)
+    float  fSpotScale;          // cone falloff, saturate(cosAngle * scale + offset)
+    float  fSpotOffset;         // non-spot lights carry scale 0 / offset 1, so this is always 1
+    uint   uType;
+    uint   uFlags;
+};
+
+// One light's contribution at a world position: the direction to sample the BRDF along, and the
+// incident radiance along it. Returns false when the point is outside the light's range, so a caller
+// can skip the BRDF entirely.
+//
+// Shared by every shading kernel rather than duplicated per scheme -- the placeholder sun this
+// replaced was copy-pasted between DefaultPBR and Toon and had already drifted to two different
+// directions.
+bool LightEvaluate(GPULight light, float3 vWorldPosition, out float3 outL, out float3 outRadiance) {
+    outL = float3(0.0f, 1.0f, 0.0f);
+    outRadiance = 0.0f;
+
+    if (light.uType == kLightTypeDirectional) {
+        outL = -light.vDirectionRadius.xyz;
+        outRadiance = light.vColorIntensity.rgb * light.vColorIntensity.a;
+        return true;
+    }
+
+    float range = light.vPositionRange.w;
+    float3 toLight = light.vPositionRange.xyz - vWorldPosition;
+    float distSq = dot(toLight, toLight);
+    if (distSq >= range * range)
+        return false;
+
+    outL = toLight * rsqrt(max(distSq, 1e-8f));
+
+    // Inverse square, windowed so the falloff reaches exactly zero at the range instead of being
+    // clipped there. That matters beyond looks: range is the bounding sphere clustered light culling
+    // will test against (Notes/TODO.md), and a hard clip would make it a visible seam.
+    float rangeSq = max(range * range, 1e-4f);
+    float window = saturate(1.0f - (distSq * distSq) / (rangeSq * rangeSq));
+    float attenuation = (window * window) / max(distSq, 1e-4f);
+
+    // Non-spot lights carry fSpotScale 0 / fSpotOffset 1, so this is 1 for them -- cheaper than
+    // branching on the type a second time.
+    float cosAngle = dot(-outL, light.vDirectionRadius.xyz);
+    float cone = saturate(cosAngle * light.fSpotScale + light.fSpotOffset);
+    attenuation *= cone * cone;
+
+    // Area lights are punctual here. Their nits were already integrated over the emissive area on the
+    // CPU, so this is the correct far-field limit; LTC (Notes/TODO.md) replaces this branch and reads
+    // vRightWidth/vUpHeight/uFlags, which is why the basis is already on the struct.
+    outRadiance = light.vColorIntensity.rgb * (light.vColorIntensity.a * attenuation);
+    return true;
+}
+
 // Mirrors GPUInstance (Sources/Caramel/Scene/GPUScene.hpp) field-for-field. 208 bytes.
 // Bounds are float4 rather than float3 to keep the C++/HLSL layouts trivially identical.
 struct GPUInstance {

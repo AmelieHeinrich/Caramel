@@ -43,17 +43,88 @@ enum class ESceneNodeType
 {
     Folder,
     Entity,
-    Empty
+    Empty,
+    Light
 };
 
+// A light node carries exactly one Instance, purely for its transform. That is what lets the
+// inspector's transform section, the hierarchy row and Instance::GetTransform() work on it with no
+// special case -- see SceneNodeTypeAllowsMultipleInstances for the part that is special.
 inline bool SceneNodeTypeHasInstances(ESceneNodeType type)
 {
-    return type == ESceneNodeType::Entity || type == ESceneNodeType::Empty;
+    return type == ESceneNodeType::Entity || type == ESceneNodeType::Empty || type == ESceneNodeType::Light;
 }
 
 inline bool SceneNodeTypeCanParent(ESceneNodeType type)
 {
     return type == ESceneNodeType::Folder || type == ESceneNodeType::Empty;
+}
+
+inline bool SceneNodeTypeAllowsMultipleInstances(ESceneNodeType type)
+{
+    return type == ESceneNodeType::Entity || type == ESceneNodeType::Empty;
+}
+
+enum class ELightType
+{
+    Directional,
+    Point,
+    Spot,
+    Area
+};
+
+enum class EAreaShape
+{
+    Rect,
+    Disk,
+    Tube
+};
+
+// Authored light settings. Intensity is in photometric units that depend on the type -- the
+// conversion to the radiometric value shaders consume happens once, in Scene::CollectLights.
+struct LightComponent
+{
+    ELightType type = ELightType::Point;
+    glm::vec3 color{ 1.0f };
+
+    // Directional: lux. Point/Spot: lumens. Area: nits (cd/m^2).
+    float32 intensity = 100000.0f;
+
+    float32 range = 25.0f;
+    float32 innerAngle = 20.0f;
+    float32 outerAngle = 35.0f;
+
+    EAreaShape shape = EAreaShape::Rect;
+
+    // Rect: width/height. Disk: radius in .x. Tube: radius in .x, length in .y.
+    glm::vec2 size{ 1.0f, 1.0f };
+    bool twoSided = false;
+
+    // Treats a point/spot light as a sphere rather than a singularity. Unused by the placeholder
+    // shading loop, but soft shadows and ReSTIR both need it and it costs nothing to author now.
+    float32 sourceRadius = 0.0f;
+
+    bool enabled = true;
+};
+
+// The number in `intensity` means a different physical quantity per type, so carrying a value across
+// a type change would read as 500 lux of daylight where 500 lumens was meant. Every site that changes
+// a light's type resets the intensity through here.
+//
+// The lumen defaults look absurd next to a household bulb, and they are correct anyway: a point light
+// loses its intensity to 1/d^2, so lighting a scene tens of metres across takes floodlight-class
+// output to compete with even a dim overcast sky. 100k lm at 10 m lands in the same range as the 500
+// lux directional; drop it to a 5000 lm bulb and the light genuinely does disappear under the ambient
+// term. Anything that makes local lights look right at household lumen values is hiding the inverse
+// square somewhere, and would have to be unhidden again for ReSTIR to sample correctly.
+inline float32 LightDefaultIntensity(ELightType type)
+{
+    switch (type)
+    {
+        case ELightType::Directional: return 500.0f;      // lux, dim overcast
+        case ELightType::Area:        return 1000.0f;     // nits
+        default:                      return 100000.0f;   // lumens
+    }
 }
 
 struct MaterialOverride
@@ -119,4 +190,7 @@ public:
     TArray<MeshTransform> meshTransforms;
     TArray<MaterialOverride> materialOverrides;
     TArray<ScriptComponent> scripts;
+
+    // Only meaningful when type == Light.
+    LightComponent light;
 };

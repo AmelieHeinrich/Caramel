@@ -21,15 +21,6 @@ struct DefaultPBRParams {
     float4 vLightIntensity;
 };
 
-// Placeholder until the light list exists (Notes/TODO.md, "Base lighting pass"). Angled rather than
-// straight up so surfaces of different orientation are actually distinguishable.
-static const float3 kSunDirection = float3(0.0f, 1.0f, 0.0f);
-
-// The forward pass this replaces hardcoded a 5.0 multiplier on the direct term (see
-// `git show 91b9ed8^:Content/Shaders/DefaultPBR.hlsl`). Kept as the sun's radiance so the scheme's
-// lightIntensity parameter stays a ~1.0-centred multiplier rather than having to carry the exposure.
-static const float kSunRadiance = 5.0f;
-
 [numthreads(kShadeGroupSize, 1, 1)]
 void DefaultPBRCS(uint3 dispatchThreadID : SV_DispatchThreadID)
 {
@@ -41,12 +32,23 @@ void DefaultPBRCS(uint3 dispatchThreadID : SV_DispatchThreadID)
     DeferredSurface surface = DeferredLoadSurface(pixel, materialSlot);
     DefaultPBRParams params = DEFERRED_LOAD_SCHEME_PARAMS(DefaultPBRParams, materialSlot);
 
-    float3 lightDir = normalize(kSunDirection);
-    float3 direct = CookTorrance(surface.vNormal, surface.vViewDirection, lightDir,
-                                 surface.vAlbedo, surface.fMetallic, surface.fRoughness);
+    // Every light, every pixel. Naive on purpose -- clustered light culling (Notes/TODO.md) is what
+    // makes this scale, and it slots in by narrowing which indices this loop walks, not by changing
+    // what happens inside it. The type branch lives in LightEvaluate rather than in a shader variant.
+    float3 direct = 0.0f;
+    for (uint i = 0; i < g_Constants.uLightCount; ++i) {
+        float3 lightDir;
+        float3 radiance;
+        if (!LightEvaluate(DeferredLoadLight(i), surface.vWorldPosition, lightDir, radiance))
+            continue;
 
+        direct += CookTorrance(surface.vNormal, surface.vViewDirection, lightDir,
+                               surface.vAlbedo, surface.fMetallic, surface.fRoughness) * radiance;
+    }
+
+    // ambientScale is what keeps a scene with no lights from being pure black.
     float3 ambient = surface.vAlbedo * params.vAmbientScale.x;
-    float3 color = direct * (kSunRadiance * params.vLightIntensity.x) + ambient + surface.vEmissive;
+    float3 color = direct * params.vLightIntensity.x + ambient + surface.vEmissive;
 
     // Linear and un-tonemapped: Composite.hlsl owns the transfer curve.
     DeferredWrite(pixel, color);

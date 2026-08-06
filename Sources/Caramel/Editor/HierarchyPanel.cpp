@@ -29,6 +29,7 @@ namespace
         switch (type) {
             case ESceneNodeType::Folder: return ICON_FA_FOLDER;
             case ESceneNodeType::Empty:  return ICON_FA_CIRCLE_NOTCH;
+            case ESceneNodeType::Light:  return ICON_FA_LIGHTBULB;
             default:                     return ICON_FA_CUBES;
         }
     }
@@ -70,6 +71,10 @@ void HierarchyPanel::Draw(EditorContext& context, StreamingManager& streaming)
     ImGui::SameLine();
     if (EditorTheme::IconButton(ICON_FA_CIRCLE_NOTCH, "New Empty"))
         context.CurrentScene.CreateEmptyEntity(nullptr, "New Empty");
+
+    ImGui::SameLine();
+    if (EditorTheme::IconButton(ICON_FA_LIGHTBULB, "New Light"))
+        context.CurrentScene.CreateLight(nullptr, "New Light", ELightType::Point);
 
     ImGui::Separator();
     DrawSceneNode(context, streaming, context.CurrentScene.GetRoot());
@@ -137,7 +142,9 @@ void HierarchyPanel::DrawSceneNode(EditorContext& context, StreamingManager& str
                 context.CurrentScene.CreateFolder(&child, "New Folder");
             if (canParent && ImGui::MenuItem(ICON_FA_CIRCLE_NOTCH " New Empty"))
                 context.CurrentScene.CreateEmptyEntity(&child, "New Empty");
-            if (hasInstances && ImGui::MenuItem(ICON_FA_PLUS " Add Instance"))
+            if (canParent && ImGui::MenuItem(ICON_FA_LIGHTBULB " New Light"))
+                context.CurrentScene.CreateLight(&child, "New Light", ELightType::Point);
+            if (SceneNodeTypeAllowsMultipleInstances(child.type) && ImGui::MenuItem(ICON_FA_PLUS " Add Instance"))
                 context.CurrentScene.AddInstance(&child, Instance{});
             DrawAddScriptMenu(context, child, EScriptScope::Node, 0);
             if (ImGui::MenuItem(ICON_FA_TRASH " Delete"))

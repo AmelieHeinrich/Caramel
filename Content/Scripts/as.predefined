@@ -291,6 +291,13 @@ class Entity
     uint GetMeshCount() const;
     Mesh GetMesh(uint) const;
     Material GetMaterial(int) const;
+    uint GetChildCount() const;
+    Entity GetChild(uint) const;
+
+    // Invalid unless this node is a light. Walking children and filtering with this is how a script
+    // re-finds what it spawned -- FindLight scans every node in the scene, so a per-light lookup is
+    // quadratic.
+    Light AsLight() const;
     void Destroy();
 }
 
@@ -337,12 +344,70 @@ class Material
     float GetParam(const string &in) const;
 }
 
+enum LightType
+{
+    Directional,
+    Point,
+    Spot,
+    Area
+}
+
+enum AreaShape
+{
+    Rect,
+    Disk,
+    Tube
+}
+
+class Light
+{
+    string name;
+
+    // The light's transform, proxied through to its single instance.
+    vec3 position;
+    vec3 rotation;
+
+    // A LightType value.
+    int type;
+
+    vec3 color;
+
+    // Lux for Directional, lumens for Point/Spot, nits for Area. Local lights fall off with 1/d^2,
+    // so lumen values need to be far larger than a household bulb to carry across a scene.
+    float intensity;
+
+    // Metres. Ignored by Directional; the hard cutoff of every other type.
+    float range;
+
+    // Degrees, Spot only.
+    float innerAngle;
+    float outerAngle;
+
+    // An AreaShape value, plus its dimensions: Rect width/height, Disk radius in x, Tube radius in
+    // x and length in y.
+    int shape;
+    vec2 size;
+
+    // Treats a Point/Spot as a sphere rather than a singularity.
+    float sourceRadius;
+
+    bool enabled;
+
+    bool IsValid() const;
+    Entity GetEntity() const;
+    void Destroy();
+}
+
 namespace Scene
 {
     Entity SpawnModel(const string &in cmdlPath, const string &in name);
     Entity SpawnEmpty(const string &in name);
     Entity CreateFolder(const string &in name);
     Entity FindEntity(const string &in name);
+    Light SpawnLight(int type, const string &in name);
+
+    // Linear scan over every node in the scene -- fine once, quadratic in a per-light loop.
+    Light FindLight(const string &in name);
     void DestroyEntity(const Entity &in);
     void Reparent(const Entity &in child, const Entity &in newParent);
 }

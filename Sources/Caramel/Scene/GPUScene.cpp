@@ -55,6 +55,7 @@ void GPUScene::Init(agfx::Device& device, agfx::CommandQueue& queue, const Schem
     m_InstanceStream.Init(framesInFlight);
     m_InstanceLodStream.Init(framesInFlight);
     m_MaterialStream.Init(framesInFlight);
+    m_LightStream.Init(framesInFlight);
 
     m_SchemeParamStreams.Resize(schemes.Count());
     m_SchemeParamStaging.Resize(schemes.Count());
@@ -622,6 +623,36 @@ void GPUScene::Build(StreamingManager& streamingManager, const TArray<RenderInst
                                 m_MaterialStaging.Data(), m_MaterialStaging.Size() * sizeof(GPUMaterial));
         UploadSchemeParams(frameIndex);
     }
+}
+
+void GPUScene::BuildLights(const TArray<SceneLight>& lights, uint32 frameIndex)
+{
+    CARAMEL_ZONE("GPUScene::BuildLights");
+
+    m_LightStaging.Clear();
+    m_LightStaging.Reserve(lights.Size());
+
+    for (const SceneLight& light : lights)
+    {
+        GPULight gpu;
+        gpu.positionRange = glm::vec4(light.position, light.range);
+        gpu.directionRadius = glm::vec4(light.direction, light.sourceRadius);
+        gpu.colorIntensity = glm::vec4(light.color, light.intensity);
+        gpu.rightWidth = glm::vec4(light.right, light.size.x);
+        gpu.upHeight = glm::vec4(light.up, light.size.y);
+        gpu.spotScale = light.spotScale;
+        gpu.spotOffset = light.spotOffset;
+        gpu.type = (uint32)light.type;
+        gpu.flags = (uint32)light.shape | (light.twoSided ? 4u : 0u);
+        m_LightStaging.PushBack(gpu);
+    }
+
+    // The count, not the view, is what makes a lightless frame safe: Upload bails before reserving
+    // when there is nothing to write, so the slot keeps whatever buffer and contents the last upload
+    // left behind. Zero here is what stops a shader from ever reading them.
+    bool uploaded = m_LightStream.Upload(*m_Device, frameIndex, "GPUScene Light Buffer", sizeof(GPULight),
+                                         m_LightStaging.Data(), m_LightStaging.Size() * sizeof(GPULight));
+    m_LightCount = uploaded ? (uint32)m_LightStaging.Size() : 0;
 }
 
 void GPUScene::BuildBuckets()

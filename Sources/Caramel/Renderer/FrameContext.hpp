@@ -11,6 +11,7 @@
 #include <Caramel/Renderer/Camera.hpp>
 #include <Caramel/Renderer/RenderGraph/RenderGraphTypes.hpp>
 #include <Caramel/Scene/RenderInstance.hpp>
+#include <Caramel/Scene/SceneLight.hpp>
 
 #include <AGFX/agfx.hpp>
 
@@ -32,6 +33,11 @@ struct FrameContext
     const SchemeRegistry* schemes = nullptr;
     const Camera* camera = nullptr;
     const TArray<RenderInstance>* renderInstances = nullptr;
+
+    // The CPU-side list, already uploaded into gpuScene's light buffer by the time any pass runs.
+    // Here for the clustered light culling pass on Notes/TODO.md, which needs the bounding spheres on
+    // the CPU; the shading kernels reach the same data through gpuScene.
+    const TArray<SceneLight>* lights = nullptr;
 
     // Viewport, i.e. the size of every target below except backBuffer, which is the window's.
     uint32 width = 0;

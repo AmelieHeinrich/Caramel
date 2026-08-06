@@ -7,6 +7,7 @@
 #pragma once
 
 #include <Caramel/Scene/SceneNode.hpp>
+#include <Caramel/Scene/SceneLight.hpp>
 #include <Caramel/Scene/RenderInstance.hpp>
 
 class StreamingManager;
@@ -19,6 +20,8 @@ public:
     SceneNode* CreateModelEntity(SceneNode* parent, const String& name, const String& cmdlPath, StreamingManager& streamingManager);
 
     SceneNode* CreateEmptyEntity(SceneNode* parent, const String& name);
+
+    SceneNode* CreateLight(SceneNode* parent, const String& name, ELightType type);
 
     void AddInstance(SceneNode* entity, const Instance& instance);
     void DeleteNode(SceneNode* node);
@@ -36,6 +39,17 @@ public:
     // remove/reparent, streaming promoting a mesh into an entity); anything else that rewrites a
     // live Instance's transform after the fact (script bindings, the inspector) must call this too.
     void MarkRenderInstancesDirty() { m_RenderInstancesDirty = true; }
+
+    // Deliberately not cached, unlike BuildRenderInstances: a scene holds tens of lights where it
+    // holds hundreds of thousands of instances, so rebuilding costs nothing, and a second dirty flag
+    // would have to be marked from every site that marks render instances dirty -- one missed call
+    // and a light silently stops following its transform.
+    const TArray<SceneLight>& BuildLights();
+
+    /// @brief The resolved light belonging to `node` from this frame's BuildLights, or null if it is
+    /// not a light or is disabled. Lets the editor gizmo draw from the same resolved position and
+    /// direction the shader uses, instead of re-deriving the -Z convention a second time.
+    const SceneLight* FindLight(const SceneNode& node) const;
 
     // Overrides are layered onto the pristine cooked material when GPUScene writes its material
     // buffer each frame -- nothing mutates CPUModel, so there is no "apply" step.
@@ -65,6 +79,7 @@ public:
 
 private:
     void CollectRenderInstances(SceneNode& node, StreamingManager& streamingManager, TArray<RenderInstance>& out);
+    void CollectLights(SceneNode& node, TArray<SceneLight>& out);
     void UnregisterSubtree(SceneNode& node);
     void RegisterNode(SceneNode* node);
 
@@ -76,4 +91,7 @@ private:
 
     bool m_RenderInstancesDirty = true;
     TArray<RenderInstance> m_CachedRenderInstances;
+
+    // Cleared and refilled every BuildLights call -- held as a member only to keep its allocation.
+    TArray<SceneLight> m_Lights;
 };

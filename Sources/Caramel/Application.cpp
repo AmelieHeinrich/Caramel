@@ -12,6 +12,7 @@
 #include <Caramel/Core/CVar.hpp>
 #include <Caramel/Core/CpuProfiler.hpp>
 #include <Caramel/Asset/Model.hpp>
+#include <Caramel/Renderer/DebugRenderer.hpp>
 #include <Caramel/Physics/Physics.hpp>
 #include <Caramel/Physics/JoltMath.hpp>
 
@@ -30,6 +31,7 @@
 #include <nlohmann/json.hpp>
 
 #include <cfloat>
+#include <cmath>
 #include <filesystem>
 #include <fstream>
 
@@ -217,6 +219,13 @@ void Application::Run()
         }
         const TArray<RenderInstance>& renderInstances = *renderInstancesPtr;
 
+        const TArray<SceneLight>* lightsPtr;
+        {
+            CARAMEL_ZONE("Build Lights");
+            lightsPtr = &m_Scene.BuildLights();
+        }
+        const TArray<SceneLight>& lights = *lightsPtr;
+
         UpdatePicking(renderInstances);
         if (*cv_ShowColliders.AsBoolPtr())
             DrawColliders(renderInstances);
@@ -237,7 +246,7 @@ void Application::Run()
 
         {
             CARAMEL_ZONE("Renderer Render");
-            m_Renderer->Render(m_Camera, *m_StreamingManager, renderInstances);
+            m_Renderer->Render(m_Camera, *m_StreamingManager, renderInstances, lights);
         }
     }
     }
@@ -379,6 +388,14 @@ void Application::UpdatePicking(const TArray<RenderInstance>& renderInstances)
 
 void Application::DrawSelectionHighlight(const TArray<RenderInstance>& renderInstances)
 {
+    // A light has no collider and no RenderInstance, so the bounds path below finds nothing for it.
+    // The gizmo is the only thing that makes one visible in the viewport at all -- lights are also
+    // not clickable there, since UpdatePicking only raycasts render instances.
+    if (m_EditorContext.SelectedEntity->type == ESceneNodeType::Light) {
+        DrawLightGizmo(*m_EditorContext.SelectedEntity);
+        return;
+    }
+
     m_JoltDebugRenderer->SetDepthTest(false);
 
     // With a mesh picked the exact collider is affordable and useful. With only an instance picked
@@ -428,6 +445,51 @@ void Application::DrawSelectionHighlight(const TArray<RenderInstance>& renderIns
 
     JPH::AABox box(JPH::Vec3(boundsMin.x, boundsMin.y, boundsMin.z), JPH::Vec3(boundsMax.x, boundsMax.y, boundsMax.z));
     m_JoltDebugRenderer->DrawWireBox(box, JPH::Color(255, 217, 26));
+}
+
+void Application::DrawLightGizmo(const SceneNode& node)
+{
+    // Reads the same resolved light the shader does, so the gizmo cannot claim a direction or a reach
+    // the shading loop disagrees with. Null while the light is disabled -- CollectLights skips it.
+    const SceneLight* light = m_Scene.FindLight(node);
+    if (!light)
+        return;
+
+    DebugStyle style;
+    style.color = glm::vec4(light->color, 1.0f);
+    style.depthTest = false;
+
+    const glm::vec3& position = light->position;
+
+    switch (light->type) {
+        case ELightType::Directional:
+            DebugRenderer::Get().Arrow(position, position + light->direction * 2.0f, style);
+            break;
+
+        case ELightType::Point:
+            DebugRenderer::Get().SphereRings(position, light->range, style);
+            if (light->sourceRadius > 0.0f)
+                DebugRenderer::Get().SphereRings(position, light->sourceRadius, style);
+            break;
+
+        case ELightType::Spot:
+            DebugRenderer::Get().Cone(position, light->direction, light->range,
+                                      light->range * std::tan(glm::radians(light->outerAngle)), style);
+            break;
+
+        case ELightType::Area:
+            if (light->shape == EAreaShape::Tube) {
+                glm::vec3 half = light->right * (light->size.y * 0.5f);
+                DebugRenderer::Get().Capsule(position - half, position + half, light->size.x, style);
+            } else if (light->shape == EAreaShape::Disk) {
+                DebugRenderer::Get().SphereRings(position, light->size.x, style);
+            } else {
+                DebugRenderer::Get().Quad(position, light->right * (light->size.x * 0.5f),
+                                          light->up * (light->size.y * 0.5f), style);
+            }
+            DebugRenderer::Get().Arrow(position, position + light->direction * 1.0f, style);
+            break;
+    }
 }
 
 void Application::DrawColliders(const TArray<RenderInstance>& renderInstances)

@@ -25,6 +25,7 @@
 #include <glm/glm.hpp>
 
 #include <algorithm>
+#include <cfloat>
 #include <cstdio>
 
 namespace
@@ -363,7 +364,13 @@ void InspectorPanel::DrawTransformSection(EditorContext& context)
     if (EditorTheme::BeginProperties("InspectorTransform")) {
         changed |= DrawTransformRow("Position", instance.position, 0.05f, 0.0f);
         changed |= DrawTransformRow("Rotation", instance.rotationEuler, 0.5f, 0.0f);
-        changed |= DrawTransformRow("Scale", instance.scale, 0.01f, 1.0f);
+
+        // A light's direction is normalized and its extent is authored on the component, so scaling
+        // one does nothing -- an editable control that silently has no effect is worse than no
+        // control.
+        if (context.SelectedEntity->type != ESceneNodeType::Light)
+            changed |= DrawTransformRow("Scale", instance.scale, 0.01f, 1.0f);
+
         EditorTheme::EndProperties();
     }
     if (changed)
@@ -372,6 +379,103 @@ void InspectorPanel::DrawTransformSection(EditorContext& context)
     if (scriptDriven) {
         ImGui::EndDisabled();
         ImGui::TextDisabled(ICON_FA_SCROLL " Driven by script");
+    }
+}
+
+void InspectorPanel::DrawLightSection(EditorContext& context)
+{
+    if (context.SelectedEntity->type != ESceneNodeType::Light)
+        return;
+
+    LightComponent& light = context.SelectedEntity->light;
+
+    EditorTheme::SectionHeader(ICON_FA_LIGHTBULB " Light");
+
+    // Nothing here marks the scene dirty: Scene::BuildLights rebuilds the whole list every frame
+    // precisely so that every one of these widgets can just write into the component.
+    if (EditorTheme::BeginProperties("InspectorLight")) {
+        EditorTheme::PropertyLabel("Enabled");
+        ImGui::Checkbox(EditorTheme::HiddenID("Enabled"), &light.enabled);
+
+        EditorTheme::PropertyLabel("Type");
+        int32 typeIndex = (int32)light.type;
+        if (ImGui::Combo(EditorTheme::HiddenID("Type"), &typeIndex, "Directional\0Point\0Spot\0Area\0")) {
+            light.type = (ELightType)typeIndex;
+            // Intensity means a different physical unit per type, so keeping the number would turn
+            // 5000 lumens into 5000 lux -- direct sunlight.
+            light.intensity = LightDefaultIntensity(light.type);
+        }
+
+        EditorTheme::PropertyLabel("Color");
+        ImGui::ColorEdit3(EditorTheme::HiddenID("Color"), &light.color.x);
+
+        const char* intensityFormat = "%.0f lm";
+        if (light.type == ELightType::Directional)
+            intensityFormat = "%.0f lux";
+        else if (light.type == ELightType::Area)
+            intensityFormat = "%.0f nits";
+
+        // Drag speed scales with the value, because the useful range spans several orders of
+        // magnitude -- lux sits in the hundreds while lumens need six figures to carry across a
+        // scene. A fixed speed makes one end of that range untouchable.
+        EditorTheme::PropertyLabel("Intensity");
+        float32 intensityStep = std::max(light.intensity * 0.01f, 1.0f);
+        ImGui::DragFloat(EditorTheme::HiddenID("Intensity"), &light.intensity, intensityStep, 0.0f, FLT_MAX, intensityFormat);
+
+        if (light.type != ELightType::Directional) {
+            EditorTheme::PropertyLabel("Range");
+            ImGui::DragFloat(EditorTheme::HiddenID("Range"), &light.range, 0.1f, 0.01f, FLT_MAX, "%.2f m");
+        }
+
+        if (light.type == ELightType::Spot) {
+            EditorTheme::PropertyLabel("Inner Angle");
+            ImGui::DragFloat(EditorTheme::HiddenID("InnerAngle"), &light.innerAngle, 0.5f, 0.0f, 89.0f, "%.1f deg");
+
+            EditorTheme::PropertyLabel("Outer Angle");
+            ImGui::DragFloat(EditorTheme::HiddenID("OuterAngle"), &light.outerAngle, 0.5f, 0.1f, 89.9f, "%.1f deg");
+
+            light.outerAngle = std::max(light.outerAngle, 0.1f);
+            light.innerAngle = std::min(light.innerAngle, light.outerAngle);
+        }
+
+        if (light.type == ELightType::Point || light.type == ELightType::Spot) {
+            EditorTheme::PropertyLabel("Source Radius");
+            ImGui::DragFloat(EditorTheme::HiddenID("SourceRadius"), &light.sourceRadius, 0.01f, 0.0f, FLT_MAX, "%.3f m");
+        }
+
+        if (light.type == ELightType::Area) {
+            EditorTheme::PropertyLabel("Shape");
+            int32 shapeIndex = (int32)light.shape;
+            if (ImGui::Combo(EditorTheme::HiddenID("Shape"), &shapeIndex, "Rect\0Disk\0Tube\0"))
+                light.shape = (EAreaShape)shapeIndex;
+
+            // The two size fields mean different things per shape, and nits are per square metre, so
+            // a mislabelled field silently changes how bright the light is.
+            const char* firstLabel = "Width";
+            const char* secondLabel = "Height";
+            if (light.shape == EAreaShape::Disk) {
+                firstLabel = "Radius";
+                secondLabel = nullptr;
+            } else if (light.shape == EAreaShape::Tube) {
+                firstLabel = "Radius";
+                secondLabel = "Length";
+            }
+
+            EditorTheme::PropertyLabel(firstLabel);
+            ImGui::DragFloat(EditorTheme::HiddenID("SizeX"), &light.size.x, 0.01f, 0.0f, FLT_MAX, "%.3f m");
+
+            if (secondLabel) {
+                EditorTheme::PropertyLabel(secondLabel);
+                ImGui::DragFloat(EditorTheme::HiddenID("SizeY"), &light.size.y, 0.01f, 0.0f, FLT_MAX, "%.3f m");
+            }
+
+            if (light.shape != EAreaShape::Tube) {
+                EditorTheme::PropertyLabel("Two Sided");
+                ImGui::Checkbox(EditorTheme::HiddenID("TwoSided"), &light.twoSided);
+            }
+        }
+
+        EditorTheme::EndProperties();
     }
 }
 
@@ -688,6 +792,8 @@ void InspectorPanel::Draw(EditorContext& context, StreamingManager& streaming)
         EditorTheme::PropertyLabel("Asset");
         if (context.SelectedEntity->type == ESceneNodeType::Entity)
             ImGui::TextUnformatted(context.SelectedEntity->cmdlPath.CStr());
+        else if (context.SelectedEntity->type == ESceneNodeType::Light)
+            ImGui::TextDisabled("Light");
         else
             ImGui::TextDisabled("Empty entity");
 
@@ -706,6 +812,7 @@ void InspectorPanel::Draw(EditorContext& context, StreamingManager& streaming)
     }
 
     DrawTransformSection(context);
+    DrawLightSection(context);
     DrawMeshTransformSection(context, streaming);
     DrawScriptSection(context, streaming);
     DrawMaterialSection(context, streaming);

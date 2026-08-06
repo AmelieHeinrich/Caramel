@@ -55,7 +55,7 @@ uint2 DeferredUnpackPixel(uint packed) { return uint2(packed & 0xFFFFu, packed >
 // Everything the classify passes and the shading kernels agree on. Deliberately all scalars: push
 // constants pack by cbuffer rules, where a uint2 may not straddle a 16-byte boundary, so inserting a
 // field ahead of one silently shifts every field after it (see the same warning in SceneMesh.hlsli).
-// Mirrors DeferredPushConstants in Sources/Caramel/Renderer/SceneRenderer.cpp. 76 bytes, well under
+// Mirrors DeferredPushConstants in Sources/Caramel/Renderer/SceneRenderer.cpp. 84 bytes, well under
 // the 128-byte root-signature ceiling.
 struct DeferredPushConstants {
     ResourceHandle rFrameConstants;
@@ -81,8 +81,17 @@ struct DeferredPushConstants {
     // silently and nothing catches when it drifts. Only MaterialClassifyArgs reads these.
     uint uBundleHandleLo;
     uint uBundleHandleHi;
+    ResourceHandle rLightBuffer;       // stale or null when uLightCount is 0 -- never read unguarded
+    uint uLightCount;
 };
 AGFX_PUSH_CONSTANTS(DeferredPushConstants, g_Constants);
+
+// The scene's lights. uLightCount is the only thing keeping this safe: GPUScene's light buffer keeps
+// its previous allocation on a frame with no lights, so the handle can outlive the lights it
+// described. Loop to uLightCount and the body is simply unreachable.
+GPULight DeferredLoadLight(uint index) {
+    return AGFXStructuredBuffer<GPULight>::Create(g_Constants.rLightBuffer).Load(index);
+}
 
 uint64_t DeferredBundleHandle() {
     return ((uint64_t)g_Constants.uBundleHandleHi << 32) | (uint64_t)g_Constants.uBundleHandleLo;

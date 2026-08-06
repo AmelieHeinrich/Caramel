@@ -75,7 +75,7 @@ public:
 
     static constexpr float32 kPollInterval = 0.25f;
     // OnUpdate runs every single frame, so it keeps a tight leash to avoid hanging the render loop.
-    static constexpr float64 kExecutionBudgetSeconds = 0.005;
+    static constexpr float64 kExecutionBudgetSeconds = 1;
     // OnStart runs once (including a manual Run on a [RunOnce] component), so it can afford to
     // burn real time on one-shot setup work like spawning thousands of instances.
     static constexpr float64 kOnStartExecutionBudgetSeconds = 5.0;

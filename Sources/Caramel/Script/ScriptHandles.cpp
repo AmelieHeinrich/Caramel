@@ -67,6 +67,20 @@ StreamingModel* ScriptSceneBridge::Resolve(const MeshRef& ref)
     return models[meshIndex].get();
 }
 
+LightComponent* ScriptSceneBridge::Resolve(const LightRef& ref)
+{
+    SceneNode* node = Resolve(EntityRef{ ref.nodeId });
+    if (!node)
+        return nullptr;
+
+    if (node->type != ESceneNodeType::Light) {
+        NoteFailedResolve();
+        return nullptr;
+    }
+
+    return &node->light;
+}
+
 MaterialOverride* ScriptSceneBridge::ResolveOrCreate(const MaterialRef& ref)
 {
     SceneNode* node = Resolve(EntityRef{ ref.nodeId });

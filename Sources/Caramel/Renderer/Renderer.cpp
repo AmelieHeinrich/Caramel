@@ -305,7 +305,8 @@ void Renderer::SetImportedState(agfxTexture* texture, agfx::ResourceState state)
     m_ImportedResourceState[texture] = state;
 }
 
-void Renderer::Render(const Camera& camera, StreamingManager& streamingManager, const TArray<RenderInstance>& renderInstances)
+void Renderer::Render(const Camera& camera, StreamingManager& streamingManager, const TArray<RenderInstance>& renderInstances,
+                      const TArray<SceneLight>& lights)
 {
     CARAMEL_ZONE("Renderer::Render");
 
@@ -343,6 +344,7 @@ void Renderer::Render(const Camera& camera, StreamingManager& streamingManager, 
     ShaderServer::Tick();
 
     m_GPUScene.Build(streamingManager, renderInstances, (uint32)m_FrameSlot);
+    m_GPUScene.BuildLights(lights, (uint32)m_FrameSlot);
     {
         CARAMEL_ZONE("Scan Newly Resident Models");
         m_AccelStructManager->ScanForNewlyResidentModels(renderInstances);
@@ -383,6 +385,7 @@ void Renderer::Render(const Camera& camera, StreamingManager& streamingManager, 
     m_FrameContext.schemes = &m_SchemeRegistry;
     m_FrameContext.camera = &camera;
     m_FrameContext.renderInstances = &renderInstances;
+    m_FrameContext.lights = &lights;
     m_FrameContext.width = m_ViewportWidth;
     m_FrameContext.height = m_ViewportHeight;
     m_FrameContext.windowWidth = (uint32)width;
