@@ -10,11 +10,13 @@
 #include <Caramel/Core/Timer.hpp>
 #include <Caramel/Renderer/Common.hpp>
 #include <Caramel/Renderer/Camera.hpp>
+#include <Caramel/Renderer/MaterialScheme.hpp>
 #include <Caramel/Scene/GPUScene.hpp>
 
 #include <AGFX/agfx.hpp>
 
 struct ScenePushConstants;
+struct DeferredPushConstants;
 
 /// @brief Two-pass HZB occlusion culling at meshlet granularity. Frame order is Cull Early ->
 /// Scene Early -> Build HZB -> Cull Late -> Scene Late. The early pass redraws the meshlets the late
@@ -26,7 +28,8 @@ struct ScenePushConstants;
 class SceneRenderer
 {
 public:
-    SceneRenderer(agfx::Device& device, agfx::TextureFormat colorFormat, agfx::TextureFormat depthFormat, uint32 framesInFlight);
+    SceneRenderer(agfx::Device& device, const SchemeRegistry& schemes, agfx::TextureFormat colorFormat,
+                  agfx::TextureFormat depthFormat, uint32 framesInFlight);
 
     /// @brief Uploads this frame's camera constants and issues the frozen-frustum debug draw. Must
     /// run before the render graph is built -- both cull dispatches read what it writes.
@@ -47,8 +50,25 @@ public:
     void RenderLate(agfx::RenderPass& renderPass, GPUScene& gpuScene, const HZBResources& hzb, uint32 width, uint32 height, uint32 frameIndex);
 
     /// @brief Fullscreen visibility-buffer resolve: reads the visibility + depth targets and writes
-    /// the whole gbuffer, with the scene-color attachment carrying the scene.gbuffer_debug view.
+    /// the whole gbuffer. Attachment 0 is the scene lighting buffer, which this pass only clears (or
+    /// fills with the scene.gbuffer_debug view) -- ShadeMaterials is what actually shades it.
     void RenderGBufferResolve(agfx::RenderPass& renderPass, GPUScene& gpuScene, uint32 visibilityHandle, uint32 depthHandle, uint32 width, uint32 height, uint32 frameIndex);
+
+    /// @brief Bins every covered pixel by its material's scheme id and builds one indirect dispatch
+    /// command per scheme: count -> prefix sum -> scatter -> args (Notes/GPU-Driven.md). No-ops while
+    /// a scene.gbuffer_debug view is selected, since ShadeMaterials would overwrite it.
+    void ClassifyMaterials(agfx::CommandBuffer& cmd, GPUScene& gpuScene, const DeferredTargets& targets, uint32 width, uint32 height, uint32 frameIndex);
+
+    /// @brief Replays the classification's dispatch commands, one per scheme, each running that
+    /// scheme's compute kernel over only the pixels it owns.
+    void ShadeMaterials(agfx::CommandBuffer& cmd, GPUScene& gpuScene, const DeferredTargets& targets, uint32 width, uint32 height, uint32 frameIndex);
+
+    /// @brief Fullscreen resolve of the HDR lighting buffer into scene color.
+    void RenderComposite(agfx::RenderPass& renderPass, uint32 sceneLightingHandle, uint32 width, uint32 height);
+
+    /// @brief True while a scene.gbuffer_debug view is selected, i.e. classification and shading are
+    /// skipped and GBuffer Resolve's own output is what reaches the screen.
+    static bool IsGBufferDebugActive();
 
     /// @brief Call when the HZB is recreated (viewport resize): the new pyramid holds garbage and the
     /// visibility flags describe a projection that no longer exists.
@@ -62,13 +82,29 @@ private:
     /// into the ICB at prepare time).
     agfx::IndirectBundleExecuteInfo BuildRegionExecuteInfo(const ScenePushConstants& pc, uint32 region, uint32 frameIndex) const;
 
+    /// @brief Everything the classify and shade kernels share, minus the per-scheme fields.
+    DeferredPushConstants BuildDeferredPushConstants(GPUScene& gpuScene, const DeferredTargets& targets,
+                                                     uint32 width, uint32 height, uint32 frameIndex) const;
+
+    /// @brief Execute info for one scheme's region of the deferred bundle. Shared between
+    /// ClassifyMaterials (which prepares) and ShadeMaterials (which executes) for the same reason as
+    /// BuildRegionExecuteInfo: Metal bakes the push constants into the ICB at prepare time.
+    agfx::IndirectBundleExecuteInfo BuildSchemeExecuteInfo(const DeferredPushConstants& pc, GPUScene& gpuScene,
+                                                           uint32 schemeId, uint32 frameIndex) const;
+
     void EnsureOpaqueCapacity(uint32 frameIndex, uint32 requiredCount);
+
+    /// @brief Grows the per-scheme pixel list to cover the viewport.
+    void EnsureClassifyCapacity(uint32 width, uint32 height);
     void EnsureVisibilityCapacity(uint32 requiredCount, uint32 maxMeshletCount);
 
     /// @brief The half of a cull dispatch that is identical between the two passes.
     void RecordCullPass(agfx::CommandBuffer& cmd, GPUScene& gpuScene, const HZBResources& hzb, uint32 frameIndex, uint32 pass);
 
     agfx::Device* m_Device;
+
+    // Read for the scheme count and each scheme's shader path. Owned by Renderer and outlives this.
+    const SchemeRegistry* m_Schemes;
 
     agfx::Sampler m_Sampler;
 
@@ -88,6 +124,24 @@ private:
     agfx::BufferView m_OpaqueDrawIndirectionViews[FRAMES_IN_FLIGHT];
 
     uint32 m_OpaqueCapacities[FRAMES_IN_FLIGHT] = {};
+
+    // Material classification state. Three parallel per-scheme uint arrays in one allocation --
+    // counts, pixel-list offsets, scatter cursors -- laid out by kClassify*Base in
+    // Common/DeferredShading.hlsli. Raw views because only AGFXRWByteAddressBuffer carries the
+    // Interlocked* family.
+    //
+    // Deliberately not per-frame-slot, unlike the bundles: nothing reads them across frames, they are
+    // zeroed at the top of every classify pass, and the fence wait in Renderer::Render already keeps
+    // frame N+1's classify off frame N's shading.
+    agfx::Buffer m_ClassifyBuffer;
+    agfx::BufferView m_ClassifyBufferView;
+
+    // One uint per covered pixel, (y << 16) | x, grouped into a contiguous run per scheme. Sized for
+    // the whole viewport since in the worst case every pixel is covered.
+    agfx::Buffer m_ClassifyPixelList;
+    agfx::BufferView m_ClassifyPixelListView;
+    uint32 m_ClassifyPixelCapacity = 0;
+    bool m_WarnedClassifyExtent = false;
 
     // Per-instance visibility, one uint per instance. Deliberately *not* per-frame-slot: the whole
     // point is that frame N's early pass reads what frame N-1's late pass wrote. Within a frame the

@@ -30,6 +30,7 @@ uint32 SchemeParamSize(ESchemeParamType type)
     return 4;
 }
 
+
 namespace
 {
     bool ParseParamType(const String& text, ESchemeParamType& out)
@@ -41,42 +42,6 @@ namespace
         if (text == "float3") { out = ESchemeParamType::Float3; return true; }
         if (text == "float4") { out = ESchemeParamType::Float4; return true; }
         return false;
-    }
-
-    agfx::CullMode ParseCullMode(const String& text)
-    {
-        if (text == "Front") return agfx::CullMode::Front;
-        if (text == "Back")  return agfx::CullMode::Back;
-        return agfx::CullMode::None;
-    }
-
-    agfx::FrontFace ParseFrontFace(const String& text)
-    {
-        return text == "Clockwise" ? agfx::FrontFace::Clockwise : agfx::FrontFace::CounterClockwise;
-    }
-
-    agfx::FillMode ParseFillMode(const String& text)
-    {
-        return text == "Wireframe" ? agfx::FillMode::Wireframe : agfx::FillMode::Solid;
-    }
-
-    agfx::Topology ParseTopology(const String& text)
-    {
-        if (text == "Lines")  return agfx::Topology::Lines;
-        if (text == "Points") return agfx::Topology::Points;
-        return agfx::Topology::Triangles;
-    }
-
-    agfx::ComparisonFunction ParseComparison(const String& text)
-    {
-        if (text == "Never")        return agfx::ComparisonFunction::Never;
-        if (text == "Equal")        return agfx::ComparisonFunction::Equal;
-        if (text == "LessEqual")    return agfx::ComparisonFunction::LessEqual;
-        if (text == "Greater")      return agfx::ComparisonFunction::Greater;
-        if (text == "NotEqual")     return agfx::ComparisonFunction::NotEqual;
-        if (text == "GreaterEqual") return agfx::ComparisonFunction::GreaterEqual;
-        if (text == "Always")       return agfx::ComparisonFunction::Always;
-        return agfx::ComparisonFunction::Less;
     }
 
     glm::vec4 ParseDefaultValue(const nlohmann::json& j, ESchemeParamType type)
@@ -112,16 +77,26 @@ const SchemeParam* MaterialScheme::FindParam(const String& paramName) const
     return nullptr;
 }
 
+// One 16-byte slot per parameter, in declaration order, however small the parameter is.
+//
+// This side has to agree byte-for-byte with a struct the scheme's shader declares by hand, and
+// nothing can check that at compile time -- a disagreement just renders from the neighbouring
+// field's bytes, or from the zero-filled gap between blocks. Rather than reproduce HLSL's packing
+// rules for StructuredBuffer elements (which differ from cbuffer rules, are not obviously
+// documented, and cost a full rebuild-and-look to test), give every parameter a full float4 slot:
+// every member is then 16 bytes at a 16-byte offset, which *every* packing rule agrees on, and the
+// stride is just 16 * count. There is nothing left for the two sides to disagree about.
+//
+// The waste is a few bytes per material slot per scheme -- kilobytes across a whole scene.
+//
+// The contract for a scheme's shader is therefore: one float4 (or int4) per JSON parameter, in the
+// same order, reading scalars out of .x.
 void MaterialScheme::ComputeLayout()
 {
-    uint32 offset = 0;
-    for (SchemeParam& param : params)
-    {
-        param.byteOffset = offset;
-        offset += SchemeParamSize(param.type);
-    }
+    for (uint32 i = 0; i < (uint32)params.Size(); ++i)
+        params[i].byteOffset = i * kSchemeParamSlotSize;
 
-    paramStride = offset;
+    paramStride = (uint32)params.Size() * kSchemeParamSlotSize;
 }
 
 void MaterialScheme::PackParams(const TDictionary<String, glm::vec4>& values, uint8* dst) const
@@ -179,7 +154,7 @@ void MaterialScheme::PackParams(const TDictionary<String, glm::vec4>& values, ui
     }
 }
 
-void SchemeRegistry::LoadDirectory(const String& directory, agfx::TextureFormat colorFormat, agfx::TextureFormat depthFormat)
+void SchemeRegistry::LoadDirectory(const String& directory)
 {
     namespace fs = std::filesystem;
 
@@ -193,7 +168,7 @@ void SchemeRegistry::LoadDirectory(const String& directory, agfx::TextureFormat 
     // The default scheme must claim id 0, so load it first regardless of directory order.
     String defaultPath = directory + "/" + kDefaultSchemeName + ".json";
     if (fs::exists(defaultPath.CStr(), error))
-        LoadScheme(defaultPath, colorFormat, depthFormat);
+        LoadScheme(defaultPath);
     else
         CARAMEL_ERROR("SchemeRegistry: default scheme '{}' is missing -- scene geometry will not render", defaultPath.CStr());
 
@@ -213,12 +188,12 @@ void SchemeRegistry::LoadDirectory(const String& directory, agfx::TextureFormat 
     std::sort(paths.Begin(), paths.End());
 
     for (const String& path : paths)
-        LoadScheme(path, colorFormat, depthFormat);
+        LoadScheme(path);
 
     CARAMEL_INFO("SchemeRegistry: loaded {} material scheme(s) from '{}'", m_Schemes.Size(), directory.CStr());
 }
 
-bool SchemeRegistry::LoadScheme(const String& path, agfx::TextureFormat colorFormat, agfx::TextureFormat depthFormat)
+bool SchemeRegistry::LoadScheme(const String& path)
 {
     std::ifstream file(path.CStr());
     if (!file)
@@ -284,7 +259,7 @@ bool SchemeRegistry::LoadScheme(const String& path, agfx::TextureFormat colorFor
         String typeText = String(paramJson.value("type", "float"));
         if (!ParseParamType(typeText, param.type))
         {
-            CARAMEL_WARN("SchemeRegistry: scheme '{}' parameter '{}' has unsupported type '{}' (float3 is not allowed -- use float4), skipping",
+            CARAMEL_WARN("SchemeRegistry: scheme '{}' parameter '{}' has unsupported type '{}', skipping",
                          name.CStr(), param.name.CStr(), typeText.CStr());
             continue;
         }
@@ -298,36 +273,24 @@ bool SchemeRegistry::LoadScheme(const String& path, agfx::TextureFormat colorFor
     }
     scheme->ComputeLayout();
 
-    agfx::RenderPipelineCreateInfo& pipelineInfo = scheme->pipelineTemplate;
     // Safe because `scheme` is heap-owned and never moved: AGFX does not copy this string.
-    pipelineInfo.SetName(scheme->name.CStr());
+    scheme->pipelineTemplate.SetName(scheme->name.CStr());
+    ShaderServer::RegisterComputePipeline(scheme->pipelineTemplate, scheme->shaderPath);
 
-    const nlohmann::json& state = j.contains("renderState") ? j["renderState"] : nlohmann::json::object();
-    pipelineInfo.SetFillMode(ParseFillMode(String(state.value("fillMode", "Solid"))))
-                .SetCullMode(ParseCullMode(String(state.value("cullMode", "None"))))
-                .SetFrontFace(ParseFrontFace(String(state.value("frontFace", "CounterClockwise"))))
-                .SetTopology(ParseTopology(String(state.value("topology", "Triangles"))))
-                .SetDepthState(state.value("depthTest", true), state.value("depthWrite", true),
-                               ParseComparison(String(state.value("depthCompare", "Less"))))
-                .SetDepthClamp(state.value("depthClamp", false))
-                .SetDepthFormat(depthFormat)
-                .AddColorAttachment(colorFormat);
-
-    String blend = String(state.value("blend", "None"));
-    if (blend == "AlphaBlend")
-        pipelineInfo.SetAlphaBlend();
-    else if (blend != "None")
-        CARAMEL_WARN("SchemeRegistry: scheme '{}' has unknown blend mode '{}', treating as None", name.CStr(), blend.CStr());
-
-    ShaderServer::RegisterRenderPipeline(pipelineInfo, scheme->shaderPath);
-
-    if (!ShaderServer::GetPipeline(scheme->shaderPath, {}))
+    if (!ShaderServer::GetComputePipeline(scheme->shaderPath, {}))
     {
         CARAMEL_ERROR("SchemeRegistry: scheme '{}' failed to compile '{}'", name.CStr(), scheme->shaderPath.CStr());
         return false;
     }
 
     uint32 schemeId = (uint32)m_Schemes.Size();
+    if (schemeId >= kMaxSchemes)
+    {
+        CARAMEL_ERROR("SchemeRegistry: scheme '{}' exceeds the {}-scheme ceiling the material classification pass is sized for, ignoring",
+                      name.CStr(), kMaxSchemes);
+        return false;
+    }
+
     m_ByName[name] = schemeId;
     m_Schemes.PushBack(std::move(scheme));
 
@@ -335,6 +298,9 @@ bool SchemeRegistry::LoadScheme(const String& path, agfx::TextureFormat colorFor
     CARAMEL_INFO("SchemeRegistry: scheme {} '{}' -> '{}' ({} param(s), {} byte stride)",
                  schemeId, name.CStr(), loaded.shaderPath.CStr(), loaded.params.Size(), loaded.paramStride);
 
+    // These offsets have to match the parameter struct the scheme's shader declares by hand, member
+    // for member -- nothing can check that at compile time, so log it. A scheme rendering from
+    // plausible-but-wrong values is almost always a member declared in the wrong order here.
     for (const SchemeParam& param : loaded.params)
         CARAMEL_DEBUG("SchemeRegistry:   +{:<3} {}", param.byteOffset, param.name.CStr());
 

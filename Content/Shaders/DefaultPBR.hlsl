@@ -4,32 +4,50 @@
  * @ Copyright: Day III Digital - All rights reserved
  */
 
-#include "Common/SceneMesh.hlsli"
+// Standard metallic/roughness shading model, run as a deferred compute pass. Replayed from the
+// Dispatch indirect bundle the material classification pass fills, so every thread here is already
+// known to sit on a pixel whose material uses this scheme -- there is no per-pixel scheme branch.
 
-#pragma pixel DefaultPBRPS
+#include "Common/DeferredShading.hlsli"
+#include "Common/BRDF.hlsli"
 
-// Stub until deferred shading: the scene now goes through VisBuffer.hlsl + GBufferResolve.hlsl,
-// and schemes will be rewritten as deferred shading passes. Kept compiling so SchemeRegistry and
-// the scheme parameter plumbing stay exercised.
+#pragma compute DefaultPBRCS
 
-// Mirrors the "parameters" array in Content/Materials/Schemes/DefaultPBR.json, in declaration order.
-// See MaterialScheme::ComputeLayout.
+// One float4 per parameter in Content/Materials/Schemes/DefaultPBR.json, in declaration order.
+// Scalars live in .x and the rest of the slot is padding -- see MaterialScheme::ComputeLayout for
+// why the layout is this blunt.
 struct DefaultPBRParams {
-    float fLightIntensity;
+    float4 vAmbientScale;
+    float4 vLightIntensity;
 };
 
-float4 DefaultPBRPS(VSOut input) : SV_Target {
-    SceneLodDither(input);
+// Placeholder until the light list exists (Notes/TODO.md, "Base lighting pass"). Angled rather than
+// straight up so surfaces of different orientation are actually distinguishable.
+static const float3 kSunDirection = float3(0.0f, 1.0f, 0.0f);
 
-    GPUMaterial material = SceneLoadMaterial(input.uMaterialSlot);
-    DefaultPBRParams params = SCENE_LOAD_SCHEME_PARAMS(DefaultPBRParams, input.uMaterialSlot);
+// The forward pass this replaces hardcoded a 5.0 multiplier on the direct term (see
+// `git show 91b9ed8^:Content/Shaders/DefaultPBR.hlsl`). Kept as the sun's radiance so the scheme's
+// lightIntensity parameter stays a ~1.0-centred multiplier rather than having to carry the exposure.
+static const float kSunRadiance = 5.0f;
 
-    AGFXSampler sSampler = AGFXSampler::Create(g_Constants.rSampler);
-    AGFXTexture2D<float4> tBaseColor = AGFXTexture2D<float4>::Create(material.uTextures[kMaterialTextureBaseColor]);
-    float4 baseColor = tBaseColor.Sample(sSampler, input.vUV) * material.vBaseColorFactor;
-    if (GPUMaterialIsAlphaTested(material) && baseColor.a < material.fAlphaCutoff) {
-        discard;
-    }
+[numthreads(kShadeGroupSize, 1, 1)]
+void DefaultPBRCS(uint3 dispatchThreadID : SV_DispatchThreadID)
+{
+    uint2 pixel;
+    uint materialSlot;
+    if (!DeferredResolveThread(dispatchThreadID.x, pixel, materialSlot))
+        return;
 
-    return float4(baseColor.rgb * params.fLightIntensity, baseColor.a);
+    DeferredSurface surface = DeferredLoadSurface(pixel, materialSlot);
+    DefaultPBRParams params = DEFERRED_LOAD_SCHEME_PARAMS(DefaultPBRParams, materialSlot);
+
+    float3 lightDir = normalize(kSunDirection);
+    float3 direct = CookTorrance(surface.vNormal, surface.vViewDirection, lightDir,
+                                 surface.vAlbedo, surface.fMetallic, surface.fRoughness);
+
+    float3 ambient = surface.vAlbedo * params.vAmbientScale.x;
+    float3 color = direct * (kSunRadiance * params.vLightIntensity.x) + ambient + surface.vEmissive;
+
+    // Linear and un-tonemapped: Composite.hlsl owns the transfer curve.
+    DeferredWrite(pixel, color);
 }

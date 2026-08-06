@@ -131,7 +131,9 @@ struct SchemeBucket
 class GPUScene
 {
 public:
-    void Init(agfx::Device& device, const SchemeRegistry& schemes, uint32 framesInFlight);
+    /// @brief `queue` is used once, synchronously, to fill the fallback texture -- see
+    /// GPUScene::Init. Nothing retains it.
+    void Init(agfx::Device& device, agfx::CommandQueue& queue, const SchemeRegistry& schemes, uint32 framesInFlight);
 
     /// @brief Rebuilds the buffers for `frameIndex` and re-sorts draws into scheme/material buckets.
     /// Instances whose LOD is not yet resident are skipped, so instance indices are compacted.

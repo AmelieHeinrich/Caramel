@@ -9,8 +9,13 @@
 #include <Caramel/Renderer/Shader/ShaderServer.hpp>
 #include <Caramel/Renderer/DebugRenderer.hpp>
 #include <Caramel/Core/CVar.hpp>
+#include <Caramel/Core/Logger.hpp>
 
 #include <cstring>
+
+#if defined(CARAMEL_WINDOWS)
+    #undef MemoryBarrier
+#endif
 
 namespace
 {
@@ -29,10 +34,11 @@ namespace
     CVar cv_FreezeFrustum("scene.freeze_frustum", false, "Freeze Frustum", "Scene Renderer",
         "Stop updating the camera data culling reads (frustum, position, view/projection) and debug-draw the frustum frozen in place");
 
-    // Which gbuffer channel or ID hash GBufferResolve.hlsl writes into scene color while there is
-    // no deferred shading pass yet.
-    CVar cv_GBufferDebug("scene.gbuffer_debug", 0, 0, 8, "GBuffer Debug", "Scene Renderer",
-        "0 = albedo, 1 = normal, 2 = metallic/roughness, 3 = emissive, 4 = motion, 5 = meshlet ID, 6 = triangle ID, 7 = instance ID, 8 = LOD");
+    // Which gbuffer channel or ID hash GBufferResolve.hlsl writes into the scene lighting buffer.
+    // Anything other than 0 suppresses material classification and shading entirely -- both write the
+    // same target, so leaving them on would just overwrite the view being inspected.
+    CVar cv_GBufferDebug("scene.gbuffer_debug", 0, 0, 9, "GBuffer Debug", "Scene Renderer",
+        "0 = none (deferred shading), 1 = albedo, 2 = normal, 3 = metallic/roughness, 4 = emissive, 5 = motion, 6 = meshlet ID, 7 = triangle ID, 8 = instance ID, 9 = LOD");
 
     // Off: the depth pyramid stops being rebuilt and freezes at whatever it last held, together with
     // the viewProjection occlusion tests project bounds with (hzbViewProjection). Every occlusion
@@ -46,6 +52,18 @@ namespace
     constexpr const char* kGBufferResolveShaderPath = "Content/Shaders/GBufferResolve.hlsl";
     constexpr const char* kPopulateOpaqueIndirectBundleShaderPath = "Content/Shaders/PopulateOpaqueIndirectBundle.hlsl";
     constexpr const char* kBuildHZBShaderPath = "Content/Shaders/BuildHZB.hlsl";
+    constexpr const char* kClassifyCountShaderPath = "Content/Shaders/MaterialClassifyCount.hlsl";
+    constexpr const char* kClassifyArgsShaderPath = "Content/Shaders/MaterialClassifyArgs.hlsl";
+    constexpr const char* kClassifyScatterShaderPath = "Content/Shaders/MaterialClassifyScatter.hlsl";
+    constexpr const char* kCompositeShaderPath = "Content/Shaders/Composite.hlsl";
+
+    // All three mirror Content/Shaders/Common/DeferredShading.hlsli and must not drift from it.
+    constexpr uint32 kClassifyTileSize = 8;
+    constexpr uint32 kClassifySlotsPerScheme = 3;   // counts, offsets, cursors
+    constexpr uint32 kClassifySlotCount = SchemeRegistry::kMaxSchemes * kClassifySlotsPerScheme;
+
+    // DeferredPackPixel packs a coordinate as (y << 16) | x.
+    constexpr uint32 kMaxClassifiedViewportExtent = 0xFFFFu;
 
     constexpr uint32 kPopulateThreadGroupSize = 64;
     // The downsampler's group owns a 64x64 tile of HZB mip 0. Mirrors kHZBTileSize in BuildHZB.hlsl.
@@ -186,6 +204,42 @@ struct ScenePushConstants
     float32 fMinContribution;
 };
 
+// Mirrors DeferredPushConstants in Content/Shaders/Common/DeferredShading.hlsli. Shared by the three
+// classification kernels and every material scheme's shading kernel -- all scalars, deliberately, so
+// no field can straddle a 16-byte cbuffer boundary and silently shift everything after it.
+struct DeferredPushConstants
+{
+    uint32 rFrameConstants;
+    uint32 rInstanceBuffer;
+    uint32 rMaterialBuffer;
+    uint32 rSchemeParams;
+    uint32 rVisibility;
+    uint32 rDepth;
+    uint32 rAlbedo;
+    uint32 rNormal;
+    uint32 rMetallicRoughness;
+    uint32 rEmissive;
+    uint32 rPixelList;
+    uint32 rClassifyBuffer;
+    uint32 rOutput;
+    uint32 uSchemeId;
+    uint32 uWidth;
+    uint32 uHeight;
+    uint32 uSchemeCount;
+    // Split rather than a uint64 -- see the comment on the HLSL side. Low half is the bundle's
+    // commands buffer, high half its count buffer.
+    uint32 uBundleHandleLo;
+    uint32 uBundleHandleHi;
+};
+static_assert(sizeof(DeferredPushConstants) <= 128, "Push constants are capped at 128 bytes by the root signature");
+
+// Mirrors CompositePushConstants in Content/Shaders/Composite.hlsl.
+struct CompositePushConstants
+{
+    uint32 rSceneLighting;
+    uint32 uPassthrough;
+};
+
 // Mirrors GBufferResolvePushConstants in Content/Shaders/GBufferResolve.hlsl.
 struct GBufferResolvePushConstants
 {
@@ -202,8 +256,9 @@ struct GBufferResolvePushConstants
     uint32 uHeight;
 };
 
-SceneRenderer::SceneRenderer(agfx::Device& device, agfx::TextureFormat colorFormat, agfx::TextureFormat depthFormat, uint32 framesInFlight)
-    : m_Device(&device)
+SceneRenderer::SceneRenderer(agfx::Device& device, const SchemeRegistry& schemes, agfx::TextureFormat colorFormat,
+                             agfx::TextureFormat depthFormat, uint32 framesInFlight)
+    : m_Device(&device), m_Schemes(&schemes)
 {
     agfx::SamplerCreateInfo samplerInfo;
     samplerInfo.SetFilter(agfx::SamplerFilter::Linear)
@@ -237,7 +292,7 @@ SceneRenderer::SceneRenderer(agfx::Device& device, agfx::TextureFormat colorForm
                        .SetCullMode(agfx::CullMode::None)
                        .SetFrontFace(agfx::FrontFace::CounterClockwise)
                        .SetTopology(agfx::Topology::Triangles)
-                       .AddColorAttachment(colorFormat)
+                       .AddColorAttachment(kSceneLightingFormat)
                        .AddColorAttachment(agfx::TextureFormat::RGBA8Unorm)
                        .AddColorAttachment(agfx::TextureFormat::RGBA16F)
                        .AddColorAttachment(agfx::TextureFormat::RG8Unorm)
@@ -252,6 +307,18 @@ SceneRenderer::SceneRenderer(agfx::Device& device, agfx::TextureFormat colorForm
     agfx::ComputePipelineCreateInfo buildHZBPipelineInfo;
     buildHZBPipelineInfo.SetName("Build HZB Pipeline");
     ShaderServer::RegisterComputePipeline(buildHZBPipelineInfo, kBuildHZBShaderPath);
+
+    ShaderServer::RegisterComputePipeline(agfx::ComputePipelineCreateInfo().SetName("Material Classify Count Pipeline"), kClassifyCountShaderPath);
+    ShaderServer::RegisterComputePipeline(agfx::ComputePipelineCreateInfo().SetName("Material Classify Args Pipeline"), kClassifyArgsShaderPath);
+    ShaderServer::RegisterComputePipeline(agfx::ComputePipelineCreateInfo().SetName("Material Classify Scatter Pipeline"), kClassifyScatterShaderPath);
+
+    agfx::RenderPipelineCreateInfo compositePipelineInfo;
+    compositePipelineInfo.SetName("Composite Pipeline")
+                         .SetCullMode(agfx::CullMode::None)
+                         .SetFrontFace(agfx::FrontFace::CounterClockwise)
+                         .SetTopology(agfx::Topology::Triangles)
+                         .AddColorAttachment(colorFormat);
+    ShaderServer::RegisterRenderPipeline(compositePipelineInfo, kCompositeShaderPath);
 
     for (uint32 i = 0; i < framesInFlight; ++i)
     {
@@ -268,20 +335,38 @@ SceneRenderer::SceneRenderer(agfx::Device& device, agfx::TextureFormat colorForm
             .SetType(agfx::IndirectBundleType::DrawMesh)
             .SetMaxCommandCount(kNominalUnusedBundleCapacity)
             .SetMaxCountCount(1));
+        // One region per material scheme: scheme s owns command slot s and count slot s, and appends
+        // at most one dispatch command (see .claude/agfx-mdi/SKILL.md gotcha 4).
         m_DeferredBundles[i] = m_Device->CreateIndirectBundle(agfx::IndirectBundleCreateInfo()
             .SetType(agfx::IndirectBundleType::Dispatch)
-            .SetMaxCommandCount(kNominalUnusedBundleCapacity)
-            .SetMaxCountCount(1));
+            .SetMaxCommandCount(SchemeRegistry::kMaxSchemes)
+            .SetMaxCountCount(SchemeRegistry::kMaxSchemes));
     }
 
+    // Resets the opaque bundle's count slots, the deferred bundle's count slots, and the classify
+    // buffer, so it has to be as large as the biggest of the three.
+    constexpr uint32 kZeroBufferWords = kOpaqueRegionCount > kClassifySlotCount ? kOpaqueRegionCount : kClassifySlotCount;
+
     agfx::BufferCreateInfo zeroBufferInfo;
-    zeroBufferInfo.SetSize(kOpaqueRegionCount * sizeof(uint32)).SetStride(sizeof(uint32)).SetUsage(agfx::BufferUsage::ShaderRead).SetMemoryType(agfx::BufferMemoryType::CPUToGPU);
+    zeroBufferInfo.SetSize(kZeroBufferWords * sizeof(uint32)).SetStride(sizeof(uint32)).SetUsage(agfx::BufferUsage::ShaderRead).SetMemoryType(agfx::BufferMemoryType::CPUToGPU);
     m_ZeroBuffer = m_Device->CreateBuffer(zeroBufferInfo);
     m_ZeroBuffer.SetName("Indirect Bundle Zero Buffer");
     {
         agfx::MappedBuffer mapped(m_ZeroBuffer);
-        std::memset(mapped.Get(), 0, kOpaqueRegionCount * sizeof(uint32));
+        std::memset(mapped.Get(), 0, kZeroBufferWords * sizeof(uint32));
     }
+
+    agfx::BufferCreateInfo classifyInfo;
+    classifyInfo.SetSize(kClassifySlotCount * sizeof(uint32))
+                .SetStride(sizeof(uint32))
+                .SetUsage(agfx::BufferUsage::ShaderRead | agfx::BufferUsage::ShaderWrite)
+                .SetMemoryType(agfx::BufferMemoryType::GPUOnly);
+    m_ClassifyBuffer = m_Device->CreateBuffer(classifyInfo);
+    m_ClassifyBuffer.SetName("Material Classify Counts");
+
+    agfx::BufferViewCreateInfo classifyViewInfo;
+    classifyViewInfo.SetBuffer(m_ClassifyBuffer.Get()).SetType(agfx::BufferViewType::Raw).SetOffset(0).SetWriteable(true);
+    m_ClassifyBufferView = m_Device->CreateBufferView(classifyViewInfo);
 
     agfx::BufferCreateInfo counterInfo;
     counterInfo.SetSize(sizeof(uint32))
@@ -333,6 +418,30 @@ void SceneRenderer::EnsureOpaqueCapacity(uint32 frameIndex, uint32 requiredCount
     m_OpaqueDrawIndirectionViews[frameIndex] = m_Device->CreateBufferView(indirectionViewInfo);
 
     m_OpaqueCapacities[frameIndex] = newCapacity;
+    m_Device->MakeResourcesResident();
+}
+
+void SceneRenderer::EnsureClassifyCapacity(uint32 width, uint32 height)
+{
+    // Worst case every pixel is covered, so the list is sized for the whole viewport rather than
+    // grown against an observed count -- there is nothing to observe until after classification runs.
+    uint32 required = width * height;
+    if (required <= m_ClassifyPixelCapacity)
+        return;
+
+    agfx::BufferCreateInfo info;
+    info.SetSize((uint64)required * sizeof(uint32))
+        .SetStride(sizeof(uint32))
+        .SetUsage(agfx::BufferUsage::ShaderRead | agfx::BufferUsage::ShaderWrite)
+        .SetMemoryType(agfx::BufferMemoryType::GPUOnly);
+    m_ClassifyPixelList = m_Device->CreateBuffer(info);
+    m_ClassifyPixelList.SetName("Material Classify Pixel List");
+
+    agfx::BufferViewCreateInfo viewInfo;
+    viewInfo.SetBuffer(m_ClassifyPixelList.Get()).SetType(agfx::BufferViewType::Raw).SetOffset(0).SetWriteable(true);
+    m_ClassifyPixelListView = m_Device->CreateBufferView(viewInfo);
+
+    m_ClassifyPixelCapacity = required;
     m_Device->MakeResourcesResident();
 }
 
@@ -733,6 +842,206 @@ void SceneRenderer::RenderGBufferResolve(agfx::RenderPass& renderPass, GPUScene&
     pc.uDebugMode = (uint32)*cv_GBufferDebug.AsIntPtr();
     pc.uWidth = width;
     pc.uHeight = height;
+
+    renderPass.SetViewport(0.0f, 0.0f, (float)width, (float)height);
+    renderPass.SetScissor(0, 0, width, height);
+    renderPass.SetPipeline(*pipeline);
+    renderPass.PushConstants(pc);
+    renderPass.Draw(3);
+}
+
+bool SceneRenderer::IsGBufferDebugActive()
+{
+    return *cv_GBufferDebug.AsIntPtr() != 0;
+}
+
+DeferredPushConstants SceneRenderer::BuildDeferredPushConstants(GPUScene& gpuScene, const DeferredTargets& targets,
+                                                                uint32 width, uint32 height, uint32 frameIndex) const
+{
+    DeferredPushConstants pc{};
+    pc.rFrameConstants = (uint32)m_CameraBufferViews[frameIndex].GetHandle();
+    pc.rInstanceBuffer = (uint32)gpuScene.GetInstanceBufferView(frameIndex).GetHandle();
+    pc.rMaterialBuffer = (uint32)gpuScene.GetMaterialBufferView(frameIndex).GetHandle();
+    pc.rSchemeParams = 0; // per-scheme, filled by BuildSchemeExecuteInfo
+    pc.rVisibility = targets.visibilityHandle;
+    pc.rDepth = targets.depthHandle;
+    pc.rAlbedo = targets.albedoHandle;
+    pc.rNormal = targets.normalHandle;
+    pc.rMetallicRoughness = targets.metallicRoughnessHandle;
+    pc.rEmissive = targets.emissiveHandle;
+    pc.rPixelList = (uint32)m_ClassifyPixelListView.GetHandle();
+    pc.rClassifyBuffer = (uint32)m_ClassifyBufferView.GetHandle();
+    pc.rOutput = targets.sceneLightingUAVHandle;
+    pc.uSchemeId = 0;
+    pc.uWidth = width;
+    pc.uHeight = height;
+    pc.uSchemeCount = m_Schemes->Count();
+
+    uint64 bundleHandle = m_DeferredBundles[frameIndex].GetHandle();
+    pc.uBundleHandleLo = (uint32)(bundleHandle & 0xFFFFFFFFull);
+    pc.uBundleHandleHi = (uint32)(bundleHandle >> 32);
+    return pc;
+}
+
+agfx::IndirectBundleExecuteInfo SceneRenderer::BuildSchemeExecuteInfo(const DeferredPushConstants& pc, GPUScene& gpuScene,
+                                                                      uint32 schemeId, uint32 frameIndex) const
+{
+    const MaterialScheme& scheme = m_Schemes->Get(schemeId);
+
+    DeferredPushConstants schemePC = pc;
+    schemePC.uSchemeId = schemeId;
+
+    // The view is null both when the scheme declares no parameters and when no material slot used it
+    // this frame -- GPUScene::UploadSchemeParams skips a scheme with empty staging, so paramStride
+    // alone does not prove a buffer exists. Either way the kernel never reads the handle: a scheme
+    // with no slots has no pixels, so its count slot is 0 and it replays no dispatch at all.
+    agfx::BufferView& paramView = gpuScene.GetSchemeParamBufferView(schemeId, frameIndex);
+    schemePC.rSchemeParams = (scheme.paramStride > 0 && paramView) ? (uint32)paramView.GetHandle() : 0u;
+
+    agfx::ComputePipeline* pipeline = ShaderServer::GetComputePipeline(scheme.shaderPath, {});
+
+    agfx::IndirectBundleExecuteInfo info;
+    info.SetCountIndex(schemeId)
+        .SetCommandRange(schemeId, 1)   // one dispatch command per scheme
+        .SetPushConstants(schemePC)
+        .SetComputePipeline(pipeline ? pipeline->Get() : nullptr);
+    return info;
+}
+
+void SceneRenderer::ClassifyMaterials(agfx::CommandBuffer& cmd, GPUScene& gpuScene, const DeferredTargets& targets,
+                                      uint32 width, uint32 height, uint32 frameIndex)
+{
+    // A debug view already owns the lighting target, and shading would only overwrite it.
+    if (IsGBufferDebugActive() || gpuScene.GetInstanceCount() == 0)
+        return;
+
+    // DeferredPackPixel packs a coordinate into 16 bits per axis. Unreachable in practice, but
+    // silently wrapping would scatter pixels to the wrong place rather than fail visibly.
+    if (width > kMaxClassifiedViewportExtent || height > kMaxClassifiedViewportExtent)
+    {
+        if (!m_WarnedClassifyExtent)
+        {
+            CARAMEL_ERROR("SceneRenderer: viewport {}x{} exceeds the {}-pixel limit the material classification pixel list packs into, deferred shading disabled",
+                          width, height, kMaxClassifiedViewportExtent);
+            m_WarnedClassifyExtent = true;
+        }
+        return;
+    }
+
+    EnsureClassifyCapacity(width, height);
+
+    agfx::IndirectBundle& bundle = m_DeferredBundles[frameIndex];
+    DeferredPushConstants pc = BuildDeferredPushConstants(gpuScene, targets, width, height, frameIndex);
+
+    // Null while the shader watcher recompiles. As in RecordCullPass, that must not skip the count
+    // reset or the barriers -- the shade pass replays this bundle regardless, and D3D12 rejects
+    // ExecuteIndirect on a count buffer left in COPY_DEST with no per-resource barrier on it.
+    agfx::ComputePipeline* countPipeline = ShaderServer::GetComputePipeline(kClassifyCountShaderPath, {});
+    agfx::ComputePipeline* argsPipeline = ShaderServer::GetComputePipeline(kClassifyArgsShaderPath, {});
+    agfx::ComputePipeline* scatterPipeline = ShaderServer::GetComputePipeline(kClassifyScatterShaderPath, {});
+
+    uint32 schemeCount = m_Schemes->Count();
+    TArray<agfx::IndirectBundleExecuteInfo> schemeInfos;
+    bool haveSchemePipelines = schemeCount > 0;
+    for (uint32 scheme = 0; scheme < schemeCount; ++scheme)
+    {
+        schemeInfos.PushBack(BuildSchemeExecuteInfo(pc, gpuScene, scheme, frameIndex));
+        if (!schemeInfos[scheme].computePipeline)
+            haveSchemePipelines = false;
+    }
+
+    // WAR: the previous use of this frame slot's bundle may still be replaying. Per-frame-slot
+    // bundles plus the fence wait in Renderer::Render rule out a real hazard; this is a pure state
+    // transition, same as RecordCullPass's.
+    cmd.MemoryBarrier(agfx::ResourceState::IndirectArgument, agfx::ResourceState::UnorderedAccess);
+
+    {
+        agfx::ComputePass computePass = cmd.BeginComputePass("Material Classify");
+
+        agfxComputePassCopyBufferToBuffer(computePass, m_ZeroBuffer, m_ClassifyBuffer, 0, 0, kClassifySlotCount * sizeof(uint32));
+        agfxComputePassCopyBufferToBuffer(computePass, m_ZeroBuffer, bundle.CountBuffer(), 0, 0, schemeCount * sizeof(uint32));
+        cmd.MemoryBarrier(agfx::ResourceState::CopyDest, agfx::ResourceState::UnorderedAccess);
+
+        uint32 groupsX = (width + kClassifyTileSize - 1) / kClassifyTileSize;
+        uint32 groupsY = (height + kClassifyTileSize - 1) / kClassifyTileSize;
+
+        if (countPipeline)
+        {
+            computePass.SetPipeline(*countPipeline);
+            computePass.PushConstants(pc);
+            computePass.Dispatch(groupsX, groupsY, 1);
+        }
+
+        computePass.BufferUAVBarrier(m_ClassifyBuffer);
+
+        // Turns the counts into pixel-list offsets and appends the dispatch commands. Single group:
+        // the whole working set is a handful of uints.
+        if (argsPipeline)
+        {
+            computePass.SetPipeline(*argsPipeline);
+            computePass.PushConstants(pc);
+            computePass.Dispatch(1, 1, 1);
+        }
+
+        computePass.BufferUAVBarrier(m_ClassifyBuffer);
+
+        if (scatterPipeline)
+        {
+            computePass.SetPipeline(*scatterPipeline);
+            computePass.PushConstants(pc);
+            computePass.Dispatch(groupsX, groupsY, 1);
+        }
+
+        // Unconditional, for the same D3D12 reason as RecordCullPass: these are the only
+        // per-resource barriers either bundle buffer ever gets.
+        computePass.BufferUAVBarrier(bundle.CommandsBuffer());
+        computePass.BufferUAVBarrier(bundle.CountBuffer());
+
+        // No-op on D3D12/Vulkan; builds the Metal ICB. Push constants and pipeline must match the
+        // execute call exactly, which is why both go through BuildSchemeExecuteInfo.
+        if (haveSchemePipelines)
+        {
+            for (uint32 scheme = 0; scheme < schemeCount; ++scheme)
+                computePass.PrepareIndirectBundle(bundle, schemeInfos[scheme]);
+        }
+    }
+
+    cmd.MemoryBarrier(agfx::ResourceState::UnorderedAccess, agfx::ResourceState::IndirectArgument);
+
+    // The classify buffer and pixel list are read by the shading kernels as plain buffers, which is a
+    // different consumer sync scope than IndirectArgument above -- it needs its own call.
+    cmd.MemoryBarrier(agfx::ResourceState::UnorderedAccess, agfx::ResourceState::NonPixelShaderResource);
+}
+
+void SceneRenderer::ShadeMaterials(agfx::CommandBuffer& cmd, GPUScene& gpuScene, const DeferredTargets& targets,
+                                   uint32 width, uint32 height, uint32 frameIndex)
+{
+    if (IsGBufferDebugActive() || gpuScene.GetInstanceCount() == 0 || m_ClassifyPixelCapacity == 0)
+        return;
+
+    DeferredPushConstants pc = BuildDeferredPushConstants(gpuScene, targets, width, height, frameIndex);
+
+    agfx::ComputePass computePass = cmd.BeginComputePass("Material Shade");
+
+    // One dispatch command per scheme, each sized by that scheme's pixel count. A scheme with no
+    // pixels has a count slot of 0 and replays nothing.
+    for (uint32 scheme = 0; scheme < m_Schemes->Count(); ++scheme)
+    {
+        agfx::IndirectBundleExecuteInfo info = BuildSchemeExecuteInfo(pc, gpuScene, scheme, frameIndex);
+        if (info.computePipeline)
+            computePass.ExecuteIndirectBundle(m_DeferredBundles[frameIndex], info);
+    }
+}
+
+void SceneRenderer::RenderComposite(agfx::RenderPass& renderPass, uint32 sceneLightingHandle, uint32 width, uint32 height)
+{
+    agfx::RenderPipeline* pipeline = ShaderServer::GetPipeline(kCompositeShaderPath, {});
+    if (!pipeline)
+        return;
+
+    CompositePushConstants pc{};
+    pc.rSceneLighting = sceneLightingHandle;
+    pc.uPassthrough = IsGBufferDebugActive() ? 1u : 0u;
 
     renderPass.SetViewport(0.0f, 0.0f, (float)width, (float)height);
     renderPass.SetScissor(0, 0, width, height);

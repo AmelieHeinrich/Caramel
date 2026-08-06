@@ -121,6 +121,17 @@ private:
     agfx::TextureView m_VisibilityView;
     void CreateVisibilityTexture(uint32 width, uint32 height);
 
+    // HDR shading output, sitting between the gbuffer and scene color. Deliberately not scene color
+    // itself: the deferred shading passes write it from compute, and scene color carries the swap
+    // chain's format -- a typed UAV on BGRA8Unorm is an optional D3D12 feature. Also gives the
+    // tonemapper and TAA (Notes/TODO.md) a real HDR buffer to work on later. GBuffer Resolve writes
+    // it as attachment 0 (the scene.gbuffer_debug view), the scheme dispatches write it as a UAV,
+    // and the Composite pass reads it into scene color.
+    agfx::Texture m_SceneLightingTexture;
+    agfx::TextureView m_SceneLightingView;
+    agfx::TextureView m_SceneLightingUAV;
+    void CreateSceneLightingTexture(uint32 width, uint32 height);
+
     // Order is the attachment contract with the GBuffer Resolve pipeline (SceneRenderer) and
     // GBufferOut in GBufferResolve.hlsl: albedo, normal, metallic/roughness, emissive, motion.
     static constexpr uint32 kGBufferTextureCount = 5;

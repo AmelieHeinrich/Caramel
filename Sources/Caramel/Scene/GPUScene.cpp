@@ -13,6 +13,7 @@
 #include <Caramel/Scene/SceneNode.hpp>
 
 #include <algorithm>
+#include <cstring>
 
 namespace
 {
@@ -46,7 +47,7 @@ namespace
     }
 }
 
-void GPUScene::Init(agfx::Device& device, const SchemeRegistry& schemes, uint32 framesInFlight)
+void GPUScene::Init(agfx::Device& device, agfx::CommandQueue& queue, const SchemeRegistry& schemes, uint32 framesInFlight)
 {
     m_Device = &device;
     m_Schemes = &schemes;
@@ -79,6 +80,53 @@ void GPUScene::Init(agfx::Device& device, const SchemeRegistry& schemes, uint32 
     m_FallbackTextureView = m_Device->CreateTextureView(viewInfo);
 
     m_Device->MakeResourcesResident();
+
+    // Fill it with opaque white. A freshly created texture holds whatever its allocation happened to
+    // contain -- in practice zeros, i.e. black -- and every material with a missing or not-yet-
+    // resident texture samples this and multiplies it into its factor. Black meant an untextured
+    // material shaded as pure black however its baseColorFactor was set, and a missing metallic/
+    // roughness map read as fully rough dielectric rather than as "use the factors".
+    //
+    // Done here with a one-shot submit rather than through UploadQueue: this runs once at startup,
+    // before the streaming manager exists, and nothing may sample the texture until it lands.
+    // agfxTextureReplaceRegion is not an option -- it is a no-op on D3D12 (UMA only).
+    {
+        const uint8 white[4] = { 0xFF, 0xFF, 0xFF, 0xFF };
+
+        agfx::BufferCreateInfo stagingInfo;
+        stagingInfo.SetSize(sizeof(white))
+                   .SetStride(sizeof(white))
+                   .SetUsage(agfx::BufferUsage::ShaderRead)
+                   .SetMemoryType(agfx::BufferMemoryType::CPUToGPU);
+        agfx::Buffer staging = m_Device->CreateBuffer(stagingInfo);
+        staging.SetName("GPUScene Fallback Texture Staging");
+        m_Device->MakeResourcesResident();
+
+        {
+            agfx::MappedBuffer mapped(staging);
+            std::memcpy(mapped.Get(), white, sizeof(white));
+        }
+
+        agfx::CommandBuffer cmd = m_Device->CreateCommandBuffer(queue);
+        cmd.Begin();
+        cmd.TextureBarrier(m_FallbackTexture, agfx::ResourceState::Common, agfx::ResourceState::CopyDest, 0, 0);
+        {
+            agfx::TextureRegion region;
+            region.SetSize(1, 1);
+            agfx::ComputePass pass = cmd.BeginComputePass("Fallback Texture Upload");
+            pass.CopyBufferToTexture(staging, 0, m_FallbackTexture, region, 0, 0, sizeof(white), sizeof(white));
+        }
+        cmd.TextureBarrier(m_FallbackTexture, agfx::ResourceState::CopyDest, agfx::ResourceState::PixelShaderResource, 0, 0);
+        cmd.End();
+
+        queue.Submit(cmd);
+
+        // The staging buffer dies with this scope, so the copy has to have completed. Nothing is
+        // rendering yet, so blocking here costs nothing.
+        agfx::Fence fence = m_Device->CreateFence();
+        queue.Signal(fence, 1);
+        fence.Wait(1);
+    }
 }
 
 MaterialOverride* GPUScene::FindActiveOverride(const RenderInstance& instance) const

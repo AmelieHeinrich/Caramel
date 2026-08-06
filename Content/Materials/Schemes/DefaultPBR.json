@@ -1,16 +1,6 @@
 {
     "name": "DefaultPBR",
     "shader": "Content/Shaders/DefaultPBR.hlsl",
-    "renderState": {
-        "fillMode": "Solid",
-        "cullMode": "None",
-        "frontFace": "CounterClockwise",
-        "topology": "Triangles",
-        "depthTest": true,
-        "depthWrite": true,
-        "depthCompare": "Less",
-        "blend": "None"
-    },
     "flags": {
         "castsShadows": true,
         "receivesShadows": true

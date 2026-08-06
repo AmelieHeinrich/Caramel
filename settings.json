@@ -7,5 +7,5 @@
     "scene.build_hzb": true,
     "scene.enable_culling": true,
     "scene.freeze_frustum": false,
-    "scene.gbuffer_debug": 5
+    "scene.gbuffer_debug": 0
 }

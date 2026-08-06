@@ -23,6 +23,11 @@ enum class ESchemeParamType
 
 uint32 SchemeParamSize(ESchemeParamType type);
 
+/// @brief Bytes one scheme parameter occupies in the per-scheme parameter buffer, whatever its type.
+/// A full float4 slot each, so the CPU-side layout and the struct a scheme's shader declares by hand
+/// cannot disagree about packing -- see MaterialScheme::ComputeLayout.
+constexpr uint32 kSchemeParamSlotSize = 16;
+
 struct SchemeParam
 {
     String name;
@@ -40,7 +45,9 @@ struct MaterialScheme
     String name;
     String shaderPath;
 
-    agfx::RenderPipelineCreateInfo pipelineTemplate;
+    // Schemes are deferred shading passes replayed from a Dispatch indirect bundle, not raster
+    // pipelines -- the visibility buffer owns every piece of raster state now.
+    agfx::ComputePipelineCreateInfo pipelineTemplate;
 
     struct
     {
@@ -64,7 +71,12 @@ public:
     static constexpr uint32 kDefaultSchemeId = 0;
     static constexpr const char* kDefaultSchemeName = "DefaultPBR";
 
-    void LoadDirectory(const String& directory, agfx::TextureFormat colorFormat, agfx::TextureFormat depthFormat);
+    // Hard ceiling on scheme count: the material classification pass keeps one count/offset/cursor
+    // slot and one indirect-dispatch bundle region per scheme, and its shaders size their
+    // groupshared arrays from this. Mirrors kMaxShadingSchemes in Common/DeferredShading.hlsli.
+    static constexpr uint32 kMaxSchemes = 8;
+
+    void LoadDirectory(const String& directory);
     uint32 FindId(const String& schemeName) const;
 
     const MaterialScheme& Get(uint32 schemeId) const;
@@ -74,7 +86,7 @@ public:
     bool IsEmpty() const { return m_Schemes.IsEmpty(); }
 
 private:
-    bool LoadScheme(const String& path, agfx::TextureFormat colorFormat, agfx::TextureFormat depthFormat);
+    bool LoadScheme(const String& path);
 
     TArray<TUnique<MaterialScheme>> m_Schemes;
     TDictionary<String, uint32> m_ByName;

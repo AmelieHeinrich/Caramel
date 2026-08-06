@@ -6,7 +6,9 @@
 
 // Fullscreen visibility-buffer resolve: re-fetches each pixel's triangle from the meshlet buffers,
 // reconstructs barycentrics + derivatives analytically (CalcFullBary), and writes the whole gbuffer
-// with SampleGrad mip selection. Deliberately does NOT include SceneMesh.hlsli -- ShaderParser
+// with SampleGrad mip selection. Attachment 0 is the scene lighting buffer: this pass only clears it
+// (or fills it with a scene.gbuffer_debug view), and the per-scheme deferred dispatches that follow
+// are what actually shade it. Deliberately does NOT include SceneMesh.hlsli -- ShaderParser
 // inlines includes before scanning pragmas, so its task/mesh pragmas would leak into this pipeline.
 
 #include "Common/AGFX.hlsli"
@@ -33,15 +35,19 @@ struct GBufferResolvePushConstants {
 };
 AGFX_PUSH_CONSTANTS(GBufferResolvePushConstants, g_Constants);
 
-static const uint kGBufferDebugAlbedo = 0;
-static const uint kGBufferDebugNormal = 1;
-static const uint kGBufferDebugMetallicRoughness = 2;
-static const uint kGBufferDebugEmissive = 3;
-static const uint kGBufferDebugMotion = 4;
-static const uint kGBufferDebugMeshletId = 5;
-static const uint kGBufferDebugTriangleId = 6;
-static const uint kGBufferDebugInstanceId = 7;
-static const uint kGBufferDebugLod = 8;
+// None = the deferred scheme dispatches own the lighting target; this pass leaves it black and the
+// Material Classify/Shade passes fill it. Any other mode short-circuits shading entirely, and the
+// view below is what reaches the screen (Composite skips its transfer curve for these).
+static const uint kGBufferDebugNone = 0;
+static const uint kGBufferDebugAlbedo = 1;
+static const uint kGBufferDebugNormal = 2;
+static const uint kGBufferDebugMetallicRoughness = 3;
+static const uint kGBufferDebugEmissive = 4;
+static const uint kGBufferDebugMotion = 5;
+static const uint kGBufferDebugMeshletId = 6;
+static const uint kGBufferDebugTriangleId = 7;
+static const uint kGBufferDebugInstanceId = 8;
+static const uint kGBufferDebugLod = 9;
 
 struct ResolveVSOut {
     float4 vPosition : SV_POSITION;
@@ -55,7 +61,7 @@ ResolveVSOut GBufferResolveVS(uint uVertexID : SV_VertexID) {
 }
 
 struct GBufferOut {
-    float4 vSceneColor        : SV_Target0;
+    float4 vSceneLighting     : SV_Target0;   // RGBA16F, see kSceneLightingFormat
     float4 vAlbedo            : SV_Target1;
     float4 vNormal            : SV_Target2;
     float2 vMetallicRoughness : SV_Target3;
@@ -82,6 +88,7 @@ float3 IdToColor(uint id) {
 
 float3 DebugView(uint mode, GBufferOut gbuffer, uint instanceIndex, uint meshletIndex, uint triangleIndex, uint lod) {
     switch (mode) {
+        case kGBufferDebugNone: return float3(0.0f, 0.0f, 0.0f);
         case kGBufferDebugNormal: return gbuffer.vNormal.xyz * 0.5f + 0.5f;
         case kGBufferDebugMetallicRoughness: return float3(gbuffer.vMetallicRoughness, 0.0f);
         case kGBufferDebugEmissive: return gbuffer.vEmissive.rgb;
@@ -190,6 +197,7 @@ GBufferOut GBufferResolvePS(ResolveVSOut input) {
         normal = normalize(mul(tangentNormal, mTBN));
     }
 
+
     float3 emissive = material.vEmissiveFactor.rgb;
     if (material.uTextures[kMaterialTextureEmissive] != g_Constants.rFallbackTexture) {
         AGFXTexture2D<float4> tEmissive = AGFXTexture2D<float4>::Create(material.uTextures[kMaterialTextureEmissive]);
@@ -208,6 +216,6 @@ GBufferOut GBufferResolvePS(ResolveVSOut input) {
     o.vMetallicRoughness = float2(metallic, roughness);
     o.vEmissive = float4(emissive, 0.0f);
     o.vMotion = currUV - prevUV;
-    o.vSceneColor = float4(DebugView(g_Constants.uDebugMode, o, instanceIndex, meshletIndex, triangleIndex, lod), 1.0f);
+    o.vSceneLighting = float4(DebugView(g_Constants.uDebugMode, o, instanceIndex, meshletIndex, triangleIndex, lod), 1.0f);
     return o;
 }
