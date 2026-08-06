@@ -78,7 +78,7 @@ namespace
     // number of frames -- see AdvanceLodState in PopulateOpaqueIndirectBundleCS.
     // First boundary, i.e. how far the finest LOD survives. The ladder is geometric, so raising this
     // pushes every later boundary out with it.
-    constexpr float32 kLodBaseDistance = 45.0f;
+    constexpr float32 kLodBaseDistance = 5.0f;
     constexpr float32 kLodDistanceMultiplier = 2.0f;
     constexpr float32 kLodHysteresis = 0.1f;
     constexpr float32 kLodFadeSeconds = 0.25f;

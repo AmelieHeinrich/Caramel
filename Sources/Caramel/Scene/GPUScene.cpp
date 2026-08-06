@@ -20,6 +20,30 @@ namespace
     {
         return ((uint64)requestId << 32) | (uint64)(uint32)materialIndex;
     }
+
+    // splitmix64's finalizer. The identity key packs node id, mesh slot and instance index into
+    // disjoint bit ranges, so masking its low bits directly would pile every instance of one entity
+    // into a handful of buckets.
+    uint64 MixIdentity(uint64 x)
+    {
+        x ^= x >> 30;
+        x *= 0xbf58476d1ce4e5b9ull;
+        x ^= x >> 27;
+        x *= 0x94d049bb133111ebull;
+        x ^= x >> 31;
+        return x;
+    }
+
+    uint64 InstanceIdentity(const RenderInstance& instance)
+    {
+        // Field widths matter: this keys the state slot, so two instances colliding here share one
+        // slot and therefore one meshlet-visibility bit range, which ORs their visible sets together
+        // and quietly disables meshlet culling for both. The old 12-bit instanceIndex field
+        // overflowed into meshSlot past 4096 instances under one node.
+        return instance.owner
+            ? (((uint64)instance.owner->id << 40) | ((uint64)instance.meshSlot << 24) | instance.instanceIndex)
+            : (((uint64)(uintptr_t)instance.mesh << 24) | instance.instanceIndex);
+    }
 }
 
 void GPUScene::Init(agfx::Device& device, const SchemeRegistry& schemes, uint32 framesInFlight)
@@ -57,47 +81,57 @@ void GPUScene::Init(agfx::Device& device, const SchemeRegistry& schemes, uint32 
     m_Device->MakeResourcesResident();
 }
 
+MaterialOverride* GPUScene::FindActiveOverride(const RenderInstance& instance) const
+{
+    if (!instance.owner)
+        return nullptr;
+
+    int32 materialIndex = instance.mesh->GetMesh().materialIndex;
+
+    MaterialOverride* chosen = nullptr;
+    for (MaterialOverride& matOverride : instance.owner->materialOverrides)
+    {
+        if (matOverride.materialIndex != materialIndex || !matOverride.HasAnyOverride())
+            continue;
+
+        if (matOverride.meshSlot == (int32)instance.meshSlot)
+            return &matOverride;
+
+        if (matOverride.meshSlot == MaterialOverride::kAllMeshes)
+            chosen = &matOverride;
+    }
+
+    return chosen;
+}
+
+uint32 GPUScene::LookupMaterialSlot(const RenderInstance& instance) const
+{
+    // An override with no slot yet holds UINT32_MAX, which is exactly the "not resolved" sentinel
+    // the caller is looking for.
+    if (const MaterialOverride* chosen = FindActiveOverride(instance))
+        return chosen->gpuMaterialSlot;
+
+    uint64 key = BaseSlotKey(instance.mesh->GetRequestId(), instance.mesh->GetMesh().materialIndex);
+    auto it = m_BaseSlots.Find(key);
+    return it != m_BaseSlots.End() ? it->second : UINT32_MAX;
+}
+
 uint32 GPUScene::ResolveMaterialSlot(const RenderInstance& instance, const MaterialOverride*& outOverride)
 {
     outOverride = nullptr;
 
-    uint32 requestId = instance.mesh->GetRequestId();
-    int32 materialIndex = instance.mesh->GetMesh().materialIndex;
-
     // An entity that overrides this material gets its own derived slot, so two entities instanced
     // from the same model no longer share (and clobber) each other's factors.
-    if (instance.owner)
+    if (MaterialOverride* chosen = FindActiveOverride(instance))
     {
-        // Mirrors Scene::FindMaterialOverride: an override pinned to this exact mesh slot wins over
-        // the entity-wide one, so a per-mesh edit does not spill onto sibling meshes that merely
-        // happen to share a material index.
-        MaterialOverride* chosen = nullptr;
-        for (MaterialOverride& matOverride : instance.owner->materialOverrides)
-        {
-            if (matOverride.materialIndex != materialIndex || !matOverride.HasAnyOverride())
-                continue;
+        if (chosen->gpuMaterialSlot == UINT32_MAX)
+            chosen->gpuMaterialSlot = m_NextMaterialSlot++;
 
-            if (matOverride.meshSlot == (int32)instance.meshSlot)
-            {
-                chosen = &matOverride;
-                break;
-            }
-
-            if (matOverride.meshSlot == MaterialOverride::kAllMeshes)
-                chosen = &matOverride;
-        }
-
-        if (chosen)
-        {
-            if (chosen->gpuMaterialSlot == UINT32_MAX)
-                chosen->gpuMaterialSlot = m_NextMaterialSlot++;
-
-            outOverride = chosen;
-            return chosen->gpuMaterialSlot;
-        }
+        outOverride = chosen;
+        return chosen->gpuMaterialSlot;
     }
 
-    uint64 key = BaseSlotKey(requestId, materialIndex);
+    uint64 key = BaseSlotKey(instance.mesh->GetRequestId(), instance.mesh->GetMesh().materialIndex);
     auto it = m_BaseSlots.Find(key);
     if (it != m_BaseSlots.End())
         return it->second;
@@ -105,6 +139,106 @@ uint32 GPUScene::ResolveMaterialSlot(const RenderInstance& instance, const Mater
     uint32 slot = m_NextMaterialSlot++;
     m_BaseSlots[key] = slot;
     return slot;
+}
+
+uint32 GPUScene::FindState(uint64 identity) const
+{
+    if (m_StateIndex.IsEmpty())
+        return kNoState;
+
+    uint64 mask = m_StateIndex.Size() - 1;
+    uint64 pos = MixIdentity(identity) & mask;
+    while (true)
+    {
+        uint32 entry = m_StateIndex[pos];
+        if (entry == kNoState || m_States[entry].identity == identity)
+            return entry;
+
+        pos = (pos + 1) & mask;
+    }
+}
+
+void GPUScene::InsertStateIndex(uint64 identity, uint32 entry)
+{
+    uint64 mask = m_StateIndex.Size() - 1;
+    uint64 pos = MixIdentity(identity) & mask;
+    while (m_StateIndex[pos] != kNoState)
+        pos = (pos + 1) & mask;
+
+    m_StateIndex[pos] = entry;
+}
+
+void GPUScene::RehashStates()
+{
+    // Half load factor: linear probing degrades badly past that, and the table is one uint32 per
+    // bucket, so the memory is not worth economising.
+    uint64 capacity = 64;
+    while (capacity < (m_States.Size() + 1) * 2)
+        capacity *= 2;
+
+    m_StateIndex.Clear();
+    m_StateIndex.Resize(capacity, kNoState);
+
+    for (uint32 i = 0; i < (uint32)m_States.Size(); ++i)
+        InsertStateIndex(m_States[i].identity, i);
+}
+
+uint32 GPUScene::CreateState(uint64 identity, const glm::mat4& transform)
+{
+    uint32 stateSlot;
+    if (!m_FreeStateSlots.IsEmpty())
+    {
+        stateSlot = m_FreeStateSlots[m_FreeStateSlots.Size() - 1];
+        m_FreeStateSlots.PopBack();
+    }
+    else
+    {
+        stateSlot = m_StateSlotCount++;
+    }
+
+    uint32 entry = (uint32)m_States.Size();
+    m_States.PushBack(InstanceState{ identity, transform, stateSlot });
+    m_StateSeen.PushBack(m_BuildCounter);
+
+    if ((m_States.Size() + 1) * 2 > m_StateIndex.Size())
+        RehashStates();
+    else
+        InsertStateIndex(identity, entry);
+
+    return entry;
+}
+
+void GPUScene::SweepDeadStates()
+{
+    // The common case is that nothing vanished, and answering that costs one pass over the frame
+    // stamps -- 4 bytes per entry -- instead of compacting and rehashing.
+    uint32 alive = 0;
+    for (uint32 seen : m_StateSeen)
+        alive += (seen == m_BuildCounter) ? 1u : 0u;
+
+    if (alive == (uint32)m_States.Size())
+        return;
+
+    uint32 write = 0;
+    for (uint32 read = 0; read < (uint32)m_States.Size(); ++read)
+    {
+        if (m_StateSeen[read] != m_BuildCounter)
+        {
+            m_FreeStateSlots.PushBack(m_States[read].stateSlot);
+            continue;
+        }
+
+        if (write != read)
+        {
+            m_States[write] = m_States[read];
+            m_StateSeen[write] = m_StateSeen[read];
+        }
+        ++write;
+    }
+
+    m_States.Resize(write);
+    m_StateSeen.Resize(write);
+    RehashStates();
 }
 
 uint32 GPUScene::ResolveTextureHandle(StreamingManager& streamingManager, uint32 requestId, int32 materialIndex,
@@ -181,120 +315,136 @@ void GPUScene::Build(StreamingManager& streamingManager, const TArray<RenderInst
 {
     CARAMEL_ZONE("GPUScene::Build");
 
-    m_Draws.Clear();
+    ++m_BuildCounter;
+
     m_PreCullMeshlets = 0;
     m_PreCullTriangles = 0;
     m_MaxMeshletCount = 0;
-    m_BuildItems.Clear();
     m_MaterialWrites.Clear();
-    m_SlotWrittenThisBuild.Clear();
 
-    // Serial phase: residency filtering and slot resolution mutate shared state (slot maps, staging
-    // sizes) and are cheap; everything per-instance and per-material moves to the phases below.
+    uint32 instanceCount = (uint32)renderInstances.Size();
+    m_BuildItems.Resize(instanceCount);
+    m_ItemFlags.Clear();
+    m_ItemFlags.Resize(instanceCount, 0);
+    m_ItemSlot.Resize(instanceCount);
+    m_ItemState.Resize(instanceCount);
+    m_ItemDst.Resize(instanceCount);
+    m_ItemDrawDst.Resize(instanceCount);
+
+    m_Scratch.Clear();
+    m_Scratch.Resize(JobSystem::Get().GetWorkerCount() + 1);
+
     {
-        CARAMEL_ZONE("Resolve Slots (serial)");
-        for (const RenderInstance& instance : renderInstances)
+        // Gather phase. Everything per-instance that can be done without mutating shared state:
+        // residency filtering, the per-LOD meshlet scan, and *lookups* into the material-slot and
+        // instance-state tables, both of which stay read-only for the whole phase. An instance whose
+        // lookup misses leaves its sentinel in place and gets fixed up serially below -- in steady
+        // state nothing misses, so the serial phase does no real work.
+        //
+        // Results are written at the render-instance index, not compacted, so the phases can run
+        // over one fixed index space and no worker needs to know how many instances precede it.
+        CARAMEL_ZONE("Gather Instances");
+        JobSystem::Get().ParallelFor(instanceCount, 256, [&](uint32 start, uint32 end, uint32 threadIndex) {
+            CARAMEL_ZONE("Gather Instances (chunk)");
+            BuildScratch& scratch = m_Scratch[threadIndex];
+
+            for (uint32 i = start; i < end; ++i)
+            {
+                const RenderInstance& instance = renderInstances[i];
+                StreamingModel& model = *instance.mesh;
+
+                uint32 lod = model.SnapshotResidentLOD();
+                if (lod == StreamingModel::kNoResidentLOD)
+                    continue;
+
+                uint32 meshletCount = model.GetMeshletCount(lod);
+                if (meshletCount == 0)
+                    continue;
+
+                const ModelMesh& mesh = model.GetMesh();
+                for (uint32 lodIdx = 0; lodIdx < CaramelAsset::kLodCount; ++lodIdx)
+                    scratch.maxMeshletCount = std::max(scratch.maxMeshletCount, mesh.lods[lodIdx].meshletCount);
+
+                scratch.preCullMeshlets += meshletCount;
+                scratch.preCullTriangles += mesh.lods[lod].GetFlatIndexCount() / 3;
+
+                uint64 identity = InstanceIdentity(instance);
+
+                m_BuildItems[i] = BuildItem{ &instance, identity, lod, meshletCount };
+                m_ItemSlot[i] = LookupMaterialSlot(instance);
+                m_ItemState[i] = FindState(identity);
+                m_ItemFlags[i] = kItemValid;
+            }
+        });
+
+        for (const BuildScratch& scratch : m_Scratch)
         {
-            StreamingModel& model = *instance.mesh;
-
-            uint32 lod = model.SnapshotResidentLOD();
-            if (lod == StreamingModel::kNoResidentLOD)
-                continue;
-
-            uint32 meshletCount = model.GetMeshletCount(lod);
-            if (meshletCount == 0)
-                continue;
-
-            const MaterialOverride* activeOverride = nullptr;
-            uint32 materialSlot = ResolveMaterialSlot(instance, activeOverride);
-            if (materialSlot >= m_MaterialStaging.Size())
-            {
-                m_MaterialStaging.Resize(materialSlot + 1);
-                m_SlotSchemeId.Resize(materialSlot + 1, SchemeRegistry::kDefaultSchemeId);
-            }
-
-            if (materialSlot >= m_SlotWrittenThisBuild.Size())
-                m_SlotWrittenThisBuild.Resize(materialSlot + 1, 0);
-            if (!m_SlotWrittenThisBuild[materialSlot])
-            {
-                m_SlotWrittenThisBuild[materialSlot] = 1;
-                m_MaterialWrites.PushBack(MaterialWrite{ materialSlot, &model, activeOverride });
-            }
-
-            for (uint32 lodIdx = 0; lodIdx < CaramelAsset::kLodCount; ++lodIdx)
-                m_MaxMeshletCount = std::max(m_MaxMeshletCount, model.GetMeshletCount(lodIdx));
-
-            m_PreCullMeshlets += meshletCount;
-            m_PreCullTriangles += model.GetMesh().lods[lod].GetFlatIndexCount() / 3;
-
-            // Field widths matter: this keys the state slot, so two instances colliding here share
-            // one slot and therefore one meshlet-visibility bit range, which ORs their visible sets
-            // together and quietly disables meshlet culling for both. The old 12-bit instanceIndex
-            // field overflowed into meshSlot past 4096 instances under one node.
-            uint64 identity = instance.owner
-                ? (((uint64)instance.owner->id << 40) | ((uint64)instance.meshSlot << 24) | instance.instanceIndex)
-                : ((uint64)(uintptr_t)instance.mesh << 24) | instance.instanceIndex;
-            auto prevIt = m_PrevTransforms.Find(identity);
-            glm::mat4 prevTransform = prevIt != m_PrevTransforms.End() ? prevIt->second : instance.transform;
-
-            // Same identity -> same state slot for as long as the instance keeps being submitted,
-            // whatever the compaction does to its instance index in between.
-            uint32 stateSlot;
-            bool stateFresh;
-            auto slotIt = m_StateSlots.Find(identity);
-            if (slotIt != m_StateSlots.End())
-            {
-                stateSlot = slotIt->second;
-                stateFresh = false;
-            }
-            else if (!m_FreeStateSlots.IsEmpty())
-            {
-                stateSlot = m_FreeStateSlots[m_FreeStateSlots.Size() - 1];
-                m_FreeStateSlots.PopBack();
-                stateFresh = true;
-            }
-            else
-            {
-                stateSlot = m_StateSlotCount++;
-                stateFresh = true;
-            }
-            m_NextStateSlots[identity] = stateSlot;
-
-            m_BuildItems.PushBack(BuildItem{ &instance, lod, meshletCount, materialSlot, prevTransform, identity, stateSlot, stateFresh });
+            m_PreCullMeshlets += scratch.preCullMeshlets;
+            m_PreCullTriangles += scratch.preCullTriangles;
+            m_MaxMeshletCount = std::max(m_MaxMeshletCount, scratch.maxMeshletCount);
         }
     }
 
+    uint32 itemCount = 0;
     {
-        // Rebuilt from scratch so entries for instances that vanished this frame are evicted; a
-        // reappearing instance then gets prev = current, i.e. zero object motion on first sight.
-        CARAMEL_ZONE("Store Prev Transforms");
-        m_PrevTransforms.Clear();
-        for (const BuildItem& item : m_BuildItems)
-            m_PrevTransforms[item.identity] = item.instance->transform;
-    }
+        // The only serial pass over the instances, and it streams over the flat side arrays rather
+        // than the item structs. It allocates whatever the gather phase could not (material slots
+        // for materials seen for the first time, state entries for new identities), stamps state
+        // liveness for the sweep at the end, and hands out compacted instance indices -- all in
+        // render-instance order, so slot assignment stays deterministic.
+        CARAMEL_ZONE("Resolve Misses");
 
-    {
-        // Recycle the slots of instances that stopped being submitted (streamed out, despawned).
-        // They are handed back out marked fresh, so the next owner never inherits their state.
-        CARAMEL_ZONE("Recycle State Slots");
+        m_SlotWrittenThisBuild.Clear();
+        m_SlotWrittenThisBuild.Resize(m_NextMaterialSlot, 0);
+        m_SlotDrawCount.Clear();
+        m_SlotDrawCount.Resize(m_NextMaterialSlot, 0);
 
-        // Fewer slots than instances means two instances hashed to the same identity and are now
-        // sharing persistent state -- silent apart from culling quietly degrading, so say so.
-        if (m_NextStateSlots.Size() < m_BuildItems.Size() && !m_WarnedStateSlotCollision)
+        for (uint32 i = 0; i < instanceCount; ++i)
         {
-            m_WarnedStateSlotCollision = true;
-            CARAMEL_WARN("GPUScene: {} instances share only {} state slots -- identity collision, "
-                         "per-instance LOD and visibility state is being shared",
-                         m_BuildItems.Size(), m_NextStateSlots.Size());
-        }
+            if (!(m_ItemFlags[i] & kItemValid))
+                continue;
 
-        for (auto it = m_StateSlots.Begin(); it != m_StateSlots.End(); ++it)
-        {
-            if (!m_NextStateSlots.Contains(it->first))
-                m_FreeStateSlots.PushBack(it->second);
+            const RenderInstance& instance = *m_BuildItems[i].instance;
+
+            uint32 slot = m_ItemSlot[i];
+            if (slot == UINT32_MAX)
+            {
+                const MaterialOverride* activeOverride = nullptr;
+                slot = ResolveMaterialSlot(instance, activeOverride);
+                m_ItemSlot[i] = slot;
+            }
+
+            if (slot >= m_MaterialStaging.Size())
+            {
+                m_MaterialStaging.Resize(slot + 1);
+                m_SlotSchemeId.Resize(slot + 1, SchemeRegistry::kDefaultSchemeId);
+            }
+            if (slot >= m_SlotWrittenThisBuild.Size())
+            {
+                m_SlotWrittenThisBuild.Resize(slot + 1, 0);
+                m_SlotDrawCount.Resize(slot + 1, 0);
+            }
+
+            if (!m_SlotWrittenThisBuild[slot])
+            {
+                m_SlotWrittenThisBuild[slot] = 1;
+                m_MaterialWrites.PushBack(MaterialWrite{ slot, instance.mesh, FindActiveOverride(instance) });
+            }
+            ++m_SlotDrawCount[slot];
+
+            uint32 state = m_ItemState[i];
+            if (state == kNoState)
+            {
+                // Seeded with the current transform, so an instance seen for the first time (or
+                // reappearing after being evicted) reports zero object motion rather than a jump.
+                state = CreateState(m_BuildItems[i].identity, instance.transform);
+                m_ItemState[i] = state;
+                m_ItemFlags[i] = (uint8)(m_ItemFlags[i] | kItemStateFresh);
+            }
+            m_StateSeen[state] = m_BuildCounter;
+
+            m_ItemDst[i] = itemCount++;
         }
-        m_StateSlots = std::move(m_NextStateSlots);
-        m_NextStateSlots.Clear();
     }
 
     {
@@ -306,28 +456,51 @@ void GPUScene::Build(StreamingManager& streamingManager, const TArray<RenderInst
                           write.model->GetRequestId(), write.model->GetMesh().materialIndex);
     }
 
-    uint32 itemCount = (uint32)m_BuildItems.Size();
     m_InstanceStaging.Resize(itemCount);
     m_InstanceLodStaging.Resize((uint64)itemCount * CaramelAsset::kLodCount);
     m_Draws.Resize(itemCount);
+
+    {
+        // Draw ordering. BuildBuckets sorts the used *slots* (a handful) into (scheme, material)
+        // order and gives each one its base offset; assigning each instance the next index inside
+        // its slot's range then produces the same list the old std::sort over every draw did.
+        CARAMEL_ZONE("Order Draws");
+        BuildBuckets();
+
+        for (uint32 i = 0; i < instanceCount; ++i)
+        {
+            if (!(m_ItemFlags[i] & kItemValid))
+                continue;
+
+            m_ItemDrawDst[i] = m_SlotDrawCursor[m_ItemSlot[i]]++;
+        }
+    }
 
     // Parallel fill: every write below lands at an index owned by exactly one item, and everything
     // read is either per-item or immutable for the rest of this Build.
     {
         CARAMEL_ZONE("Parallel Fill (dispatch)");
-        JobSystem::Get().ParallelFor(itemCount, 64, [&](uint32 start, uint32 end, uint32) {
+        JobSystem::Get().ParallelFor(instanceCount, 256, [&](uint32 start, uint32 end, uint32) {
             CARAMEL_ZONE("Parallel Fill (chunk)");
             for (uint32 i = start; i < end; ++i)
             {
+                uint8 flags = m_ItemFlags[i];
+                if (!(flags & kItemValid))
+                    continue;
+
                 const BuildItem& item = m_BuildItems[i];
                 StreamingModel& model = *item.instance->mesh;
                 const ModelMesh& mesh = model.GetMesh();
+
+                uint32 dst = m_ItemDst[i];
+                uint32 materialSlot = m_ItemSlot[i];
+                InstanceState& state = m_States[m_ItemState[i]];
 
                 GPUInstance gpu;
                 gpu.transform = item.instance->transform;
                 gpu.boundsMin = glm::vec4(mesh.boundsMin, 0.0f);
                 gpu.boundsMax = glm::vec4(mesh.boundsMax, 0.0f);
-                gpu.materialSlot = item.materialSlot;
+                gpu.materialSlot = materialSlot;
                 gpu.vertexBuffer = (uint32)model.GetVertexBufferView().GetHandle();
                 gpu.meshletBuffer = (uint32)model.GetMeshletBufferView(item.lod).GetHandle();
                 gpu.meshletVertexBuffer = (uint32)model.GetMeshletVertexBufferView(item.lod).GetHandle();
@@ -335,14 +508,20 @@ void GPUScene::Build(StreamingManager& streamingManager, const TArray<RenderInst
                 gpu.meshletCount = item.meshletCount;
                 gpu.lod = item.lod;
                 gpu.meshletBoundsBuffer = (uint32)model.GetMeshletBoundsBufferView(item.lod).GetHandle();
-                gpu.prevTransform = item.prevTransform;
-                gpu.stateSlot = item.stateSlot;
-                gpu.stateFresh = item.stateFresh ? 1u : 0u;
-                m_InstanceStaging[i] = gpu;
+                gpu.prevTransform = state.prevTransform;
+                gpu.stateSlot = state.stateSlot;
+                gpu.stateFresh = (flags & kItemStateFresh) ? 1u : 0u;
+                m_InstanceStaging[dst] = gpu;
+
+                // Rolled forward in place rather than into a map rebuilt every frame. The entry
+                // belongs to exactly one item, so this write is unshared; entries whose instance
+                // vanished are dropped by SweepDeadStates below, which is what gives a reappearing
+                // instance prev = current instead of a stale transform.
+                state.prevTransform = gpu.transform;
 
                 // Every LOD's handles + CPU-known meshlet count, not just the resident one baked into
                 // `gpu` above -- PopulateOpaqueIndirectBundleCS picks the actual LOD per instance per
-                // frame from this. Entry i's LODs occupy [i * kLodCount, (i + 1) * kLodCount).
+                // frame from this. Entry dst's LODs occupy [dst * kLodCount, (dst + 1) * kLodCount).
                 for (uint32 lodIdx = 0; lodIdx < CaramelAsset::kLodCount; ++lodIdx)
                 {
                     GPULodInfo lodInfo;
@@ -350,29 +529,31 @@ void GPUScene::Build(StreamingManager& streamingManager, const TArray<RenderInst
                     lodInfo.meshletVertexBuffer = (uint32)model.GetMeshletVertexBufferView(lodIdx).GetHandle();
                     lodInfo.meshletTriangleBuffer = (uint32)model.GetMeshletTriangleBufferView(lodIdx).GetHandle();
                     lodInfo.meshletBoundsBuffer = (uint32)model.GetMeshletBoundsBufferView(lodIdx).GetHandle();
-                    lodInfo.meshletCount = model.GetMeshletCount(lodIdx);
-                    m_InstanceLodStaging[(uint64)i * CaramelAsset::kLodCount + lodIdx] = lodInfo;
+                    lodInfo.meshletCount = mesh.lods[lodIdx].meshletCount;
+                    m_InstanceLodStaging[(uint64)dst * CaramelAsset::kLodCount + lodIdx] = lodInfo;
                 }
 
-                m_Draws[i] = GPUDraw{ i, item.meshletCount, m_SlotSchemeId[item.materialSlot], item.materialSlot };
+                m_Draws[m_ItemDrawDst[i]] = GPUDraw{ dst, item.meshletCount, m_SlotSchemeId[materialSlot], materialSlot };
             }
         });
     }
 
     {
-        // Sort draws into (scheme, material) order. The instance buffer is deliberately NOT reordered
-        // -- draws carry an index into it, so this stays a CPU-side reshuffle.
-        CARAMEL_ZONE("Sort Draws");
-        std::sort(m_Draws.Begin(), m_Draws.End(), [](const GPUDraw& a, const GPUDraw& b) {
-            if (a.schemeId != b.schemeId)
-                return a.schemeId < b.schemeId;
-            return a.materialSlot < b.materialSlot;
-        });
-    }
+        // Recycle the slots of instances that stopped being submitted (streamed out, despawned).
+        // They are handed back out marked fresh, so the next owner never inherits their state. Runs
+        // last because compacting m_States moves entries the fill phase was still indexing into.
+        CARAMEL_ZONE("Recycle State Slots");
+        SweepDeadStates();
 
-    {
-        CARAMEL_ZONE("Build Buckets");
-        BuildBuckets();
+        // Fewer live entries than instances means two instances hashed to the same identity and are
+        // now sharing persistent state -- silent apart from culling quietly degrading, so say so.
+        if ((uint32)m_States.Size() < itemCount && !m_WarnedStateSlotCollision)
+        {
+            m_WarnedStateSlotCollision = true;
+            CARAMEL_WARN("GPUScene: {} instances share only {} state slots -- identity collision, "
+                         "per-instance LOD and visibility state is being shared",
+                         itemCount, m_States.Size());
+        }
     }
 
     {
@@ -392,30 +573,33 @@ void GPUScene::BuildBuckets()
     m_Batches.Clear();
     m_Buckets.Clear();
 
-    for (uint32 i = 0; i < (uint32)m_Draws.Size(); )
+    // m_MaterialWrites already holds every slot used this frame, exactly once.
+    m_OrderedSlots.Clear();
+    m_OrderedSlots.Reserve(m_MaterialWrites.Size());
+    for (const MaterialWrite& write : m_MaterialWrites)
+        m_OrderedSlots.PushBack(write.slot);
+
+    std::sort(m_OrderedSlots.Begin(), m_OrderedSlots.End(), [this](uint32 a, uint32 b) {
+        if (m_SlotSchemeId[a] != m_SlotSchemeId[b])
+            return m_SlotSchemeId[a] < m_SlotSchemeId[b];
+        return a < b;
+    });
+
+    m_SlotDrawCursor.Clear();
+    m_SlotDrawCursor.Resize(m_SlotDrawCount.Size(), 0);
+
+    uint32 firstDraw = 0;
+    for (uint32 slot : m_OrderedSlots)
     {
-        uint32 schemeId = m_Draws[i].schemeId;
+        uint32 schemeId = m_SlotSchemeId[slot];
+        if (m_Buckets.IsEmpty() || m_Buckets[m_Buckets.Size() - 1].schemeId != schemeId)
+            m_Buckets.PushBack(SchemeBucket{ schemeId, (uint32)m_Batches.Size(), 0 });
 
-        SchemeBucket bucket;
-        bucket.schemeId = schemeId;
-        bucket.firstBatch = (uint32)m_Batches.Size();
+        m_Batches.PushBack(MaterialBatch{ slot, firstDraw, m_SlotDrawCount[slot] });
+        ++m_Buckets[m_Buckets.Size() - 1].batchCount;
 
-        while (i < (uint32)m_Draws.Size() && m_Draws[i].schemeId == schemeId)
-        {
-            uint32 materialSlot = m_Draws[i].materialSlot;
-
-            MaterialBatch batch;
-            batch.materialSlot = materialSlot;
-            batch.firstDraw = i;
-            while (i < (uint32)m_Draws.Size() && m_Draws[i].schemeId == schemeId && m_Draws[i].materialSlot == materialSlot)
-                ++i;
-            batch.drawCount = i - batch.firstDraw;
-
-            m_Batches.PushBack(batch);
-        }
-
-        bucket.batchCount = (uint32)m_Batches.Size() - bucket.firstBatch;
-        m_Buckets.PushBack(bucket);
+        m_SlotDrawCursor[slot] = firstDraw;
+        firstDraw += m_SlotDrawCount[slot];
     }
 }
 

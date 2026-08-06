@@ -137,17 +137,45 @@ float4 SphereScreenExtents(float3 pos, float radius, float4x4 proj)
     return result;
 }
 
-bool ContributionCullMeshlet(GPUInstance instance, MeshletCullData data, FrameConstants frame) {
-    float3 center;
-    float radius;
-    SceneGetMeshletBoundingSphere(instance, data, center, radius);
+// One meshlet's cull data already transformed into world space. Every test below needs some part of
+// this, and the sphere and the cone share the instance's basis lengths -- deriving it once per
+// meshlet instead of once per test removes ~5 matrix transforms and ~12 length() per meshlet thread,
+// which at these instance counts is the bulk of what SceneAS does. It also keeps far fewer values
+// live across the test chain, which is what the occupancy counter is complaining about.
+struct MeshletBoundsWS {
+    float3 vCenter;
+    float  fRadius;
+    float3 vConeApex;
+    float3 vConeAxis;
+    float  fConeCutoff;
+};
 
-    float3 viewCenter = mul(frame.mView, float4(center, 1.0)).xyz;
-    float rad2 = radius * radius;
+MeshletBoundsWS SceneTransformMeshletBounds(GPUInstance instance, MeshletCullData data) {
+    float3x3 rs = (float3x3)instance.mTransform;
+    float sx = length(mul(rs, float3(1.0, 0.0, 0.0)));
+    float sy = length(mul(rs, float3(0.0, 1.0, 0.0)));
+    float sz = length(mul(rs, float3(0.0, 0.0, 1.0)));
+    float sMin = min(sx, min(sy, sz));
+    float sMax = max(sx, max(sy, sz));
+
+    MeshletBoundsWS bounds;
+    bounds.vCenter = mul(instance.mTransform, float4(data.vCenter, 1.0)).xyz;
+    bounds.fRadius = data.fRadius * sMax;
+    bounds.vConeApex = mul(instance.mTransform, float4(data.vConeApex, 1.0)).xyz;
+    bounds.vConeAxis = normalize(mul(rs, data.vConeAxis));
+    // Same as SceneGetMeshletCone: non-uniform scale tilts the cone, so a cutoff of 1 disables the
+    // test rather than culling geometry that is still facing the camera.
+    bounds.fConeCutoff = sMax > sMin * 1.001f ? 1.0f : data.fConeCutoff;
+    return bounds;
+}
+
+bool ContributionCullMeshlet(MeshletBoundsWS bounds, FrameConstants frame) {
+    float3 viewCenter = mul(frame.mView, float4(bounds.vCenter, 1.0)).xyz;
+    float rad2 = bounds.fRadius * bounds.fRadius;
     if (dot(viewCenter.xz, viewCenter.xz) <= rad2 || dot(viewCenter.yz, viewCenter.yz) <= rad2)
         return true;
 
-    float4 lbrt = SphereScreenExtents(viewCenter, radius, frame.mProjection);
+    float4 lbrt = SphereScreenExtents(viewCenter, bounds.fRadius, frame.mProjection);
     float w = abs(lbrt.z - lbrt.x);
     float h = abs(lbrt.w - lbrt.y);
 
@@ -157,43 +185,31 @@ bool ContributionCullMeshlet(GPUInstance instance, MeshletCullData data, FrameCo
     return true;
 }
 
-bool FrustumCullMeshlet(GPUInstance instance, MeshletCullData data, FrameConstants frame) {
-    float3 center;
-    float radius;
-    SceneGetMeshletBoundingSphere(instance, data, center, radius);
-
+bool FrustumCullMeshlet(MeshletBoundsWS bounds, FrameConstants frame) {
     [unroll]
     for (int plane = 0; plane < 6; ++plane) {
         float4 frustumPlane = frame.vFrustumPlanes[plane];
         float3 normal = frustumPlane.xyz;
         float distance = frustumPlane.w;
 
-        if (dot(normal, center) + distance < -radius)
+        if (dot(normal, bounds.vCenter) + distance < -bounds.fRadius)
             return false;
     }
     return true;
 }
 
-bool OcclusionCullMeshlet(GPUInstance instance, MeshletCullData data, FrameConstants frame) {
+bool OcclusionCullMeshlet(MeshletBoundsWS bounds, FrameConstants frame) {
     const uint required = kSceneCullFlagHZBValid | kSceneCullFlagLatePass;
     if ((g_Constants.uCullFlags & required) != required)
         return true;
 
-    float3 center;
-    float radius;
-    SceneGetMeshletBoundingSphere(instance, data, center, radius);
-
     HZBParams hzb = HZBMakeParams(g_Constants.rHZB, g_Constants.uHZBWidth, g_Constants.uHZBHeight, g_Constants.uHZBMipCount);
-    return !HZBIsOccluded(center - radius, center + radius, frame.mHZBViewProjection, hzb);
+    return !HZBIsOccluded(bounds.vCenter - bounds.fRadius, bounds.vCenter + bounds.fRadius,
+                          frame.mHZBViewProjection, hzb);
 }
 
-bool ConeCullMeshlet(GPUInstance instance, MeshletCullData data, FrameConstants frame) {
-    float3 apex;
-    float3 axis;
-    float cutoff;
-    SceneGetMeshletCone(instance, data, apex, axis, cutoff);
-
-    if (dot(normalize(apex - frame.vCameraPosition), axis) > cutoff)
+bool ConeCullMeshlet(MeshletBoundsWS bounds, FrameConstants frame) {
+    if (dot(normalize(bounds.vConeApex - frame.vCameraPosition), bounds.vConeAxis) > bounds.fConeCutoff)
         return false;
     return true;
 }
@@ -214,9 +230,17 @@ void SceneAS(uint3 uGroupID : SV_GroupID, uint3 uGroupThreadID : SV_GroupThreadI
 
     bool visible = meshletIndex < lodInfo.uMeshletCount;
     if ((g_Constants.uCullFlags & kSceneCullFlagEnabled) != 0) {
-        visible &= FrustumCullMeshlet(instance, cull, frame);
-        visible &= GPUMaterialIsDoubleSided(material) || ConeCullMeshlet(instance, cull, frame);
-        visible &= ContributionCullMeshlet(instance, cull, frame);
+        // Chained through `if (visible)` rather than `&=`: `&=` evaluates both operands, so every
+        // meshlet paid for the cone test's normalize and the contribution test's two sqrts even
+        // after it had already been rejected. Ordered cheapest-first for the same reason.
+        MeshletBoundsWS bounds = SceneTransformMeshletBounds(instance, cull);
+
+        if (visible)
+            visible = FrustumCullMeshlet(bounds, frame);
+        if (visible && !GPUMaterialIsDoubleSided(material))
+            visible = ConeCullMeshlet(bounds, frame);
+        if (visible)
+            visible = ContributionCullMeshlet(bounds, frame);
 
         // The outgoing half of a cross-fade deliberately skips the occlusion test, unlike every
         // other draw here. Two reasons, both specific to it:
@@ -244,7 +268,8 @@ void SceneAS(uint3 uGroupID : SV_GroupID, uint3 uGroupThreadID : SV_GroupThreadI
             uint mask = 1u << (meshletIndex & 31u);
 
             if ((g_Constants.uCullFlags & kSceneCullFlagLatePass) != 0) {
-                visible &= OcclusionCullMeshlet(instance, cull, frame);
+                if (visible)
+                    visible = OcclusionCullMeshlet(bounds, frame);
 
                 AGFXRWByteAddressBuffer bits = AGFXRWByteAddressBuffer::Create(g_Constants.rMeshletVisibility);
                 uint previous;

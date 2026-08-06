@@ -1,11 +1,11 @@
 {
     "debug.show_colliders": false,
-    "debug.show_cpu_profiler_panel": false,
+    "debug.show_cpu_profiler_panel": true,
     "debug.show_gpu_timing_panel": true,
     "debug.show_rendergraph_panel": false,
-    "render.build_acceleration_structures": true,
+    "render.build_acceleration_structures": false,
     "scene.build_hzb": true,
     "scene.enable_culling": true,
     "scene.freeze_frustum": false,
-    "scene.gbuffer_debug": 1
+    "scene.gbuffer_debug": 6
 }

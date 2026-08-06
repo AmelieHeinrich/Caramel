@@ -181,10 +181,23 @@ private:
     /// instance whose entity overrides this material resolves to a separate derived slot, and
     /// `outOverride` receives that override.
     ///
+    /// Serial only -- it bumps the slot counter and writes the override's cached slot. Build's
+    /// worker threads call LookupMaterialSlot instead and defer the misses to the serial phase.
+    ///
     /// `outOverride` is only valid for the duration of the current Build() -- it points into the
     /// entity's `materialOverrides` array, which reallocates whenever a new override is added, so it
     /// must never be stored across frames.
     uint32 ResolveMaterialSlot(const RenderInstance& instance, const MaterialOverride*& outOverride);
+
+    /// @brief Read-only half of ResolveMaterialSlot, safe to call from several threads at once.
+    /// Returns UINT32_MAX when this instance has no slot allocated yet.
+    uint32 LookupMaterialSlot(const RenderInstance& instance) const;
+
+    /// @brief The material override this instance resolves to, or null. Mirrors
+    /// Scene::FindMaterialOverride: an override pinned to this exact mesh slot wins over the
+    /// entity-wide one, so a per-mesh edit does not spill onto sibling meshes that merely happen to
+    /// share a material index.
+    MaterialOverride* FindActiveOverride(const RenderInstance& instance) const;
 
     void WriteMaterial(uint32 slot, const ModelMaterial& source, const MaterialOverride* activeOverride,
                        StreamingManager& streamingManager, uint32 requestId, int32 materialIndex);
@@ -192,21 +205,25 @@ private:
     uint32 ResolveTextureHandle(StreamingManager& streamingManager, uint32 requestId, int32 materialIndex,
                                 MaterialTextureSlot slot) const;
 
-    /// @brief Groups the sorted draw list into material batches and scheme buckets.
+    /// @brief Orders the used material slots into batches and scheme buckets, and seeds
+    /// m_SlotDrawCursor with each slot's base offset in the draw list.
+    ///
+    /// This replaces sorting the draw list itself: the sort key is (schemeId, materialSlot) and
+    /// schemeId is a function of materialSlot, so ordering the handful of *used slots* and then
+    /// scattering draws into their slot's range is the same result in O(draws) instead of
+    /// O(draws log draws).
     void BuildBuckets();
 
-    // One resident instance surviving Build's serial filter phase, everything the parallel fill
-    // phase needs without touching shared mutable state.
+    // One resident instance, everything the parallel fill phase needs without touching shared
+    // mutable state. Deliberately small: Build keeps one entry per *render instance* (not per
+    // surviving instance) so the phases can run over a fixed index space, and the serial phase
+    // streams over the flat side arrays below rather than over this.
     struct BuildItem
     {
         const RenderInstance* instance = nullptr;
+        uint64 identity = 0;
         uint32 lod = 0;
         uint32 meshletCount = 0;
-        uint32 materialSlot = 0;
-        glm::mat4 prevTransform{ 1.0f };
-        uint64 identity = 0;
-        uint32 stateSlot = 0;
-        bool stateFresh = false;
     };
 
     // First instance seen using a slot this frame -- WriteMaterial runs once per slot, not once per
@@ -218,9 +235,34 @@ private:
         const MaterialOverride* activeOverride = nullptr;
     };
 
+    // Per-worker accumulators for the reductions the gather phase performs, one cache line each so
+    // workers never share one.
+    struct alignas(64) BuildScratch
+    {
+        uint64 preCullMeshlets = 0;
+        uint64 preCullTriangles = 0;
+        uint32 maxMeshletCount = 0;
+    };
+
+    enum : uint8
+    {
+        kItemValid = 1,       // survived residency filtering, has an entry in every side array
+        kItemStateFresh = 2,  // its state entry was created this frame, so its state slot holds junk
+    };
+
     TArray<BuildItem> m_BuildItems;
+    TArray<uint8> m_ItemFlags;
+    TArray<uint32> m_ItemSlot;      // material slot, UINT32_MAX until the serial phase allocates one
+    TArray<uint32> m_ItemState;     // index into m_States, kNoState until the serial phase creates it
+    TArray<uint32> m_ItemDst;       // index in the compacted instance buffer
+    TArray<uint32> m_ItemDrawDst;   // index in the slot-ordered draw list
+    TArray<BuildScratch> m_Scratch;
+
     TArray<MaterialWrite> m_MaterialWrites;
     TArray<uint8> m_SlotWrittenThisBuild;
+    TArray<uint32> m_SlotDrawCount;
+    TArray<uint32> m_SlotDrawCursor;
+    TArray<uint32> m_OrderedSlots;
 
     void UploadSchemeParams(uint32 frameIndex);
 
@@ -251,19 +293,55 @@ private:
     TArray<StreamBuffer> m_SchemeParamStreams;
     TArray<TArray<uint8>> m_SchemeParamStaging;
 
-    // Last frame's transform per render instance, keyed by stable entity identity rather than
-    // instance index (Build compacts by residency, so indices change meaning across frames).
-    // Key: (owner->id << 24) | (meshSlot << 12) | instanceIndex, mesh pointer when ownerless.
-    TDictionary<uint64, glm::mat4> m_PrevTransforms;
+    // Everything about a render instance that has to survive across frames, keyed by stable entity
+    // identity rather than instance index (Build compacts by residency, so indices change meaning
+    // across frames). Key: (owner->id << 40) | (meshSlot << 24) | instanceIndex, mesh pointer when
+    // ownerless.
+    //
+    // - prevTransform feeds motion vectors.
+    // - stateSlot indexes the renderer's persistent per-instance buffers, which outlive a single
+    //   Build and so cannot be indexed by the compacted instance index. Slots belonging to
+    //   instances that stopped being submitted are recycled, and a recycled slot is handed out
+    //   marked fresh so its next owner never inherits stale LOD/visibility state.
+    struct InstanceState
+    {
+        uint64 identity = 0;
+        glm::mat4 prevTransform{ 1.0f };
+        uint32 stateSlot = 0;
+    };
 
-    // Stable state-slot allocation, same identity key as m_PrevTransforms and for the same reason:
-    // the renderer's persistent per-instance buffers outlive a single Build, so they cannot be
-    // indexed by the compacted instance index. Slots freed by instances that disappeared are
-    // recycled, and a recycled slot is handed out marked fresh so its stale contents are ignored.
-    TDictionary<uint64, uint32> m_StateSlots;
-    TDictionary<uint64, uint32> m_NextStateSlots;
+    static constexpr uint32 kNoState = UINT32_MAX;
+
+    /// @brief Index into m_States for this identity, or kNoState. Read-only, so Build's gather phase
+    /// calls it from every worker at once.
+    uint32 FindState(uint64 identity) const;
+
+    /// @brief Allocates a state entry (and a state slot) for an identity seen for the first time.
+    uint32 CreateState(uint64 identity, const glm::mat4& transform);
+
+    void InsertStateIndex(uint64 identity, uint32 entry);
+    void RehashStates();
+
+    /// @brief Frees the state slots of identities that were not submitted this frame and compacts
+    /// m_States. Must run after the fill phase -- compaction moves entries, invalidating m_ItemState.
+    void SweepDeadStates();
+
+    // Dense entry array plus a separate open-addressed index. This used to be three TDictionary
+    // (i.e. std::unordered_map) instances, two of which were cleared and refilled every frame:
+    // ~300k node allocations per frame at 100k instances, which is where most of Build's CPU time
+    // went. Nothing here allocates in steady state.
+    TArray<InstanceState> m_States;
+
+    // Frame stamp per entry, parallel to m_States and kept out of it so the per-frame liveness scan
+    // streams over 4 bytes per entry instead of 84.
+    TArray<uint32> m_StateSeen;
+
+    // Power-of-two open-addressed table of indices into m_States, kNoState marking an empty bucket.
+    TArray<uint32> m_StateIndex;
+
     TArray<uint32> m_FreeStateSlots;
     uint32 m_StateSlotCount = 0;
+    uint32 m_BuildCounter = 0;
     bool m_WarnedStateSlotCollision = false;
 
     // Slots persist across frames so bucketing gets temporal coherence; contents are rewritten each
