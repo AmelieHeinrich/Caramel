@@ -16,13 +16,15 @@ struct ToonParams {
 };
 
 float4 ToonPS(VSOut input) : SV_Target {
+    SceneLodDither(input);
+
     GPUMaterial material = SceneLoadMaterial(input.uMaterialSlot);
     ToonParams params = SCENE_LOAD_SCHEME_PARAMS(ToonParams, input.uMaterialSlot);
 
     AGFXTexture2D<float4> tBaseColor = AGFXTexture2D<float4>::Create(material.uTextures[kMaterialTextureBaseColor]);
     AGFXSampler sSampler = AGFXSampler::Create(g_Constants.rSampler);
     float4 baseColor = tBaseColor.Sample(sSampler, input.vUV) * material.vBaseColorFactor;
-    if (baseColor.a < 0.1f) {
+    if (GPUMaterialIsAlphaTested(material) && baseColor.a < material.fAlphaCutoff) {
         discard;
     }
 

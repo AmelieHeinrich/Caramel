@@ -7,6 +7,7 @@
 #pragma once
 
 #include <Caramel/Core/Common.hpp>
+#include <Caramel/Core/Timer.hpp>
 #include <Caramel/Renderer/Common.hpp>
 #include <Caramel/Renderer/Camera.hpp>
 #include <Caramel/Scene/GPUScene.hpp>
@@ -77,16 +78,10 @@ private:
     agfx::IndirectBundle m_TranslucentBundles[FRAMES_IN_FLIGHT];
     agfx::IndirectBundle m_DeferredBundles[FRAMES_IN_FLIGHT];
 
-    // Vulkan-only workaround (SKILL.md gotcha 6): maps a bundle slot to the instance index the
-    // populate shader wrote there, since Vulkan's AGFX_DRAW_ID() returns the linear slot instead.
+    // Vulkan-only workaround (SKILL.md gotcha 6): maps a bundle slot to the draw word the populate
+    // shader wrote there, since Vulkan's AGFX_DRAW_ID() returns the linear slot instead.
     agfx::Buffer m_OpaqueDrawIndirection[FRAMES_IN_FLIGHT];
     agfx::BufferView m_OpaqueDrawIndirectionViews[FRAMES_IN_FLIGHT];
-
-    // Per-instance LOD chosen this frame by the populate compute shader, stateless/no hysteresis.
-    // Same growth profile as m_OpaqueDrawIndirection (one entry per instance slot); grown alongside
-    // it in EnsureOpaqueCapacity. Read by SceneAS in the later render pass.
-    agfx::Buffer m_SelectedLod[FRAMES_IN_FLIGHT];
-    agfx::BufferView m_SelectedLodViews[FRAMES_IN_FLIGHT];
 
     uint32 m_OpaqueCapacities[FRAMES_IN_FLIGHT] = {};
 
@@ -109,6 +104,16 @@ private:
     agfx::Buffer m_MeshletVisibility;
     agfx::BufferView m_MeshletVisibilityView;
     uint32 m_MeshletVisStride = 0;
+
+    // Per-instance LOD hysteresis/cross-fade state word (layout in PopulateOpaqueIndirectBundle.hlsl),
+    // advanced once per frame by the early cull pass. Same persistent single-allocation lifecycle
+    // and validity guard as m_InstanceVisibility.
+    agfx::Buffer m_LodState;
+    agfx::BufferView m_LodStateView;
+
+    // Measures real frame delta so the cross-fade lasts kLodFadeSeconds regardless of frame rate.
+    Timer m_FrameTimer;
+    uint32 m_LodFadeStep = 0xFFFFu;
 
     // The downsampler's cross-workgroup ticket counter. Zeroed from m_ZeroBuffer every frame.
     agfx::Buffer m_HZBCounter;

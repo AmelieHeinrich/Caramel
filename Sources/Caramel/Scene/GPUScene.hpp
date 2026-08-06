@@ -28,7 +28,9 @@ struct GPUMaterial
     float32   alphaCutoff = 0.5f;                           // 40
     uint32    flags = 0;                                    // 44  bit0 = doubleSided, bit1 = metallic
                                                               //     overridden (ignore texture), bit2 =
-                                                              //     roughness overridden (ignore texture)
+                                                              //     roughness overridden (ignore texture),
+                                                              //     bit3 = alphaTested (alphaMode "Mask"/
+                                                              //     "Blend" until a translucent pass exists)
     uint32    textures[5]{};                                // 48  indexed by MaterialTextureSlot
     uint32    schemeId = 0;                                 // 68  for debugging/validation only
     uint32    _pad[2]{};                                    // 72

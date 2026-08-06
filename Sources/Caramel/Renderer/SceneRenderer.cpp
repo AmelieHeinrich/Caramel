@@ -49,9 +49,11 @@ namespace
     // The downsampler's group owns a 64x64 tile of HZB mip 0. Mirrors kHZBTileSize in BuildHZB.hlsl.
     constexpr uint32 kHZBTileSize = 64;
 
-    // Opaque bundle regions: region = pass * 2 + doubleSided, so 0/1 are the early pass
-    // (CullMode::Back / CullMode::None) and 2/3 the late pass.
-    constexpr uint32 kOpaqueRegionCount = 4;
+    // Opaque bundle regions: region = pass * 4 + alphaTested * 2 + doubleSided. Within a pass the
+    // replay order is opaque Back/None then alpha-tested Back/None, so alpha-tested draws always
+    // execute after every fully opaque draw of that pass.
+    constexpr uint32 kOpaqueRegionsPerPass = 4;
+    constexpr uint32 kOpaqueRegionCount = 8;
     constexpr uint32 kPassEarly = 0;
     constexpr uint32 kPassLate = 1;
 
@@ -69,10 +71,17 @@ namespace
     constexpr uint32 kNominalUnusedBundleCapacity = 1024;
 
     // Distance (world units) from the camera at which the finest LOD begins stepping down; each
-    // further boundary scales geometrically. No hysteresis -- recomputed fresh every frame in
-    // PopulateOpaqueIndirectBundleCS.
+    // further boundary scales geometrically. The committed LOD sticks inside a relative dead-band
+    // around each boundary (hysteresis), and every switch is a dithered cross-fade over a fixed
+    // number of frames -- see AdvanceLodState in PopulateOpaqueIndirectBundleCS.
     constexpr float32 kLodBaseDistance = 20.0f;
     constexpr float32 kLodDistanceMultiplier = 2.0f;
+    constexpr float32 kLodHysteresis = 0.1f;
+    constexpr float32 kLodFadeSeconds = 0.25f;
+
+    // 16 bits of fade progress in the LOD state word -- mirrors kLodStateFadeMax in
+    // PopulateOpaqueIndirectBundle.hlsl.
+    constexpr float32 kLodFadeMax = 65535.0f;
 
     struct FrameConstants
     {
@@ -99,7 +108,7 @@ namespace
         uint32 rDrawIndirection;
         uint32 rFrameConstants;
         uint32 rInstanceLodTable;
-        uint32 rSelectedLodBuffer;
+        uint32 rLodStateBuffer;
         float32 fLodBaseDistance;
         float32 fLodDistanceMultiplier;
         uint32 rMaterialBuffer;
@@ -111,6 +120,8 @@ namespace
         uint32 uHZBWidth;
         uint32 uHZBHeight;
         uint32 uHZBMipCount;
+        float32 fLodHysteresis;
+        uint32 uLodFadeStep;
     };
 
     // Mirrors BuildHZBPushConstants in Content/Shaders/BuildHZB.hlsl. The mip handles are a uint4[4]
@@ -132,9 +143,9 @@ namespace
 }
 
 // Mirrors ScenePushConstants in Content/Shaders/Common/SceneMesh.hlsli. Instances are submitted
-// through an indirect bundle rather than one draw call per instance, so there is no per-draw
-// uInstanceIndex field -- the mesh shader recovers it from AGFX_DRAW_ID() (with the Vulkan
-// indirection-buffer workaround, see SceneMesh.hlsli's SceneResolveInstanceIndex).
+// through an indirect bundle rather than one draw call per instance, so per-draw data (instance
+// index, LOD, fade) is not a push constant -- the mesh shader recovers it from AGFX_DRAW_ID() (with
+// the Vulkan indirection-buffer workaround, see SceneMesh.hlsli's SceneResolveDrawWord).
 struct ScenePushConstants
 {
     uint32 rFrameConstants;
@@ -146,7 +157,6 @@ struct ScenePushConstants
     uint32 rFallbackTexture;
     uint32 uDebugId;
     uint32 rInstanceLodTable;
-    uint32 rSelectedLodBuffer;
     uint32 uDrawIndirectionBase;
     uint32 uCullFlags;
     uint32 rHZB;
@@ -254,7 +264,7 @@ void SceneRenderer::EnsureOpaqueCapacity(uint32 frameIndex, uint32 requiredCount
     // mirroring StreamBuffer::Reserve.
     uint32 newCapacity = requiredCount + requiredCount / 2 + 256;
 
-    // The four regions share the commands buffer (SKILL.md gotcha 4): region r occupies
+    // The regions share the commands buffer (SKILL.md gotcha 4): region r occupies
     // [r * newCapacity, (r + 1) * newCapacity) and is counted in slot r.
     m_OpaqueBundles[frameIndex] = m_Device->CreateIndirectBundle(agfx::IndirectBundleCreateInfo()
         .SetType(agfx::IndirectBundleType::DrawMesh)
@@ -272,18 +282,6 @@ void SceneRenderer::EnsureOpaqueCapacity(uint32 frameIndex, uint32 requiredCount
     agfx::BufferViewCreateInfo indirectionViewInfo;
     indirectionViewInfo.SetBuffer(m_OpaqueDrawIndirection[frameIndex].Get()).SetType(agfx::BufferViewType::Raw).SetOffset(0).SetWriteable(true);
     m_OpaqueDrawIndirectionViews[frameIndex] = m_Device->CreateBufferView(indirectionViewInfo);
-
-    agfx::BufferCreateInfo selectedLodInfo;
-    selectedLodInfo.SetSize((uint64)newCapacity * sizeof(uint32))
-                   .SetStride(sizeof(uint32))
-                   .SetUsage(agfx::BufferUsage::ShaderRead | agfx::BufferUsage::ShaderWrite)
-                   .SetMemoryType(agfx::BufferMemoryType::GPUOnly);
-    m_SelectedLod[frameIndex] = m_Device->CreateBuffer(selectedLodInfo);
-    m_SelectedLod[frameIndex].SetName("Opaque Instance Selected LOD");
-
-    agfx::BufferViewCreateInfo selectedLodViewInfo;
-    selectedLodViewInfo.SetBuffer(m_SelectedLod[frameIndex].Get()).SetType(agfx::BufferViewType::Structured).SetOffset(0).SetWriteable(true);
-    m_SelectedLodViews[frameIndex] = m_Device->CreateBufferView(selectedLodViewInfo);
 
     m_OpaqueCapacities[frameIndex] = newCapacity;
     m_Device->MakeResourcesResident();
@@ -327,6 +325,18 @@ void SceneRenderer::EnsureVisibilityCapacity(uint32 requiredCount, uint32 maxMes
     meshletVisViewInfo.SetBuffer(m_MeshletVisibility.Get()).SetType(agfx::BufferViewType::Raw).SetOffset(0).SetWriteable(true);
     m_MeshletVisibilityView = m_Device->CreateBufferView(meshletVisViewInfo);
 
+    agfx::BufferCreateInfo lodStateInfo;
+    lodStateInfo.SetSize((uint64)newCapacity * sizeof(uint32))
+                .SetStride(sizeof(uint32))
+                .SetUsage(agfx::BufferUsage::ShaderRead | agfx::BufferUsage::ShaderWrite)
+                .SetMemoryType(agfx::BufferMemoryType::GPUOnly);
+    m_LodState = m_Device->CreateBuffer(lodStateInfo);
+    m_LodState.SetName("Opaque Instance LOD State");
+
+    agfx::BufferViewCreateInfo lodStateViewInfo;
+    lodStateViewInfo.SetBuffer(m_LodState.Get()).SetType(agfx::BufferViewType::Structured).SetOffset(0).SetWriteable(true);
+    m_LodStateView = m_Device->CreateBufferView(lodStateViewInfo);
+
     m_VisibilityCapacity = newCapacity;
     m_MeshletVisStride = newStride;
     // The fresh allocations hold nothing meaningful, so the early pass must ignore them.
@@ -346,7 +356,6 @@ ScenePushConstants SceneRenderer::BuildPushConstants(GPUScene& gpuScene, const H
     pc.rFallbackTexture = gpuScene.GetFallbackTextureHandle();
     pc.uDebugId = (uint32)*cv_DebugId.AsIntPtr();
     pc.rInstanceLodTable = (uint32)gpuScene.GetInstanceLodTableView(frameIndex).GetHandle();
-    pc.rSelectedLodBuffer = (uint32)m_SelectedLodViews[frameIndex].GetHandle();
     pc.uCullFlags = (*cv_EnableCulling.AsBoolPtr() ? kCullFlagEnabled : 0u)
                   | (m_HZBValid ? kCullFlagHZBValid : 0u);
     pc.rHZB = hzb.hzbHandle;
@@ -373,7 +382,7 @@ agfx::IndirectBundleExecuteInfo SceneRenderer::BuildRegionExecuteInfo(const Scen
     // Late regions occlusion-cull meshlets against the fresh pyramid, rewrite the meshlet visibility
     // bits, and draw only what the early pass skipped; early regions draw last frame's visible
     // meshlets and never occlusion-cull. See SceneAS.
-    if (region / 2 == kPassLate)
+    if (region / kOpaqueRegionsPerPass == kPassLate)
         regionPC.uCullFlags |= kSceneCullFlagLatePass;
 
     agfx::IndirectBundleExecuteInfo info;
@@ -390,7 +399,8 @@ void SceneRenderer::RecordCullPass(agfx::CommandBuffer& cmd, GPUScene& gpuScene,
     if (count == 0)
         return;
 
-    EnsureOpaqueCapacity(frameIndex, count);
+    // Worst case a late region holds two draws per instance while everything cross-fades at once.
+    EnsureOpaqueCapacity(frameIndex, count * 2);
     EnsureVisibilityCapacity(count, gpuScene.GetMaxMeshletCount());
 
     agfx::IndirectBundle& bundle = m_OpaqueBundles[frameIndex];
@@ -403,12 +413,12 @@ void SceneRenderer::RecordCullPass(agfx::CommandBuffer& cmd, GPUScene& gpuScene,
     // barrier never touched). Missing pipelines only skip the work that needs them.
     agfx::ComputePipeline* populatePipeline = ShaderServer::GetComputePipeline(kPopulateOpaqueIndirectBundleShaderPath);
 
-    // Only the two regions this pass owns.
-    agfx::IndirectBundleExecuteInfo regionInfos[2];
+    // Only the regions this pass owns.
+    agfx::IndirectBundleExecuteInfo regionInfos[kOpaqueRegionsPerPass];
     bool haveRegionPipelines = true;
-    for (uint32 side = 0; side < 2; ++side)
+    for (uint32 side = 0; side < kOpaqueRegionsPerPass; ++side)
     {
-        regionInfos[side] = BuildRegionExecuteInfo(pc, pass * 2 + side, frameIndex);
+        regionInfos[side] = BuildRegionExecuteInfo(pc, pass * kOpaqueRegionsPerPass + side, frameIndex);
         if (!regionInfos[side].renderPipeline)
             haveRegionPipelines = false;
     }
@@ -423,7 +433,7 @@ void SceneRenderer::RecordCullPass(agfx::CommandBuffer& cmd, GPUScene& gpuScene,
 
         if (pass == kPassEarly)
         {
-            // All four slots, not just this pass's two: the late cull appends into the same count
+            // All eight slots, not just this pass's four: the late cull appends into the same count
             // buffer and must not reset it, or it would drop the early pass's draws. Stale commands
             // beyond the live counts are never executed (SKILL.md gotcha 7).
             agfxComputePassCopyBufferToBuffer(computePass, m_ZeroBuffer, bundle.CountBuffer(), 0, 0, kOpaqueRegionCount * sizeof(uint32));
@@ -439,7 +449,7 @@ void SceneRenderer::RecordCullPass(agfx::CommandBuffer& cmd, GPUScene& gpuScene,
             populatePC.rDrawIndirection = pc.rDrawIndirection;
             populatePC.rFrameConstants = pc.rFrameConstants;
             populatePC.rInstanceLodTable = pc.rInstanceLodTable;
-            populatePC.rSelectedLodBuffer = pc.rSelectedLodBuffer;
+            populatePC.rLodStateBuffer = (uint32)m_LodStateView.GetHandle();
             populatePC.fLodBaseDistance = kLodBaseDistance;
             populatePC.fLodDistanceMultiplier = kLodDistanceMultiplier;
             populatePC.rMaterialBuffer = pc.rMaterialBuffer;
@@ -451,6 +461,8 @@ void SceneRenderer::RecordCullPass(agfx::CommandBuffer& cmd, GPUScene& gpuScene,
             populatePC.uHZBWidth = pc.uHZBWidth;
             populatePC.uHZBHeight = pc.uHZBHeight;
             populatePC.uHZBMipCount = pc.uHZBMipCount;
+            populatePC.fLodHysteresis = kLodHysteresis;
+            populatePC.uLodFadeStep = m_LodFadeStep;
 
             computePass.SetPipeline(*populatePipeline);
             computePass.PushConstants(populatePC);
@@ -468,17 +480,17 @@ void SceneRenderer::RecordCullPass(agfx::CommandBuffer& cmd, GPUScene& gpuScene,
         // execute call exactly -- Metal bakes them into the ICB at this point (SKILL.md gotcha 2).
         if (haveRegionPipelines)
         {
-            for (uint32 side = 0; side < 2; ++side)
+            for (uint32 side = 0; side < kOpaqueRegionsPerPass; ++side)
                 computePass.PrepareIndirectBundle(bundle, regionInfos[side]);
         }
     }
 
     cmd.MemoryBarrier(agfx::ResourceState::UnorderedAccess, agfx::ResourceState::IndirectArgument);
 
-    // Populate just wrote m_SelectedLod and m_InstanceVisibility via UAVs; SceneAS reads the former
-    // as a plain structured-buffer SRV in the render pass's task-shader stage, and the late cull
-    // reads the latter, which is a *different* consumer sync scope than IndirectArgument above --
-    // that needs its own MemoryBarrier call, not reuse of the bundle's.
+    // Populate just wrote m_OpaqueDrawIndirection, m_LodState and m_InstanceVisibility via UAVs;
+    // SceneAS reads the first in the render pass's task-shader stage, and the late cull reads the
+    // other two, which is a *different* consumer sync scope than IndirectArgument above -- that
+    // needs its own MemoryBarrier call, not reuse of the bundle's.
     cmd.MemoryBarrier(agfx::ResourceState::UnorderedAccess, agfx::ResourceState::NonPixelShaderResource);
 
     if (pass == kPassLate)
@@ -539,6 +551,11 @@ void SceneRenderer::BuildHZB(agfx::CommandBuffer& cmd, const HZBResources& hzb)
 
 void SceneRenderer::BeginFrame(const Camera& camera, uint32 width, uint32 height, uint32 frameIndex)
 {
+    // The fade advances by a fixed step per frame on the GPU, so the step has to come from real
+    // delta time -- a constant per-frame increment would make the fade duration scale with FPS.
+    m_FrameTimer.Tick();
+    m_LodFadeStep = (uint32)glm::clamp(kLodFadeMax * m_FrameTimer.GetDelta() / kLodFadeSeconds, 1.0f, kLodFadeMax);
+
     float aspectRatio = height != 0 ? (float)width / (float)height : 1.0f;
 
     FrameConstants constants;
@@ -597,9 +614,9 @@ void SceneRenderer::RenderEarly(agfx::RenderPass& renderPass, GPUScene& gpuScene
 
     // ExecuteIndirectBundle sets both the pipeline and push constants itself, from executeInfo, on
     // every backend -- no separate SetPipeline/PushConstants call here.
-    for (uint32 side = 0; side < 2; ++side)
+    for (uint32 side = 0; side < kOpaqueRegionsPerPass; ++side)
     {
-        agfx::IndirectBundleExecuteInfo info = BuildRegionExecuteInfo(pc, kPassEarly * 2 + side, frameIndex);
+        agfx::IndirectBundleExecuteInfo info = BuildRegionExecuteInfo(pc, kPassEarly * kOpaqueRegionsPerPass + side, frameIndex);
         if (info.renderPipeline)
             renderPass.ExecuteIndirectBundle(m_OpaqueBundles[frameIndex], info);
     }
@@ -616,9 +633,9 @@ void SceneRenderer::RenderLate(agfx::RenderPass& renderPass, GPUScene& gpuScene,
     renderPass.SetViewport(0.0f, 0.0f, (float)width, (float)height);
     renderPass.SetScissor(0, 0, width, height);
 
-    for (uint32 side = 0; side < 2; ++side)
+    for (uint32 side = 0; side < kOpaqueRegionsPerPass; ++side)
     {
-        agfx::IndirectBundleExecuteInfo info = BuildRegionExecuteInfo(pc, kPassLate * 2 + side, frameIndex);
+        agfx::IndirectBundleExecuteInfo info = BuildRegionExecuteInfo(pc, kPassLate * kOpaqueRegionsPerPass + side, frameIndex);
         if (info.renderPipeline)
             renderPass.ExecuteIndirectBundle(m_OpaqueBundles[frameIndex], info);
     }

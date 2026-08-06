@@ -55,10 +55,6 @@ struct FrameConstants {
     float4x4 mHZBViewProjection; // the camera the current pyramid was rasterized from
 };
 
-// Mirrors ScenePushConstants in Sources/Caramel/Renderer/SceneRenderer.cpp. rSchemeParams points at
-// the parameter buffer of the scheme bucket currently being drawn. Draws are submitted through an
-// indirect bundle, so the instance index is no longer a per-draw push constant -- it is recovered
-// from AGFX_DRAW_ID() (see SceneResolveInstanceIndex below).
 struct ScenePushConstants {
     ResourceHandle rFrameConstants;
     ResourceHandle rInstanceBuffer;
@@ -69,7 +65,6 @@ struct ScenePushConstants {
     ResourceHandle rFallbackTexture; // handle held by a material texture slot with nothing bound
     uint uDebugId; // scene.debug_id (see Core/CVar.hpp), read by DebugMeshletID.hlsl
     ResourceHandle rInstanceLodTable;  // GPULodInfo per (instance, lod) -- see GPUScene.hlsli
-    ResourceHandle rSelectedLodBuffer; // uint per instance, written by PopulateOpaqueIndirectBundleCS
     uint uDrawIndirectionBase;         // start of this execute's bundle region in rDrawIndirection;
                                        // region * capacity, see SceneRenderer's region table. Vulkan only
     uint uCullFlags;                   // bit0 = culling enabled, bit1 = the pyramid holds real data
@@ -85,22 +80,14 @@ AGFX_PUSH_CONSTANTS(ScenePushConstants, g_Constants);
 static const uint kSceneDebugIdMeshlet = 0;
 static const uint kSceneDebugIdPrimitive = 1;
 static const uint kSceneDebugIdInstance = 2;
-
+static const uint kSceneDebugIdLod = 3;
 static const uint kSceneCullFlagEnabled = 1u;
 static const uint kSceneCullFlagHZBValid = 2u;
-// Set only on the late pass's bundle regions -- see SceneAS.
 static const uint kSceneCullFlagLatePass = 4u;
-
-// Bits of the per-instance visibility word, written by PopulateOpaqueIndirectBundle.hlsl (see the
-// full layout there). SceneAS reads DrawnEarly/BitsLodValid to decide which meshlets the early pass
-// already drew and whether the meshlet bits describe this frame's LOD.
 static const uint kSceneInstanceVisDrawnEarly = 2u;
 static const uint kSceneInstanceVisBitsLodValid = 4u;
 
-// AGFX_DRAW_ID() is the value the populate compute shader wrote as drawId on D3D12/Metal, but on
-// Vulkan it is the linear position within the compacted indirect bundle instead (SKILL.md gotcha
-// 6), so it must be resolved through the indirection buffer the populate shader wrote alongside it.
-uint SceneResolveInstanceIndex() {
+uint SceneResolveDrawWord() {
 #if defined(AGFX_VULKAN)
     return AGFXByteAddressBuffer::Create(g_Constants.rDrawIndirection).Load((g_Constants.uDrawIndirectionBase + AGFX_DRAW_ID()) * 4);
 #else
@@ -118,6 +105,7 @@ struct VSOut {
     nointerpolation uint uMeshletID : TEXCOORD4;
     nointerpolation uint uInstanceIndex : TEXCOORD5;
     nointerpolation uint uLOD : TEXCOORD6;
+    nointerpolation uint uFade : TEXCOORD7; // fade nibble | outgoing << 4, see SceneLodDither
 };
 
 struct PrimOut {
@@ -132,6 +120,17 @@ GPUMaterial SceneLoadMaterial(uint materialSlot) {
 #define SCENE_LOAD_SCHEME_PARAMS(type, materialSlot) \
     (AGFXStructuredBuffer<type>::Create(g_Constants.rSchemeParams).Load(materialSlot))
 
+void SceneLodDither(VSOut input) {
+    uint fade = input.uFade & 0xFu;
+    bool outgoing = (input.uFade & 0x10u) != 0u;
+    if (!outgoing && fade == kDrawWordFadeOpaque)
+        return;
+    float f = (float)fade / (float)kDrawWordFadeOpaque;
+    float n = frac(52.9829189f * frac(dot(input.vPosition.xy, float2(0.06711056f, 0.00583715f))));
+    if (outgoing ? (n < f) : (n >= f))
+        discard;
+}
+
 uint3 UnpackTriangle(AGFXByteAddressBuffer buf, uint byteOffset) {
     uint wordOffset = byteOffset & ~3u;
     uint shift = (byteOffset - wordOffset) * 8;
@@ -140,26 +139,14 @@ uint3 UnpackTriangle(AGFXByteAddressBuffer buf, uint byteOffset) {
     return uint3(packed & 0xFF, (packed >> 8) & 0xFF, (packed >> 16) & 0xFF);
 }
 
-// One instance's meshlets, compacted down to the ones SceneAS decided to hand to the mesh shader.
-// uMeshletIndices holds the *original* meshlet index (into rMeshletBuffer/rMeshletBoundsBuffer) for
-// each compacted slot, since SV_GroupID.x in SceneMS is only the compacted position.
 struct MeshletPayload {
     uint uInstanceIndex;
-    uint uSelectedLod; // resolved once in SceneAS, so SceneMS doesn't need its own buffer read
+    uint uDrawWord; // resolved once in SceneAS, so SceneMS doesn't need its own resolve
     uint uMeshletIndices[kMeshletTaskGroupSize];
 };
 
 groupshared MeshletPayload s_Payload;
 
-// Screen-space silhouette extents (left/right in xy, bottom/top in zw) of a view-space bounding
-// sphere, as tangent-plane fractions -- multiply by 0.5 and add 0.5 to turn into UV space, or
-// compare directly against NDC xy. `pos` must already be in view space (this only uses proj's
-// diagonal scale terms, not a full view transform) and the camera must be outside the sphere
-// (pos.x*pos.x + pos.z*pos.z must exceed radius*radius, i.e. never call this on a meshlet whose
-// bounding sphere contains the camera). Ported as-is from a right-handed, camera-looks-down--Z
-// source engine, matching proj._33==1/proj._43==0 (or proj._34==1/proj._44==0 if this matrix turns
-// out to be row_major) -- double-check that against how frame.mProjection is actually laid out
-// before trusting the left/right and bottom/top signs.
 float4 SphereScreenExtents(float3 pos, float radius, float4x4 proj)
 {
     float rad2 = radius * radius;
@@ -216,14 +203,6 @@ bool FrustumCullMeshlet(GPUInstance instance, MeshletCullData data, FrameConstan
     return true;
 }
 
-// Boxes the meshlet's world bounding sphere and hands it to the same pyramid test the instance-level
-// cull uses.
-//
-// Late pass only. The early pass draws before the pyramid is rebuilt, so it would be projecting
-// bounds into a pyramid that predates this frame's depth -- and a meshlet it wrongly culled would be
-// missing for the frame, which reads as flickering under camera motion. Instead the early pass
-// replays the per-meshlet visibility bits this test wrote last frame, and the late pass re-tests
-// every meshlet of every visible instance to repair what the early pass skipped. See SceneAS.
 bool OcclusionCullMeshlet(GPUInstance instance, MeshletCullData data, FrameConstants frame) {
     const uint required = kSceneCullFlagHZBValid | kSceneCullFlagLatePass;
     if ((g_Constants.uCullFlags & required) != required)
@@ -250,19 +229,16 @@ bool ConeCullMeshlet(GPUInstance instance, MeshletCullData data, FrameConstants 
 
 [numthreads(kMeshletTaskGroupSize, 1, 1)]
 void SceneAS(uint3 uGroupID : SV_GroupID, uint3 uGroupThreadID : SV_GroupThreadID) {
-    uint instanceIndex = SceneResolveInstanceIndex();
+    uint drawWord = SceneResolveDrawWord();
+    uint instanceIndex = SceneDrawWordInstance(drawWord);
     uint meshletIndex = uGroupID.x * kMeshletTaskGroupSize + uGroupThreadID.x;
 
     FrameConstants frame = AGFXStructuredBuffer<FrameConstants>::Create(g_Constants.rFrameConstants).Load(0);
     GPUInstance instance = AGFXStructuredBuffer<GPUInstance>::Create(g_Constants.rInstanceBuffer).Load(instanceIndex);
 
-    uint selectedLod = AGFXStructuredBuffer<uint>::Create(g_Constants.rSelectedLodBuffer).Load(instanceIndex);
+    uint selectedLod = SceneDrawWordLod(drawWord);
     GPULodInfo lodInfo = SceneLoadLodInfo(g_Constants.rInstanceLodTable, instanceIndex, selectedLod);
     MeshletCullData cull = SceneLoadMeshletBounds(lodInfo.rMeshletBoundsBuffer, meshletIndex);
-
-    // Cone culling removes meshlets whose every triangle faces away from the camera -- only valid
-    // for single-sided geometry. Double-sided materials (e.g. curtains) legitimately show their
-    // back faces (all scene pipelines rasterize with CullMode::None), so skip the test for them.
     GPUMaterial material = SceneLoadMaterial(instance.uMaterialSlot);
 
     bool visible = meshletIndex < lodInfo.uMeshletCount;
@@ -271,32 +247,30 @@ void SceneAS(uint3 uGroupID : SV_GroupID, uint3 uGroupThreadID : SV_GroupThreadI
         visible &= GPUMaterialIsDoubleSided(material) || ConeCullMeshlet(instance, cull, frame);
         visible &= ContributionCullMeshlet(instance, cull, frame);
 
-        // Two-pass at meshlet granularity. Early regions replay the bits the late pass wrote last
-        // frame (or everything, if the bits don't describe this LOD). Late regions re-test every
-        // meshlet of every visible instance against the fresh pyramid, rewrite its bit, and draw
-        // only what the early pass skipped -- the frustum/cone/contribution results above are
-        // deterministic within a frame, so "skipped" reduces to the instance's drawn-early flag and
-        // the meshlet's previous bit.
-        uint instFlags = AGFXStructuredBuffer<uint>::Create(g_Constants.rInstanceVisibility).Load(instanceIndex);
-        uint wordAddress = (instanceIndex * g_Constants.uMeshletVisStride + (meshletIndex >> 5)) * 4;
-        uint mask = 1u << (meshletIndex & 31u);
-
-        if ((g_Constants.uCullFlags & kSceneCullFlagLatePass) != 0) {
+        if (SceneDrawWordOutgoing(drawWord)) {
             visible &= OcclusionCullMeshlet(instance, cull, frame);
+        } else {
+            uint instFlags = AGFXStructuredBuffer<uint>::Create(g_Constants.rInstanceVisibility).Load(instanceIndex);
+            uint wordAddress = (instanceIndex * g_Constants.uMeshletVisStride + (meshletIndex >> 5)) * 4;
+            uint mask = 1u << (meshletIndex & 31u);
 
-            AGFXRWByteAddressBuffer bits = AGFXRWByteAddressBuffer::Create(g_Constants.rMeshletVisibility);
-            uint previous;
-            if (visible)
-                bits.InterlockedOr(wordAddress, mask, previous);
-            else
-                bits.InterlockedAnd(wordAddress, ~mask, previous);
+            if ((g_Constants.uCullFlags & kSceneCullFlagLatePass) != 0) {
+                visible &= OcclusionCullMeshlet(instance, cull, frame);
 
-            bool drawnEarly = (instFlags & kSceneInstanceVisDrawnEarly) != 0
-                           && ((instFlags & kSceneInstanceVisBitsLodValid) == 0 || (previous & mask) != 0);
-            visible = visible && !drawnEarly;
-        } else if ((instFlags & kSceneInstanceVisBitsLodValid) != 0) {
-            AGFXByteAddressBuffer bits = AGFXByteAddressBuffer::Create(g_Constants.rMeshletVisibility);
-            visible = visible && (bits.Load(wordAddress) & mask) != 0;
+                AGFXRWByteAddressBuffer bits = AGFXRWByteAddressBuffer::Create(g_Constants.rMeshletVisibility);
+                uint previous;
+                if (visible)
+                    bits.InterlockedOr(wordAddress, mask, previous);
+                else
+                    bits.InterlockedAnd(wordAddress, ~mask, previous);
+
+                bool drawnEarly = (instFlags & kSceneInstanceVisDrawnEarly) != 0
+                               && ((instFlags & kSceneInstanceVisBitsLodValid) == 0 || (previous & mask) != 0);
+                visible = visible && !drawnEarly;
+            } else if ((instFlags & kSceneInstanceVisBitsLodValid) != 0) {
+                AGFXByteAddressBuffer bits = AGFXByteAddressBuffer::Create(g_Constants.rMeshletVisibility);
+                visible = visible && (bits.Load(wordAddress) & mask) != 0;
+            }
         }
     }
 
@@ -304,7 +278,7 @@ void SceneAS(uint3 uGroupID : SV_GroupID, uint3 uGroupThreadID : SV_GroupThreadI
     if (visible)
         s_Payload.uMeshletIndices[compactedIndex] = meshletIndex;
     s_Payload.uInstanceIndex = instanceIndex;
-    s_Payload.uSelectedLod = selectedLod;
+    s_Payload.uDrawWord = drawWord;
 
     uint visibleCount = WaveActiveCountBits(visible);
     DispatchMesh(visibleCount, 1, 1, s_Payload);
@@ -322,11 +296,14 @@ void SceneMS(
 {
     uint instanceIndex = payload.uInstanceIndex;
     uint meshletIndex = payload.uMeshletIndices[uGroupID.x];
+    uint selectedLod = SceneDrawWordLod(payload.uDrawWord);
+    uint fade = SceneDrawWordFade(payload.uDrawWord)
+              | (SceneDrawWordOutgoing(payload.uDrawWord) ? 0x10u : 0u);
 
     AGFXStructuredBuffer<GPUInstance> bInstances = AGFXStructuredBuffer<GPUInstance>::Create(g_Constants.rInstanceBuffer);
     GPUInstance instance = bInstances.Load(instanceIndex);
 
-    GPULodInfo lodInfo = SceneLoadLodInfo(g_Constants.rInstanceLodTable, instanceIndex, payload.uSelectedLod);
+    GPULodInfo lodInfo = SceneLoadLodInfo(g_Constants.rInstanceLodTable, instanceIndex, selectedLod);
 
     AGFXStructuredBuffer<MeshletDesc> bMeshlets = AGFXStructuredBuffer<MeshletDesc>::Create(lodInfo.rMeshletBuffer);
     MeshletDesc meshlet = bMeshlets.Load(meshletIndex);
@@ -348,14 +325,15 @@ void SceneMS(
 
         VSOut o;
         o.vPosition = mul(mViewProj, worldPosition);
-        o.vWorldNormal = mul((float3x3)mModel, vertex.vNormal); // uniform-scale assumption, no inverse-transpose
+        o.vWorldNormal = vertex.vNormal;
         o.vUV = vertex.vUV;
         o.uMaterialSlot = instance.uMaterialSlot;
         o.vWorldPosition = worldPosition.xyz;
         o.vWorldTangent = float4(mul((float3x3)mModel, vertex.vTangent.xyz), vertex.vTangent.w);
         o.uMeshletID = meshletIndex;
         o.uInstanceIndex = instanceIndex;
-        o.uLOD = payload.uSelectedLod;
+        o.uLOD = selectedLod;
+        o.uFade = fade;
         outVertices[v] = o;
     }
 

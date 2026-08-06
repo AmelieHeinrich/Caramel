@@ -33,7 +33,9 @@ struct GPUMaterial {
     float  fRoughnessFactor;
     float  fAlphaCutoff;
     uint   uFlags;              // bit0 = doubleSided, bit1 = metallic overridden (ignore texture),
-                                 // bit2 = roughness overridden (ignore texture)
+                                 // bit2 = roughness overridden (ignore texture),
+                                 // bit3 = alphaTested (alphaMode "Mask"/"Blend" until a real
+                                 // translucent pass exists)
     uint   uTextures[5];        // non-resident slots hold a 1x1 fallback handle, never invalid
     uint   uSchemeId;           // which material scheme drew this; debugging/validation only
     uint2  uPad;
@@ -83,9 +85,30 @@ struct GPULodInfo {
     uint uMeshletCount;
 };
 
+// Per-draw word carried through the drawId channel (D3D12/Metal: the drawId root constant, Vulkan:
+// the draw-indirection buffer). Packs everything a draw needs that can differ between the two draws
+// of a cross-fading instance. Fade 15 = fully opaque, the dither keeps every pixel.
+static const uint kDrawWordInstanceMask = 0xFFFFFFu;
+static const uint kDrawWordLodShift = 24;
+static const uint kDrawWordOutgoingBit = 1u << 27;
+static const uint kDrawWordFadeShift = 28;
+static const uint kDrawWordFadeOpaque = 15u;
+
+uint SceneMakeDrawWord(uint instanceIndex, uint lod, uint fade, bool outgoing) {
+    return (instanceIndex & kDrawWordInstanceMask)
+         | (lod << kDrawWordLodShift)
+         | (outgoing ? kDrawWordOutgoingBit : 0u)
+         | (fade << kDrawWordFadeShift);
+}
+uint SceneDrawWordInstance(uint word) { return word & kDrawWordInstanceMask; }
+uint SceneDrawWordLod(uint word) { return (word >> kDrawWordLodShift) & 0x7u; }
+bool SceneDrawWordOutgoing(uint word) { return (word & kDrawWordOutgoingBit) != 0u; }
+uint SceneDrawWordFade(uint word) { return word >> kDrawWordFadeShift; }
+
 bool GPUMaterialIsDoubleSided(GPUMaterial material) { return (material.uFlags & 1u) != 0u; }
 bool GPUMaterialOverridesMetallic(GPUMaterial material) { return (material.uFlags & 2u) != 0u; }
 bool GPUMaterialOverridesRoughness(GPUMaterial material) { return (material.uFlags & 4u) != 0u; }
+bool GPUMaterialIsAlphaTested(GPUMaterial material) { return (material.uFlags & 8u) != 0u; }
 
 MeshletCullData SceneLoadMeshletBounds(uint meshletBoundsBuffer, uint meshletIndex) {
     return AGFXStructuredBuffer<MeshletCullData>::Create(meshletBoundsBuffer).Load(meshletIndex);

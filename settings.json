@@ -5,7 +5,7 @@
     "debug.show_rendergraph_panel": false,
     "render.build_acceleration_structures": false,
     "scene.build_hzb": true,
-    "scene.debug_id": 0,
+    "scene.debug_id": 2,
     "scene.enable_culling": true,
     "scene.freeze_frustum": false
 }

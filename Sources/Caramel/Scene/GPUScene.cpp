@@ -129,6 +129,8 @@ void GPUScene::WriteMaterial(uint32 slot, const ModelMaterial& source, const Mat
     dst.roughnessFactor = source.roughnessFactor;
 
     uint32 flags = source.doubleSided ? 1u : 0u;
+    if (source.alphaMode == "Mask" || source.alphaMode == "Blend")
+        flags |= 8u;
 
     if (activeOverride)
     {

@@ -16,6 +16,8 @@ struct DefaultPBRParams {
 };
 
 float4 DefaultPBRPS(VSOut input) : SV_Target {
+    SceneLodDither(input);
+
     GPUMaterial material = SceneLoadMaterial(input.uMaterialSlot);
     DefaultPBRParams params = SCENE_LOAD_SCHEME_PARAMS(DefaultPBRParams, input.uMaterialSlot);
 
@@ -23,7 +25,7 @@ float4 DefaultPBRPS(VSOut input) : SV_Target {
 
     AGFXTexture2D<float4> tBaseColor = AGFXTexture2D<float4>::Create(material.uTextures[kMaterialTextureBaseColor]);
     float4 baseColor = tBaseColor.Sample(sSampler, input.vUV) * material.vBaseColorFactor;
-    if (baseColor.a < 0.1f) {
+    if (GPUMaterialIsAlphaTested(material) && baseColor.a < material.fAlphaCutoff) {
         discard;
     }
 
