@@ -7,6 +7,7 @@
 #pragma once
 
 #include <Caramel/Core/Common.hpp>
+#include <Caramel/Renderer/Common.hpp>
 #include <Caramel/Renderer/RenderGraph/RenderGraphTypes.hpp>
 #include <Caramel/Renderer/RenderGraph/RenderGraphResources.hpp>
 
@@ -38,6 +39,23 @@ public:
     // resource's first access).
     void Allocate(TArray<RGTextureDesc>& textures, TArray<RGBufferDesc>& buffers);
 
+    // Releases everything retired during the last frame that used this slot, and makes `frameSlot`
+    // the bucket subsequent Retire() calls land in. Must be called once per frame, immediately after
+    // Renderer's fence wait for this slot -- that wait is exactly the proof that the GPU work which
+    // could still have been reading last cycle's resources for this slot has completed.
+    void BeginFrame(uint32 frameSlot);
+
+    // Takes ownership of a resource the destroying RenderGraph created but whose GPU work may still
+    // be in flight. Everything a graph owns has to come through here rather than dying with the graph:
+    // Renderer's RenderGraph is a stack local destroyed at the end of Render(), which submits and
+    // signals but never waits, and agfxTextureDestroy/agfxTextureViewDestroy release immediately with
+    // no driver-side deferral. Shader-visible views are the sharpest case -- the descriptor heap is
+    // read at GPU execution time, not at record time.
+    void Retire(agfx::Texture&& texture);
+    void Retire(agfx::Buffer&& buffer);
+    void Retire(agfx::TextureView&& view);
+    void Retire(agfx::RenderTarget&& renderTarget);
+
 private:
     struct HeapRegion
     {
@@ -59,11 +77,25 @@ private:
         uint32 lastUsePass;
     };
 
+    // One bucket per frame-in-flight slot, drained by BeginFrame(slot) on the next cycle through that
+    // slot. Ordering within a bucket is release order: views are dropped before the textures they
+    // were created against.
+    struct RetiredResources
+    {
+        TArray<agfx::TextureView> textureViews;
+        TArray<agfx::RenderTarget> renderTargets;
+        TArray<agfx::Texture> textures;
+        TArray<agfx::Buffer> buffers;
+    };
+
     agfx::Device* m_Device;
     bool m_SupportsPlacementHeaps;
 
     agfx::Heap m_Heap;
     uint64 m_HeapCapacity = 0;
+
+    RetiredResources m_Retired[FRAMES_IN_FLIGHT];
+    uint32 m_RetireSlot = 0;
 
     void AllocateCommitted(TArray<RGTextureDesc>& textures, TArray<RGBufferDesc>& buffers);
     bool EnsureHeapCapacity(uint64 requiredSize);

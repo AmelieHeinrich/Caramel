@@ -7,6 +7,7 @@
 #include "RenderGraphAllocator.hpp"
 
 #include <algorithm>
+#include <utility>
 
 namespace
 {
@@ -31,6 +32,42 @@ RenderGraphAllocator::RenderGraphAllocator(agfx::Device& device)
          .SetSize(1, 1);
     agfxAllocationInfo info = m_Device->GetTextureAllocationInfo(probe);
     m_SupportsPlacementHeaps = info.size != 0;
+}
+
+void RenderGraphAllocator::BeginFrame(uint32 frameSlot)
+{
+    m_RetireSlot = frameSlot % FRAMES_IN_FLIGHT;
+
+    // Views first, then the resources they were created against -- the reverse of creation order.
+    RetiredResources& bucket = m_Retired[m_RetireSlot];
+    bucket.textureViews.Clear();
+    bucket.renderTargets.Clear();
+    bucket.textures.Clear();
+    bucket.buffers.Clear();
+}
+
+void RenderGraphAllocator::Retire(agfx::Texture&& texture)
+{
+    if (texture)
+        m_Retired[m_RetireSlot].textures.PushBack(std::move(texture));
+}
+
+void RenderGraphAllocator::Retire(agfx::Buffer&& buffer)
+{
+    if (buffer)
+        m_Retired[m_RetireSlot].buffers.PushBack(std::move(buffer));
+}
+
+void RenderGraphAllocator::Retire(agfx::TextureView&& view)
+{
+    if (view)
+        m_Retired[m_RetireSlot].textureViews.PushBack(std::move(view));
+}
+
+void RenderGraphAllocator::Retire(agfx::RenderTarget&& renderTarget)
+{
+    if (renderTarget)
+        m_Retired[m_RetireSlot].renderTargets.PushBack(std::move(renderTarget));
 }
 
 int32 RenderGraphAllocator::FindReusableRegion(const TArray<HeapRegion>& regions, const Request& req) const

@@ -12,6 +12,8 @@
 #include <Caramel/Renderer/UploadQueue.hpp>
 #include <Caramel/Renderer/Camera.hpp>
 #include <Caramel/Renderer/MaterialScheme.hpp>
+#include <Caramel/Renderer/FrameContext.hpp>
+#include <Caramel/Renderer/RenderPass.hpp>
 #include <Caramel/Renderer/RenderGraph/RenderGraph.hpp>
 #include <Caramel/Scene/GPUScene.hpp>
 #include <Caramel/Scene/RenderInstance.hpp>
@@ -115,29 +117,12 @@ private:
     uint32 m_ViewportHeight = 1;
     void CreateSceneColorTexture(uint32 width, uint32 height);
 
-    // R32 = draw word (instance | LOD | fade), G32 = meshletIndex << 7 | triangleIndex. Written by
-    // Scene Early/Late, consumed by the GBuffer Resolve pass -- see VisBuffer.hlsl.
-    agfx::Texture m_VisibilityTexture;
-    agfx::TextureView m_VisibilityView;
-    void CreateVisibilityTexture(uint32 width, uint32 height);
-
-    // HDR shading output, sitting between the gbuffer and scene color. Deliberately not scene color
-    // itself: the deferred shading passes write it from compute, and scene color carries the swap
-    // chain's format -- a typed UAV on BGRA8Unorm is an optional D3D12 feature. Also gives the
-    // tonemapper and TAA (Notes/TODO.md) a real HDR buffer to work on later. GBuffer Resolve writes
-    // it as attachment 0 (the scene.gbuffer_debug view), the scheme dispatches write it as a UAV,
-    // and the Composite pass reads it into scene color.
-    agfx::Texture m_SceneLightingTexture;
-    agfx::TextureView m_SceneLightingView;
-    agfx::TextureView m_SceneLightingUAV;
-    void CreateSceneLightingTexture(uint32 width, uint32 height);
-
-    // Order is the attachment contract with the GBuffer Resolve pipeline (SceneRenderer) and
-    // GBufferOut in GBufferResolve.hlsl: albedo, normal, metallic/roughness, emissive, motion.
-    static constexpr uint32 kGBufferTextureCount = 5;
-    agfx::Texture m_GBufferTextures[kGBufferTextureCount];
-    agfx::TextureView m_GBufferViews[kGBufferTextureCount];
-    void CreateGBufferTextures(uint32 width, uint32 height);
+    // Visibility, scene lighting and the five gbuffer targets are render-graph transients, declared
+    // fresh in DeclareFrameTargets() every frame rather than owned here: nothing reads them across
+    // frames, so the graph can size them from the viewport, alias their memory against each other and
+    // hand out their bindless views itself. Adding another intra-frame target means one line there --
+    // no member, no create function, no resize call, no import, no state writeback.
+    void DeclareFrameTargets(RenderGraph& graph, FrameContext& ctx);
 
     // Renderer's persistently-owned textures (scene-color, depth) are re-imported into a fresh
     // RenderGraph every frame, but their physical GPU state carries over across frames -- this cache
@@ -165,6 +150,14 @@ private:
     TUnique<SceneRenderer> m_SceneRenderer;
     TUnique<DebugRenderer> m_DebugRenderer;
     TUnique<AccelerationStructureManager> m_AccelStructManager;
+
+    // The frame outline, in execution order -- the graph derives barriers but never reorders, so this
+    // list is the authoritative answer to "what happens in a frame". Built once in BuildPassList().
+    TArray<TUnique<RenderPass>> m_Passes;
+    void BuildPassList();
+
+    // Rebuilt in place each frame rather than reconstructed, so its blackboard keeps its allocation.
+    FrameContext m_FrameContext;
 
     struct PendingMipTransition
     {

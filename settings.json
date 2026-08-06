@@ -3,7 +3,7 @@
     "debug.show_cpu_profiler_panel": false,
     "debug.show_gpu_timing_panel": true,
     "debug.show_rendergraph_panel": false,
-    "render.build_acceleration_structures": false,
+    "render.build_acceleration_structures": true,
     "scene.build_hzb": true,
     "scene.enable_culling": true,
     "scene.freeze_frustum": false,

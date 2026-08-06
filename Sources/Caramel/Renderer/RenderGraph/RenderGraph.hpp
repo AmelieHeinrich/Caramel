@@ -88,7 +88,11 @@ public:
     agfx::Texture& ResolveTexture(RGTextureHandle handle);
     agfx::Buffer& ResolveBuffer(RGBufferHandle handle);
     agfx::RenderTarget& ResolveRenderTarget(RGTextureHandle handle, bool isDepth = false);
-    uint64 ResolveBindlessTexture(RGTextureHandle handle);
+    // Bindless handle for a whole-texture, mip-0 view. `writeable` picks a UAV over an SRV, which is
+    // what lets a compute pass write a graph-owned transient -- the texture must carry
+    // TextureUsage::Storage for that. Read-only and writeable views are cached separately, so asking
+    // for both on one texture is fine.
+    uint64 ResolveBindlessTexture(RGTextureHandle handle, bool writeable = false);
 
 private:
     RenderGraph& m_Graph;
@@ -111,6 +115,16 @@ public:
     // Renderer's m_RenderGraphAllocator) to route transient resources through heap-placed aliasing;
     // omit it to force every transient resource to committed allocation, e.g. for isolated tests.
     explicit RenderGraph(agfx::Device& device, RenderGraphAllocator* allocator = nullptr);
+
+    // Hands every resource this graph created (transient textures/buffers, and the view + render
+    // target caches built during Execute) to the allocator's retirement queue, which frees them once
+    // the fence proves the GPU is done with this frame slot. Without an allocator there is nowhere to
+    // defer to and they are destroyed here and now -- safe only for the isolated-test case the
+    // allocator-less constructor exists for, never for a graph whose work was actually submitted.
+    ~RenderGraph();
+
+    RenderGraph(const RenderGraph&) = delete;
+    RenderGraph& operator=(const RenderGraph&) = delete;
 
     // Graphics-queue passes only, timestamped in a caller-owned, frame-in-flight-sized QueryPool --
     // see Renderer::m_TimingQueryPools for why the pool itself can't live here (it must persist

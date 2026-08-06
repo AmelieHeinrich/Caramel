@@ -6,6 +6,8 @@
 
 #include "RenderGraph.hpp"
 
+#include <utility>
+
 // ------------------------------------------------------------------------------------------
 // RGPassBuilder
 // ------------------------------------------------------------------------------------------
@@ -84,20 +86,25 @@ agfx::RenderTarget& RGResolveContext::ResolveRenderTarget(RGTextureHandle handle
     return m_Graph.ResolveRenderTargetInternal(handle.index, isDepth);
 }
 
-uint64 RGResolveContext::ResolveBindlessTexture(RGTextureHandle handle)
+uint64 RGResolveContext::ResolveBindlessTexture(RGTextureHandle handle, bool writeable)
 {
     RGTextureDesc& tex = m_Graph.m_Textures[handle.index];
 
-    auto it = m_Graph.m_BindlessViewCache.Find(handle.index);
+    // Read-only and writeable views over the same texture are two distinct descriptors, so they get
+    // two distinct cache slots -- keying on the index alone would hand back whichever was asked for
+    // first and silently bind an SRV where a UAV was wanted.
+    uint32 key = handle.index * 2 + (writeable ? 1u : 0u);
+
+    auto it = m_Graph.m_BindlessViewCache.Find(key);
     if (it != m_Graph.m_BindlessViewCache.End())
         return it->second.GetHandle();
 
     agfx::TextureFormat format = tex.isImported ? tex.importedTexture->GetInfo().GetFormat() : tex.createInfo.GetFormat();
 
     agfx::TextureViewCreateInfo viewInfo{};
-    viewInfo.SetTexture(tex.Resolve()).SetFormat(format).SetMipRange(0, 1).SetArrayRange(0, 1).SetWriteable(false);
+    viewInfo.SetTexture(tex.Resolve()).SetFormat(format).SetMipRange(0, 1).SetArrayRange(0, 1).SetWriteable(writeable);
 
-    auto [inserted, ok] = m_Graph.m_BindlessViewCache.emplace(handle.index, m_Graph.m_Device->CreateTextureView(viewInfo));
+    auto [inserted, ok] = m_Graph.m_BindlessViewCache.emplace(key, m_Graph.m_Device->CreateTextureView(viewInfo));
     return inserted->second.GetHandle();
 }
 
@@ -109,6 +116,26 @@ RenderGraph::RenderGraph(agfx::Device& device, RenderGraphAllocator* allocator)
     : m_Device(&device)
     , m_Allocator(allocator)
 {
+}
+
+RenderGraph::~RenderGraph()
+{
+    if (!m_Allocator)
+        return;
+
+    for (auto& entry : m_BindlessViewCache)
+        m_Allocator->Retire(std::move(entry.second));
+    for (auto& entry : m_RenderTargetCache)
+        m_Allocator->Retire(std::move(entry.second));
+
+    for (RGTextureDesc& tex : m_Textures) {
+        if (!tex.isImported)
+            m_Allocator->Retire(std::move(tex.ownedTexture));
+    }
+    for (RGBufferDesc& buf : m_Buffers) {
+        if (!buf.isImported)
+            m_Allocator->Retire(std::move(buf.ownedBuffer));
+    }
 }
 
 RGTextureHandle RenderGraph::ImportTexture(const char* name, agfx::Texture& texture, agfx::ResourceState currentState, RGQueue currentQueue)
