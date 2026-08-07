@@ -7,24 +7,14 @@
 #include "DeferredShadingPasses.hpp"
 
 #include <Caramel/Renderer/SceneRenderer.hpp>
+#include <Caramel/Renderer/Passes/DeferredTargets.hpp>
+#include <Caramel/Renderer/Passes/ReSTIRPass.hpp>
 
-namespace
+// ReSTIR writes the same target these passes do, so exactly one of the two paths runs per frame.
+// The CVar lives in ReSTIRPass because that is the pass it switches on.
+bool DeferredShadingPasses::Enabled(const FrameContext& ctx) const
 {
-    // Both kernels take the same target set, so it is resolved identically at both call sites rather
-    // than built once outside the graph -- a transient's bindless handle only exists once the
-    // allocator has given it a real texture, which is after Compile(), not at registration time.
-    DeferredTargets ResolveTargets(RGResolveContext& rc, const FrameContext& ctx)
-    {
-        DeferredTargets targets{};
-        targets.visibilityHandle = (uint32)rc.ResolveBindlessTexture(ctx.visibility);
-        targets.depthHandle = ctx.hzbResources->depthHandle;
-        targets.albedoHandle = (uint32)rc.ResolveBindlessTexture(ctx.gbuffer[0]);
-        targets.normalHandle = (uint32)rc.ResolveBindlessTexture(ctx.gbuffer[1]);
-        targets.metallicRoughnessHandle = (uint32)rc.ResolveBindlessTexture(ctx.gbuffer[2]);
-        targets.emissiveHandle = (uint32)rc.ResolveBindlessTexture(ctx.gbuffer[3]);
-        targets.sceneLightingUAVHandle = (uint32)rc.ResolveBindlessTexture(ctx.sceneLighting, true);
-        return targets;
-    }
+    return !ReSTIRPass::IsShadingActive();
 }
 
 void DeferredShadingPasses::Register(RenderGraph& graph, FrameContext& ctx)
@@ -38,7 +28,7 @@ void DeferredShadingPasses::Register(RenderGraph& graph, FrameContext& ctx)
             builder.AlwaysExecute();
         },
         [this, &ctx](agfx::CommandBuffer& cmd, RGResolveContext& rc) {
-            m_SceneRenderer->ClassifyMaterials(cmd, *ctx.gpuScene, ResolveTargets(rc, ctx), ctx.clusters,
+            m_SceneRenderer->ClassifyMaterials(cmd, *ctx.gpuScene, ResolveDeferredTargets(rc, ctx), ctx.clusters,
                                                ctx.width, ctx.height, ctx.frameIndex);
         });
 
@@ -51,7 +41,7 @@ void DeferredShadingPasses::Register(RenderGraph& graph, FrameContext& ctx)
             builder.WriteTexture(ctx.sceneLighting, agfx::ResourceState::UnorderedAccess);
         },
         [this, &ctx](agfx::CommandBuffer& cmd, RGResolveContext& rc) {
-            m_SceneRenderer->ShadeMaterials(cmd, *ctx.gpuScene, ResolveTargets(rc, ctx), ctx.clusters,
+            m_SceneRenderer->ShadeMaterials(cmd, *ctx.gpuScene, ResolveDeferredTargets(rc, ctx), ctx.clusters,
                                             ctx.width, ctx.height, ctx.frameIndex);
         });
 }

@@ -8,5 +8,7 @@
     "scene.clustered_lights": true,
     "scene.enable_culling": true,
     "scene.freeze_frustum": false,
-    "scene.gbuffer_debug": 10
+    "scene.gbuffer_debug": 0,
+    "scene.restir": true,
+    "scene.restir_ambient": 0.0
 }

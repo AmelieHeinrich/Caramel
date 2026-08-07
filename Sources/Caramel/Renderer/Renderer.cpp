@@ -17,6 +17,7 @@
 #include <Caramel/Renderer/Passes/ClusteredLightPass.hpp>
 #include <Caramel/Renderer/Passes/GBufferResolvePass.hpp>
 #include <Caramel/Renderer/Passes/DeferredShadingPasses.hpp>
+#include <Caramel/Renderer/Passes/ReSTIRPass.hpp>
 #include <Caramel/Renderer/Passes/CompositePass.hpp>
 #include <Caramel/Renderer/Passes/DebugDrawPass.hpp>
 #include <Caramel/Renderer/Passes/ImGuiPass.hpp>
@@ -110,6 +111,12 @@ void Renderer::BuildPassList()
 
     m_Passes.PushBack(MakeUnique<GBufferResolvePass>(*m_SceneRenderer));
     m_Passes.PushBack(MakeUnique<DeferredShadingPasses>(*m_SceneRenderer));
+
+    // The other way to shade the same gbuffer. Both write sceneLighting, so scene.restir enables
+    // exactly one of the two and their relative order never matters -- it sits here because this is
+    // where "the frame shades" happens.
+    m_Passes.PushBack(MakeUnique<ReSTIRPass>(m_Device));
+
     m_Passes.PushBack(MakeUnique<CompositePass>(*m_SceneRenderer));
     m_Passes.PushBack(MakeUnique<DebugDrawPass>(*m_DebugRenderer));
     m_Passes.PushBack(MakeUnique<ImGuiPass>(*m_ImGuiRenderer));

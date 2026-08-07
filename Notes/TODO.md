@@ -13,6 +13,7 @@ Pick and choose:
 - VSM
 - RT soft shadows
 - DDGI
+- ReSTIR DI (scaffolded, see ReSTIR.md)
 - ReSTIR GI
 - Pathtracer
 - Volumetric clouds/god rays

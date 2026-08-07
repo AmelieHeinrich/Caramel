@@ -16,6 +16,13 @@ An experimental research renderer powered by [AGFX](https://github.com/AmelieHei
 - Multiple material support with binning
 - Render graph with transient resource allocator
 - Clustered light culling
+- ReSTIR DI
+- Reference pathtracer
+- NRD integration
+- Upsample/downsample bloom
+- Temporal anti-aliasing
+- DLSS / FSR / MetalFX support
+- HDR output with luminosity heatmap and CIE diagram visualizer
 
 ### Engine
 - Windows, Linux, and macOS support (D3D12, Vulkan, Metal 4)
@@ -39,34 +46,3 @@ Caramel uses [xmake](https://xmake.io):
 xmake        # build everything
 xmake run Caramel
 ```
-
-## Roadmap
-
-### Lighting & Shadows
-- IES profiles
-- Cascaded shadow maps, local shadow mapping
-
-### Global Illumination & Ray Tracing
-- ReSTIR DI
-- DDGI
-- SSRT reflections
-- RTAO
-- NRD integration
-- Reference pathtracer
-
-### Post Processing & Display
-- Temporal anti-aliasing
-- DLSS / FSR / MetalFX support
-- HDR output with luminosity heatmap and CIE diagram visualizer
-- Auto-exposure
-- Motion blur
-- Depth of field
-- Upsample/downsample bloom
-- Physically based camera
-
-### Misc
-- Simple animation playback with bounding volume updates for the culling pass
-- Moment-based OIT
-- Volumetric clouds
-
-See [Notes/TODO.md](Notes/TODO.md) for the full wishlist.

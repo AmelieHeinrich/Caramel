@@ -42,6 +42,9 @@ struct DeferredTargets
     uint32 normalHandle;
     uint32 metallicRoughnessHandle;
     uint32 emissiveHandle;
+    uint32 motionHandle;             // read by the ReSTIR path's temporal reuse; the scheme
+                                     // dispatches never touch it, so DeferredPushConstants has no
+                                     // matching field
     uint32 sceneLightingUAVHandle;   // writeable view -- what the scheme dispatches store into
 };
 

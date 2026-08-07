@@ -22,6 +22,12 @@
 #include "VisibilityBuffer.hlsli"
 #include "ClusteredLights.hlsli"
 
+// The gbuffer decode and the cluster light walk live here, parameterised on explicit handles. This
+// file only binds them to g_Constants -- ReSTIR.hlsli binds the same two to its own constants, which
+// is what keeps the two shading paths from drifting on either.
+#include "GBufferSurface.hlsli"
+#include "LightList.hlsli"
+
 // Mirrors SchemeRegistry::kMaxSchemes (Sources/Caramel/Renderer/MaterialScheme.hpp). Fixed rather
 // than dynamic because the classify shaders size groupshared arrays from it, and because it bounds
 // the indirect bundle's region count.
@@ -100,62 +106,29 @@ GPULight DeferredLoadLight(uint index) {
     return AGFXStructuredBuffer<GPULight>::Create(g_Constants.rLightBuffer).Load(index);
 }
 
-// Which lights one shaded pixel has to consider, resolved once per pixel.
-//
-// Clustered, this is the pixel's cluster's list plus the directional lights, which are unbounded and
-// therefore never binned. Unclustered (scene.clustered_lights off), it is simply every light in the
-// scene -- the ground truth the clustered path must match exactly. Both are walked identically by
-// the caller, which is the point: a scheme's kernel says which lights it walks, never how the set
-// was chosen, so a change here needs no edit in DefaultPBR or Toon.
-struct DeferredLightList {
-    uint uDirectionalCount;   // 0 when unclustered -- the brute-force walk already includes them
-    uint uLocalCount;
-    uint uClusterIndexBase;   // byte offset of the cluster's first index slot
-};
-
-uint DeferredLightListTotal(DeferredLightList list) {
-    return list.uDirectionalCount + list.uLocalCount;
+// Which lights one shaded pixel has to consider, resolved once per pixel. DeferredLightList and the
+// walk itself are in LightList.hlsli; these two bind it to this path's push constants, so a scheme's
+// kernel says which lights it walks and never how the set was chosen -- a change in LightList.hlsli
+// needs no edit in DefaultPBR or Toon.
+LightListHandles DeferredLightListHandles() {
+    LightListHandles h;
+    h.rFrameConstants = g_Constants.rFrameConstants;
+    h.rClusterLights = g_Constants.rClusterLights;
+    h.rLightCull = g_Constants.rLightCull;
+    h.fSliceScale = g_Constants.fClusterSliceScale;
+    h.fSliceBias = g_Constants.fClusterSliceBias;
+    h.uClusteringEnabled = g_Constants.uClusteringEnabled;
+    h.uLightCount = g_Constants.uLightCount;
+    return h;
 }
 
 DeferredLightList DeferredBeginLights(float3 vWorldPosition, uint2 pixel) {
-    DeferredLightList list;
-    list.uDirectionalCount = 0;
-    list.uLocalCount = g_Constants.uLightCount;
-    list.uClusterIndexBase = 0;
-
-    if (g_Constants.uClusteringEnabled == 0 || g_Constants.uLightCount == 0)
-        return list;
-
-    // The grid is sliced on view depth, which is the distance along the view axis -- not the distance
-    // to the camera, and not the depth buffer's value. View space looks down -Z (glm::lookAt is
-    // right-handed), so this is the negated view-space Z.
-    FrameConstants frame = AGFXStructuredBuffer<FrameConstants>::Create(g_Constants.rFrameConstants).Load(0);
-    float viewZ = -mul(frame.mView, float4(vWorldPosition, 1.0f)).z;
-
-    uint cluster = ClusterFromPixel(pixel, viewZ, g_Constants.uWidth, g_Constants.uHeight,
-                                    g_Constants.fClusterSliceScale, g_Constants.fClusterSliceBias);
-
-    AGFXByteAddressBuffer clusterLights = AGFXByteAddressBuffer::Create(g_Constants.rClusterLights);
-    AGFXByteAddressBuffer cull = AGFXByteAddressBuffer::Create(g_Constants.rLightCull);
-
-    // The frustum pass leaves its directional counter unclamped so the CPU can warn about it.
-    list.uDirectionalCount = min(cull.Load(kLightCullDirectionalCountBase), kMaxDirectionalLights);
-    list.uLocalCount = clusterLights.Load(kClusterCountBase + cluster * 4);
-    list.uClusterIndexBase = ClusterIndexSlotBase(cluster);
-    return list;
+    return LightListBegin(DeferredLightListHandles(), vWorldPosition, pixel,
+                          g_Constants.uWidth, g_Constants.uHeight);
 }
 
-// Index i of the list into the scene's light buffer. Directional lights come first so the caller can
-// walk one flat range.
 uint DeferredLightIndex(DeferredLightList list, uint i) {
-    if (g_Constants.uClusteringEnabled == 0)
-        return i;
-
-    if (i < list.uDirectionalCount)
-        return AGFXByteAddressBuffer::Create(g_Constants.rLightCull).Load(kLightCullDirectionalBase + i * 4);
-
-    uint local = i - list.uDirectionalCount;
-    return AGFXByteAddressBuffer::Create(g_Constants.rClusterLights).Load(list.uClusterIndexBase + local * 4);
+    return LightListIndex(DeferredLightListHandles(), list, i);
 }
 
 uint64_t DeferredBundleHandle() {
@@ -196,40 +169,17 @@ bool DeferredClassifyPixel(uint2 pixel, out uint outSchemeId, out uint outMateri
     return true;
 }
 
-// The gbuffer, decoded, plus the world position depth implies. What a shading kernel actually needs.
-struct DeferredSurface {
-    float3 vAlbedo;
-    float3 vNormal;
-    float3 vEmissive;
-    float  fMetallic;
-    float  fRoughness;
-    float3 vWorldPosition;
-    float3 vViewDirection;   // surface -> camera, normalized
-    uint   uMaterialSlot;
-};
-
+// DeferredSurface and the decode itself are in GBufferSurface.hlsli; this binds it to this path's
+// push constants.
 DeferredSurface DeferredLoadSurface(uint2 pixel, uint materialSlot) {
-    DeferredSurface surface = (DeferredSurface)0;
-    surface.uMaterialSlot = materialSlot;
-
-    int2 coord = int2(pixel);
-    surface.vAlbedo   = AGFXTexture2D<float4>::Create(g_Constants.rAlbedo).Load(coord).rgb;
-    surface.vNormal   = normalize(AGFXTexture2D<float4>::Create(g_Constants.rNormal).Load(coord).xyz);
-    surface.vEmissive = AGFXTexture2D<float4>::Create(g_Constants.rEmissive).Load(coord).rgb;
-
-    float2 metallicRoughness = AGFXTexture2D<float4>::Create(g_Constants.rMetallicRoughness).Load(coord).rg;
-    surface.fMetallic = metallicRoughness.x;
-    surface.fRoughness = metallicRoughness.y;
-
-    FrameConstants frame = AGFXStructuredBuffer<FrameConstants>::Create(g_Constants.rFrameConstants).Load(0);
-    float depth = AGFXTexture2D<float>::Create(g_Constants.rDepth).Load(coord);
-    float2 uv = (float2(pixel) + 0.5f) / float2(g_Constants.uWidth, g_Constants.uHeight);
-    float4 clip = float4(uv.x * 2.0f - 1.0f, 1.0f - uv.y * 2.0f, depth, 1.0f);
-    float4 world = mul(frame.mInvViewProjection, clip);
-    surface.vWorldPosition = world.xyz / world.w;
-    surface.vViewDirection = normalize(frame.vCameraPosition - surface.vWorldPosition);
-
-    return surface;
+    GBufferHandles h;
+    h.rFrameConstants = g_Constants.rFrameConstants;
+    h.rDepth = g_Constants.rDepth;
+    h.rAlbedo = g_Constants.rAlbedo;
+    h.rNormal = g_Constants.rNormal;
+    h.rMetallicRoughness = g_Constants.rMetallicRoughness;
+    h.rEmissive = g_Constants.rEmissive;
+    return GBufferLoadSurface(h, pixel, materialSlot, g_Constants.uWidth, g_Constants.uHeight);
 }
 
 // Resolves a shading thread's pixel out of its scheme's run in the pixel list. Returns false for the

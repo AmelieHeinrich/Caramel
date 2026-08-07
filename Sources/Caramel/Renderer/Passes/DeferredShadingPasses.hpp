@@ -23,6 +23,10 @@ public:
 
     const char* Name() const override { return "Deferred Shading"; }
 
+    /// @brief Off while the ReSTIR path owns the shading -- both write ctx.sceneLighting, so exactly
+    /// one of the two runs per frame. See scene.restir in ReSTIRPass.cpp.
+    bool Enabled(const FrameContext& ctx) const override;
+
     void Register(RenderGraph& graph, FrameContext& ctx) override;
 
 private:
