@@ -3,6 +3,7 @@
 An experimental research renderer powered by [AGFX](https://github.com/AmelieHeinrich/agfx), a modern D3D12 / Vulkan / Metal 4 RHI.
 
 ![Visibility buffer stress test — 10 billion triangles](.github/Visbuffer.png)
+![Clustered light culling stress test - 512 packed lights](.github/Clustered.png)
 
 ## Features
 
@@ -14,6 +15,7 @@ An experimental research renderer powered by [AGFX](https://github.com/AmelieHei
 - Cook-Torrance BRDF with Burley diffuse
 - Multiple material support with binning
 - Render graph with transient resource allocator
+- Clustered light culling
 
 ### Engine
 - Windows, Linux, and macOS support (D3D12, Vulkan, Metal 4)
@@ -25,9 +27,9 @@ An experimental research renderer powered by [AGFX](https://github.com/AmelieHei
 
 ## Debug Views
 
-| Meshlets | Primitives |
-| :---: | :---: |
-| ![Meshlet ID view](.github/VisbufferMeshlets.png) | ![Primitive ID view](.github/VisbufferPrimitives.png) |
+| Meshlets | Primitives | Cluster heatmap
+| :---: | :---: | :---: |
+| ![Meshlet ID view](.github/VisbufferMeshlets.png) | ![Primitive ID view](.github/VisbufferPrimitives.png) | ![Cluster Heatmap View](.github/ClusteredHeatmap.png) |
 
 ## Building
 
@@ -41,7 +43,6 @@ xmake run Caramel
 ## Roadmap
 
 ### Lighting & Shadows
-- Clustered light culling
 - IES profiles
 - Cascaded shadow maps, local shadow mapping
 
