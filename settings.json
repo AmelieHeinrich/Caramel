@@ -5,6 +5,7 @@
     "debug.show_rendergraph_panel": false,
     "render.build_acceleration_structures": true,
     "scene.build_hzb": true,
+    "scene.clustered_lights": true,
     "scene.enable_culling": true,
     "scene.freeze_frustum": false,
     "scene.gbuffer_debug": 0

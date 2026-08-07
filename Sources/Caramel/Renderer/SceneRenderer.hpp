@@ -52,19 +52,24 @@ public:
     /// @brief Fullscreen visibility-buffer resolve: reads the visibility + depth targets and writes
     /// the whole gbuffer. Attachment 0 is the scene lighting buffer, which this pass only clears (or
     /// fills with the scene.gbuffer_debug view) -- ShadeMaterials is what actually shades it.
-    void RenderGBufferResolve(agfx::RenderPass& renderPass, GPUScene& gpuScene, uint32 visibilityHandle, uint32 depthHandle, uint32 width, uint32 height, uint32 frameIndex);
+    void RenderGBufferResolve(agfx::RenderPass& renderPass, GPUScene& gpuScene, uint32 visibilityHandle, uint32 depthHandle, const ClusterResources* clusters, uint32 width, uint32 height, uint32 frameIndex);
 
     /// @brief Bins every covered pixel by its material's scheme id and builds one indirect dispatch
     /// command per scheme: count -> prefix sum -> scatter -> args (Notes/GPU-Driven.md). No-ops while
     /// a scene.gbuffer_debug view is selected, since ShadeMaterials would overwrite it.
-    void ClassifyMaterials(agfx::CommandBuffer& cmd, GPUScene& gpuScene, const DeferredTargets& targets, uint32 width, uint32 height, uint32 frameIndex);
+    void ClassifyMaterials(agfx::CommandBuffer& cmd, GPUScene& gpuScene, const DeferredTargets& targets, const ClusterResources* clusters, uint32 width, uint32 height, uint32 frameIndex);
 
     /// @brief Replays the classification's dispatch commands, one per scheme, each running that
     /// scheme's compute kernel over only the pixels it owns.
-    void ShadeMaterials(agfx::CommandBuffer& cmd, GPUScene& gpuScene, const DeferredTargets& targets, uint32 width, uint32 height, uint32 frameIndex);
+    void ShadeMaterials(agfx::CommandBuffer& cmd, GPUScene& gpuScene, const DeferredTargets& targets, const ClusterResources* clusters, uint32 width, uint32 height, uint32 frameIndex);
 
     /// @brief Fullscreen resolve of the HDR lighting buffer into scene color.
     void RenderComposite(agfx::RenderPass& renderPass, uint32 sceneLightingHandle, uint32 width, uint32 height);
+
+    /// @brief Bindless handle of this frame slot's FrameConstants buffer -- view/projection, frustum
+    /// planes, camera position, near/far. Every pass needs it and SceneRenderer is what fills it, so
+    /// it is exposed here and republished on FrameContext rather than each pass re-deriving it.
+    uint32 GetFrameConstantsHandle(uint32 frameIndex) const { return (uint32)m_CameraBufferViews[frameIndex].GetHandle(); }
 
     /// @brief True while a scene.gbuffer_debug view is selected, i.e. classification and shading are
     /// skipped and GBuffer Resolve's own output is what reaches the screen.
@@ -84,6 +89,7 @@ private:
 
     /// @brief Everything the classify and shade kernels share, minus the per-scheme fields.
     DeferredPushConstants BuildDeferredPushConstants(GPUScene& gpuScene, const DeferredTargets& targets,
+                                                     const ClusterResources* clusters,
                                                      uint32 width, uint32 height, uint32 frameIndex) const;
 
     /// @brief Execute info for one scheme's region of the deferred bundle. Shared between

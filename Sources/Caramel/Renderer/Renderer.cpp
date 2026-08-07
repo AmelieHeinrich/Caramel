@@ -14,6 +14,7 @@
 #include <Caramel/Renderer/ImGuiRenderer.hpp>
 #include <Caramel/Renderer/SceneRenderer.hpp>
 #include <Caramel/Renderer/Passes/VisibilityPasses.hpp>
+#include <Caramel/Renderer/Passes/ClusteredLightPass.hpp>
 #include <Caramel/Renderer/Passes/GBufferResolvePass.hpp>
 #include <Caramel/Renderer/Passes/DeferredShadingPasses.hpp>
 #include <Caramel/Renderer/Passes/CompositePass.hpp>
@@ -101,6 +102,12 @@ Renderer::Renderer(SDL_Window* window, bool vsync)
 void Renderer::BuildPassList()
 {
     m_Passes.PushBack(MakeUnique<VisibilityPasses>(*m_SceneRenderer));
+
+    // Before GBuffer Resolve because its heatmap debug view reads the grid, and before Material
+    // Classify because on Metal that bakes the shading push constants -- which carry this grid's
+    // handles -- into the ICB at prepare time. It reads no frame target, so nothing else pins it here.
+    m_Passes.PushBack(MakeUnique<ClusteredLightPass>(m_Device));
+
     m_Passes.PushBack(MakeUnique<GBufferResolvePass>(*m_SceneRenderer));
     m_Passes.PushBack(MakeUnique<DeferredShadingPasses>(*m_SceneRenderer));
     m_Passes.PushBack(MakeUnique<CompositePass>(*m_SceneRenderer));
@@ -391,6 +398,7 @@ void Renderer::Render(const Camera& camera, StreamingManager& streamingManager, 
     m_FrameContext.windowWidth = (uint32)width;
     m_FrameContext.windowHeight = (uint32)height;
     m_FrameContext.frameIndex = (uint32)m_FrameSlot;
+    m_FrameContext.frameConstantsHandle = m_SceneRenderer->GetFrameConstantsHandle((uint32)m_FrameSlot);
     m_FrameContext.hzbResources = &m_HZB;
     m_FrameContext.sceneColor = sceneColorHandle;
     m_FrameContext.depth = depthHandle;

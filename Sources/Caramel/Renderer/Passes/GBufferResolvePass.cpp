@@ -35,6 +35,7 @@ void GBufferResolvePass::Register(RenderGraph& graph, FrameContext& ctx)
         [this, &ctx](agfx::RenderPass& pass, RGResolveContext& rc) {
             uint32 visibilityHandle = (uint32)rc.ResolveBindlessTexture(ctx.visibility);
             m_SceneRenderer->RenderGBufferResolve(pass, *ctx.gpuScene, visibilityHandle,
-                                                  ctx.hzbResources->depthHandle, ctx.width, ctx.height, ctx.frameIndex);
+                                                  ctx.hzbResources->depthHandle, ctx.clusters,
+                                                  ctx.width, ctx.height, ctx.frameIndex);
         });
 }

@@ -45,6 +45,30 @@ struct DeferredTargets
     uint32 sceneLightingUAVHandle;   // writeable view -- what the scheme dispatches store into
 };
 
+// What the clustered light grid looks like to everything downstream of the culling passes. Owned by
+// ClusteredLightPass -- same ownership split as HZBResources, for the same reason: the grid buffers
+// outlive any one frame's render graph, and the graph cannot hand out a bindless *buffer* handle at
+// all (RGResolveContext resolves textures only). Grid dimensions are not in here: they are compile-
+// time constants in Content/Shaders/Common/ClusteredLights.hlsli, mirrored by kCluster* below.
+struct ClusterResources
+{
+    uint32 clusterLightsHandle;  // raw view: per-cluster counts, then per-cluster index lists
+    uint32 lightCullHandle;      // raw view: counters + the directional light index list
+    float32 sliceScale;          // view depth -> cluster slice, as slice = log2(z) * scale + bias
+    float32 sliceBias;
+    uint32 enabled;              // 0 while scene.clustered_lights is off -- shading falls back to
+                                 // walking every light, which is the ground truth to diff against
+};
+
+// Mirror Content/Shaders/Common/ClusteredLights.hlsli. The CPU side only needs these to size the
+// buffers and to report overflow; everything else about the grid lives in the shader header.
+constexpr uint32 kClusterGridX = 16;
+constexpr uint32 kClusterGridY = 9;
+constexpr uint32 kClusterGridZ = 24;
+constexpr uint32 kClusterCount = kClusterGridX * kClusterGridY * kClusterGridZ;
+constexpr uint32 kMaxLightsPerCluster = 128;
+constexpr uint32 kMaxDirectionalLights = 8;
+
 struct HZBResources
 {
     uint32 depthHandle;              // read-only SRV over the depth buffer, source of the pyramid

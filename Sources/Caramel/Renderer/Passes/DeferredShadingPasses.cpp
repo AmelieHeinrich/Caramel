@@ -38,7 +38,7 @@ void DeferredShadingPasses::Register(RenderGraph& graph, FrameContext& ctx)
             builder.AlwaysExecute();
         },
         [this, &ctx](agfx::CommandBuffer& cmd, RGResolveContext& rc) {
-            m_SceneRenderer->ClassifyMaterials(cmd, *ctx.gpuScene, ResolveTargets(rc, ctx),
+            m_SceneRenderer->ClassifyMaterials(cmd, *ctx.gpuScene, ResolveTargets(rc, ctx), ctx.clusters,
                                                ctx.width, ctx.height, ctx.frameIndex);
         });
 
@@ -51,7 +51,7 @@ void DeferredShadingPasses::Register(RenderGraph& graph, FrameContext& ctx)
             builder.WriteTexture(ctx.sceneLighting, agfx::ResourceState::UnorderedAccess);
         },
         [this, &ctx](agfx::CommandBuffer& cmd, RGResolveContext& rc) {
-            m_SceneRenderer->ShadeMaterials(cmd, *ctx.gpuScene, ResolveTargets(rc, ctx),
+            m_SceneRenderer->ShadeMaterials(cmd, *ctx.gpuScene, ResolveTargets(rc, ctx), ctx.clusters,
                                             ctx.width, ctx.height, ctx.frameIndex);
         });
 }

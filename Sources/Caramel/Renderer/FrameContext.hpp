@@ -48,6 +48,11 @@ struct FrameContext
     // Frame-in-flight slot, not a monotonic frame counter -- indexes every per-slot resource.
     uint32 frameIndex = 0;
 
+    // Bindless handle of this slot's FrameConstants buffer (view/projection, frustum planes, camera
+    // position, near/far). Owned and filled by SceneRenderer; republished here because essentially
+    // every pass wants it and nothing else about SceneRenderer is a pass's business.
+    uint32 frameConstantsHandle = 0;
+
     RGTextureHandle depth;
     RGTextureHandle sceneColor;
     RGTextureHandle sceneLighting;
@@ -59,6 +64,12 @@ struct FrameContext
     // Persistent per-mip HZB views, which have no render-graph equivalent (a graph handle resolves to
     // whole-texture mip-0 views only). Owned by Renderer.
     const HZBResources* hzbResources = nullptr;
+
+    // The clustered light grid, owned by ClusteredLightPass and pointed at here by Renderer. A
+    // typed pointer rather than the blackboard because the blackboard only carries texture handles,
+    // and because a consumer needs the slice constants alongside them. Null only before the pass has
+    // run its first BeginFrame -- consumers still guard, and fall back to the brute-force light loop.
+    const ClusterResources* clusters = nullptr;
 
     void Set(const String& name, RGTextureHandle handle) { m_Blackboard[name] = handle; }
 

@@ -32,14 +32,18 @@ void DefaultPBRCS(uint3 dispatchThreadID : SV_DispatchThreadID)
     DeferredSurface surface = DeferredLoadSurface(pixel, materialSlot);
     DefaultPBRParams params = DEFERRED_LOAD_SCHEME_PARAMS(DefaultPBRParams, materialSlot);
 
-    // Every light, every pixel. Naive on purpose -- clustered light culling (Notes/TODO.md) is what
-    // makes this scale, and it slots in by narrowing which indices this loop walks, not by changing
-    // what happens inside it. The type branch lives in LightEvaluate rather than in a shader variant.
+    // Only the lights that can reach this pixel: the directional ones, which reach everything, plus
+    // whatever the pixel's cluster holds (ClusteredLightPass). DeferredBeginLights is the only thing
+    // that knows about the grid -- with scene.clustered_lights off it hands back every light in the
+    // scene and this loop is the naive one it replaced, which is exactly how the two get compared.
+    // The type branch lives in LightEvaluate rather than in a shader variant.
+    DeferredLightList lights = DeferredBeginLights(surface.vWorldPosition, pixel);
+
     float3 direct = 0.0f;
-    for (uint i = 0; i < g_Constants.uLightCount; ++i) {
+    for (uint i = 0; i < DeferredLightListTotal(lights); ++i) {
         float3 lightDir;
         float3 radiance;
-        if (!LightEvaluate(DeferredLoadLight(i), surface.vWorldPosition, lightDir, radiance))
+        if (!LightEvaluate(DeferredLoadLight(DeferredLightIndex(lights, i)), surface.vWorldPosition, lightDir, radiance))
             continue;
 
         direct += CookTorrance(surface.vNormal, surface.vViewDirection, lightDir,

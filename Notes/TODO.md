@@ -1,5 +1,4 @@
 Base lighting pass
-- Clustered light culling
 - IES profiles
 
 Animation

@@ -15,6 +15,7 @@
 #include "Common/GPUScene.hlsli"
 #include "Common/SceneGeometry.hlsli"
 #include "Common/VisibilityBuffer.hlsli"
+#include "Common/ClusteredLights.hlsli"
 
 #pragma vertex GBufferResolveVS
 #pragma pixel GBufferResolvePS
@@ -32,6 +33,11 @@ struct GBufferResolvePushConstants {
     uint uDebugMode; // scene.gbuffer_debug (see Core/CVar.hpp)
     uint uWidth;
     uint uHeight;
+    // Only kGBufferDebugClusterLights reads these. 0 before ClusteredLightPass' first BeginFrame,
+    // which that mode guards on.
+    ResourceHandle rClusterLights;
+    float fClusterSliceScale;
+    float fClusterSliceBias;
 };
 AGFX_PUSH_CONSTANTS(GBufferResolvePushConstants, g_Constants);
 
@@ -48,6 +54,7 @@ static const uint kGBufferDebugMeshletId = 6;
 static const uint kGBufferDebugTriangleId = 7;
 static const uint kGBufferDebugInstanceId = 8;
 static const uint kGBufferDebugLod = 9;
+static const uint kGBufferDebugClusterLights = 10;
 
 struct ResolveVSOut {
     float4 vPosition : SV_POSITION;
@@ -86,8 +93,24 @@ float3 IdToColor(uint id) {
         (float)((h >> 16) & 0xFFu) / 255.0f);
 }
 
-float3 DebugView(uint mode, GBufferOut gbuffer, uint instanceIndex, uint meshletIndex, uint triangleIndex, uint lod) {
+// How many lights the pixel's cluster ended up holding, as a heat ramp. Black is an empty cluster,
+// green through yellow to red fills the fixed kMaxLightsPerCluster budget, and magenta means the
+// cluster wanted more than it could hold and the excess was dropped -- the one case that is a real
+// artefact rather than just a cost, so it gets a colour nothing else uses.
+float3 ClusterHeat(uint count) {
+    if (count == 0)
+        return float3(0.0f, 0.0f, 0.0f);
+    if (count >= kMaxLightsPerCluster)
+        return float3(1.0f, 0.0f, 1.0f);
+
+    float t = saturate((float)count / (float)kMaxLightsPerCluster);
+    float3 coolToWarm = lerp(float3(0.1f, 0.9f, 0.3f), float3(1.0f, 0.9f, 0.1f), saturate(t * 2.0f));
+    return lerp(coolToWarm, float3(1.0f, 0.1f, 0.1f), saturate(t * 2.0f - 1.0f));
+}
+
+float3 DebugView(uint mode, GBufferOut gbuffer, uint instanceIndex, uint meshletIndex, uint triangleIndex, uint lod, uint clusterLightCount) {
     switch (mode) {
+        case kGBufferDebugClusterLights: return ClusterHeat(clusterLightCount);
         case kGBufferDebugNone: return float3(0.0f, 0.0f, 0.0f);
         case kGBufferDebugNormal: return gbuffer.vNormal.xyz * 0.5f + 0.5f;
         case kGBufferDebugMetallicRoughness: return float3(gbuffer.vMetallicRoughness, 0.0f);
@@ -216,6 +239,21 @@ GBufferOut GBufferResolvePS(ResolveVSOut input) {
     o.vMetallicRoughness = float2(metallic, roughness);
     o.vEmissive = float4(emissive, 0.0f);
     o.vMotion = currUV - prevUV;
-    o.vSceneLighting = float4(DebugView(g_Constants.uDebugMode, o, instanceIndex, meshletIndex, triangleIndex, lod), 1.0f);
+
+    // Only the heatmap mode needs this, and it is two dependent loads, so it stays behind the branch.
+    uint clusterLightCount = 0;
+    if (g_Constants.uDebugMode == kGBufferDebugClusterLights && g_Constants.rClusterLights != 0) {
+        // View depth straight out of the depth buffer -- the same quantity ClusterSliceFromViewZ is
+        // keyed on, and it needs no world position. mInvProjection maps clip to view space, where
+        // the camera looks down -Z, hence the negation.
+        float4 viewPosition = mul(frame.mInvProjection, float4(pixelNdc, tDepth.Load(pixel), 1.0f));
+        float viewZ = -viewPosition.z / viewPosition.w;
+
+        uint cluster = ClusterFromPixel(uint2(pixel), viewZ, g_Constants.uWidth, g_Constants.uHeight,
+                                        g_Constants.fClusterSliceScale, g_Constants.fClusterSliceBias);
+        clusterLightCount = AGFXByteAddressBuffer::Create(g_Constants.rClusterLights).Load(kClusterCountBase + cluster * 4);
+    }
+
+    o.vSceneLighting = float4(DebugView(g_Constants.uDebugMode, o, instanceIndex, meshletIndex, triangleIndex, lod, clusterLightCount), 1.0f);
     return o;
 }

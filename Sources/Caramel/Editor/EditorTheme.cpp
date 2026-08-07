@@ -60,7 +60,7 @@ namespace
         style.FontSizeBase = kBaseFontSize;
 #if defined(CARAMEL_MACOS)
         // macOS renders type noticeably larger at the same nominal size.
-        style.FontScaleMain = 0.75f;
+        style.FontScaleMain = 0.5f;
 #endif
 
         // --- 4. Section separators ---

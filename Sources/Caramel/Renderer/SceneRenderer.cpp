@@ -37,8 +37,8 @@ namespace
     // Which gbuffer channel or ID hash GBufferResolve.hlsl writes into the scene lighting buffer.
     // Anything other than 0 suppresses material classification and shading entirely -- both write the
     // same target, so leaving them on would just overwrite the view being inspected.
-    CVar cv_GBufferDebug("scene.gbuffer_debug", 0, 0, 9, "GBuffer Debug", "Scene Renderer",
-        "0 = none (deferred shading), 1 = albedo, 2 = normal, 3 = metallic/roughness, 4 = emissive, 5 = motion, 6 = meshlet ID, 7 = triangle ID, 8 = instance ID, 9 = LOD");
+    CVar cv_GBufferDebug("scene.gbuffer_debug", 0, 0, 10, "GBuffer Debug", "Scene Renderer",
+        "0 = none (deferred shading), 1 = albedo, 2 = normal, 3 = metallic/roughness, 4 = emissive, 5 = motion, 6 = meshlet ID, 7 = triangle ID, 8 = instance ID, 9 = LOD, 10 = lights per cluster (magenta = cluster overflow)");
 
     // Off: the depth pyramid stops being rebuilt and freezes at whatever it last held, together with
     // the viewProjection occlusion tests project bounds with (hzbViewProjection). Every occlusion
@@ -232,6 +232,12 @@ struct DeferredPushConstants
     uint32 uBundleHandleHi;
     uint32 rLightBuffer;
     uint32 uLightCount;
+    // The clustered light grid, from ClusteredLightPass. See Common/ClusteredLights.hlsli.
+    uint32 rClusterLights;
+    uint32 rLightCull;
+    float32 fClusterSliceScale;
+    float32 fClusterSliceBias;
+    uint32 uClusteringEnabled;
 };
 static_assert(sizeof(DeferredPushConstants) <= 128, "Push constants are capped at 128 bytes by the root signature");
 
@@ -256,6 +262,9 @@ struct GBufferResolvePushConstants
     uint32 uDebugMode;
     uint32 uWidth;
     uint32 uHeight;
+    uint32 rClusterLights;
+    float32 fClusterSliceScale;
+    float32 fClusterSliceBias;
 };
 
 SceneRenderer::SceneRenderer(agfx::Device& device, const SchemeRegistry& schemes, agfx::TextureFormat colorFormat,
@@ -821,7 +830,7 @@ void SceneRenderer::RenderLate(agfx::RenderPass& renderPass, GPUScene& gpuScene,
     }
 }
 
-void SceneRenderer::RenderGBufferResolve(agfx::RenderPass& renderPass, GPUScene& gpuScene, uint32 visibilityHandle, uint32 depthHandle, uint32 width, uint32 height, uint32 frameIndex)
+void SceneRenderer::RenderGBufferResolve(agfx::RenderPass& renderPass, GPUScene& gpuScene, uint32 visibilityHandle, uint32 depthHandle, const ClusterResources* clusters, uint32 width, uint32 height, uint32 frameIndex)
 {
     // No instances means GPUScene never created this slot's stream views, and depth stays cleared
     // so every pixel background-rejects anyway -- the pass still runs for its attachment clears.
@@ -845,6 +854,14 @@ void SceneRenderer::RenderGBufferResolve(agfx::RenderPass& renderPass, GPUScene&
     pc.uWidth = width;
     pc.uHeight = height;
 
+    // Only the cluster heatmap mode reads these, and it guards on the handle being non-zero.
+    if (clusters)
+    {
+        pc.rClusterLights = clusters->clusterLightsHandle;
+        pc.fClusterSliceScale = clusters->sliceScale;
+        pc.fClusterSliceBias = clusters->sliceBias;
+    }
+
     renderPass.SetViewport(0.0f, 0.0f, (float)width, (float)height);
     renderPass.SetScissor(0, 0, width, height);
     renderPass.SetPipeline(*pipeline);
@@ -858,6 +875,7 @@ bool SceneRenderer::IsGBufferDebugActive()
 }
 
 DeferredPushConstants SceneRenderer::BuildDeferredPushConstants(GPUScene& gpuScene, const DeferredTargets& targets,
+                                                                const ClusterResources* clusters,
                                                                 uint32 width, uint32 height, uint32 frameIndex) const
 {
     DeferredPushConstants pc{};
@@ -884,6 +902,18 @@ DeferredPushConstants SceneRenderer::BuildDeferredPushConstants(GPUScene& gpuSce
     agfx::BufferView& lightView = gpuScene.GetLightBufferView(frameIndex);
     pc.rLightBuffer = lightView ? (uint32)lightView.GetHandle() : 0u;
     pc.uLightCount = gpuScene.GetLightCount();
+
+    // Null before ClusteredLightPass has run its first BeginFrame. uClusteringEnabled staying 0 is
+    // what makes that safe -- the kernels then walk every light, exactly as they did before the grid
+    // existed, rather than reading a handle that describes nothing.
+    if (clusters)
+    {
+        pc.rClusterLights = clusters->clusterLightsHandle;
+        pc.rLightCull = clusters->lightCullHandle;
+        pc.fClusterSliceScale = clusters->sliceScale;
+        pc.fClusterSliceBias = clusters->sliceBias;
+        pc.uClusteringEnabled = clusters->enabled;
+    }
 
     uint64 bundleHandle = m_DeferredBundles[frameIndex].GetHandle();
     pc.uBundleHandleLo = (uint32)(bundleHandle & 0xFFFFFFFFull);
@@ -917,7 +947,7 @@ agfx::IndirectBundleExecuteInfo SceneRenderer::BuildSchemeExecuteInfo(const Defe
 }
 
 void SceneRenderer::ClassifyMaterials(agfx::CommandBuffer& cmd, GPUScene& gpuScene, const DeferredTargets& targets,
-                                      uint32 width, uint32 height, uint32 frameIndex)
+                                      const ClusterResources* clusters, uint32 width, uint32 height, uint32 frameIndex)
 {
     // A debug view already owns the lighting target, and shading would only overwrite it.
     if (IsGBufferDebugActive() || gpuScene.GetInstanceCount() == 0)
@@ -939,7 +969,7 @@ void SceneRenderer::ClassifyMaterials(agfx::CommandBuffer& cmd, GPUScene& gpuSce
     EnsureClassifyCapacity(width, height);
 
     agfx::IndirectBundle& bundle = m_DeferredBundles[frameIndex];
-    DeferredPushConstants pc = BuildDeferredPushConstants(gpuScene, targets, width, height, frameIndex);
+    DeferredPushConstants pc = BuildDeferredPushConstants(gpuScene, targets, clusters, width, height, frameIndex);
 
     // Null while the shader watcher recompiles. As in RecordCullPass, that must not skip the count
     // reset or the barriers -- the shade pass replays this bundle regardless, and D3D12 rejects
@@ -1022,12 +1052,12 @@ void SceneRenderer::ClassifyMaterials(agfx::CommandBuffer& cmd, GPUScene& gpuSce
 }
 
 void SceneRenderer::ShadeMaterials(agfx::CommandBuffer& cmd, GPUScene& gpuScene, const DeferredTargets& targets,
-                                   uint32 width, uint32 height, uint32 frameIndex)
+                                   const ClusterResources* clusters, uint32 width, uint32 height, uint32 frameIndex)
 {
     if (IsGBufferDebugActive() || gpuScene.GetInstanceCount() == 0 || m_ClassifyPixelCapacity == 0)
         return;
 
-    DeferredPushConstants pc = BuildDeferredPushConstants(gpuScene, targets, width, height, frameIndex);
+    DeferredPushConstants pc = BuildDeferredPushConstants(gpuScene, targets, clusters, width, height, frameIndex);
 
     agfx::ComputePass computePass = cmd.BeginComputePass("Material Shade");
 

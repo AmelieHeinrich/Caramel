@@ -37,11 +37,13 @@ void ToonCS(uint3 dispatchThreadID : SV_DispatchThreadID)
 
     // Banding needs one scalar, not a BRDF, so the same light list collapses into a weighted lambert
     // term. Radiance is folded down by luminance -- a cel ramp has no per-channel meaning.
+    DeferredLightList lights = DeferredBeginLights(surface.vWorldPosition, pixel);
+
     float NdotL = 0.0f;
-    for (uint i = 0; i < g_Constants.uLightCount; ++i) {
+    for (uint i = 0; i < DeferredLightListTotal(lights); ++i) {
         float3 lightDir;
         float3 radiance;
-        if (!LightEvaluate(DeferredLoadLight(i), surface.vWorldPosition, lightDir, radiance))
+        if (!LightEvaluate(DeferredLoadLight(DeferredLightIndex(lights, i)), surface.vWorldPosition, lightDir, radiance))
             continue;
 
         NdotL += saturate(dot(surface.vNormal, lightDir)) * dot(radiance, float3(0.2126f, 0.7152f, 0.0722f));

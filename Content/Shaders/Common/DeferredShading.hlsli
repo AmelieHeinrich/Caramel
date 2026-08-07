@@ -20,6 +20,7 @@
 #include "GPUScene.hlsli"
 #include "SceneGeometry.hlsli"
 #include "VisibilityBuffer.hlsli"
+#include "ClusteredLights.hlsli"
 
 // Mirrors SchemeRegistry::kMaxSchemes (Sources/Caramel/Renderer/MaterialScheme.hpp). Fixed rather
 // than dynamic because the classify shaders size groupshared arrays from it, and because it bounds
@@ -55,8 +56,8 @@ uint2 DeferredUnpackPixel(uint packed) { return uint2(packed & 0xFFFFu, packed >
 // Everything the classify passes and the shading kernels agree on. Deliberately all scalars: push
 // constants pack by cbuffer rules, where a uint2 may not straddle a 16-byte boundary, so inserting a
 // field ahead of one silently shifts every field after it (see the same warning in SceneMesh.hlsli).
-// Mirrors DeferredPushConstants in Sources/Caramel/Renderer/SceneRenderer.cpp. 84 bytes, well under
-// the 128-byte root-signature ceiling.
+// Mirrors DeferredPushConstants in Sources/Caramel/Renderer/SceneRenderer.cpp. 104 bytes, under the
+// 128-byte root-signature ceiling.
 struct DeferredPushConstants {
     ResourceHandle rFrameConstants;
     ResourceHandle rInstanceBuffer;
@@ -83,6 +84,12 @@ struct DeferredPushConstants {
     uint uBundleHandleHi;
     ResourceHandle rLightBuffer;       // stale or null when uLightCount is 0 -- never read unguarded
     uint uLightCount;
+    // The clustered light grid ClusteredLightPass fills. See ClusteredLights.hlsli for the layouts.
+    ResourceHandle rClusterLights;     // per-cluster counts, then per-cluster index lists
+    ResourceHandle rLightCull;         // counters + the directional index list
+    float fClusterSliceScale;
+    float fClusterSliceBias;
+    uint uClusteringEnabled;           // 0 while scene.clustered_lights is off -- see DeferredBeginLights
 };
 AGFX_PUSH_CONSTANTS(DeferredPushConstants, g_Constants);
 
@@ -91,6 +98,64 @@ AGFX_PUSH_CONSTANTS(DeferredPushConstants, g_Constants);
 // described. Loop to uLightCount and the body is simply unreachable.
 GPULight DeferredLoadLight(uint index) {
     return AGFXStructuredBuffer<GPULight>::Create(g_Constants.rLightBuffer).Load(index);
+}
+
+// Which lights one shaded pixel has to consider, resolved once per pixel.
+//
+// Clustered, this is the pixel's cluster's list plus the directional lights, which are unbounded and
+// therefore never binned. Unclustered (scene.clustered_lights off), it is simply every light in the
+// scene -- the ground truth the clustered path must match exactly. Both are walked identically by
+// the caller, which is the point: a scheme's kernel says which lights it walks, never how the set
+// was chosen, so a change here needs no edit in DefaultPBR or Toon.
+struct DeferredLightList {
+    uint uDirectionalCount;   // 0 when unclustered -- the brute-force walk already includes them
+    uint uLocalCount;
+    uint uClusterIndexBase;   // byte offset of the cluster's first index slot
+};
+
+uint DeferredLightListTotal(DeferredLightList list) {
+    return list.uDirectionalCount + list.uLocalCount;
+}
+
+DeferredLightList DeferredBeginLights(float3 vWorldPosition, uint2 pixel) {
+    DeferredLightList list;
+    list.uDirectionalCount = 0;
+    list.uLocalCount = g_Constants.uLightCount;
+    list.uClusterIndexBase = 0;
+
+    if (g_Constants.uClusteringEnabled == 0 || g_Constants.uLightCount == 0)
+        return list;
+
+    // The grid is sliced on view depth, which is the distance along the view axis -- not the distance
+    // to the camera, and not the depth buffer's value. View space looks down -Z (glm::lookAt is
+    // right-handed), so this is the negated view-space Z.
+    FrameConstants frame = AGFXStructuredBuffer<FrameConstants>::Create(g_Constants.rFrameConstants).Load(0);
+    float viewZ = -mul(frame.mView, float4(vWorldPosition, 1.0f)).z;
+
+    uint cluster = ClusterFromPixel(pixel, viewZ, g_Constants.uWidth, g_Constants.uHeight,
+                                    g_Constants.fClusterSliceScale, g_Constants.fClusterSliceBias);
+
+    AGFXByteAddressBuffer clusterLights = AGFXByteAddressBuffer::Create(g_Constants.rClusterLights);
+    AGFXByteAddressBuffer cull = AGFXByteAddressBuffer::Create(g_Constants.rLightCull);
+
+    // The frustum pass leaves its directional counter unclamped so the CPU can warn about it.
+    list.uDirectionalCount = min(cull.Load(kLightCullDirectionalCountBase), kMaxDirectionalLights);
+    list.uLocalCount = clusterLights.Load(kClusterCountBase + cluster * 4);
+    list.uClusterIndexBase = ClusterIndexSlotBase(cluster);
+    return list;
+}
+
+// Index i of the list into the scene's light buffer. Directional lights come first so the caller can
+// walk one flat range.
+uint DeferredLightIndex(DeferredLightList list, uint i) {
+    if (g_Constants.uClusteringEnabled == 0)
+        return i;
+
+    if (i < list.uDirectionalCount)
+        return AGFXByteAddressBuffer::Create(g_Constants.rLightCull).Load(kLightCullDirectionalBase + i * 4);
+
+    uint local = i - list.uDirectionalCount;
+    return AGFXByteAddressBuffer::Create(g_Constants.rClusterLights).Load(list.uClusterIndexBase + local * 4);
 }
 
 uint64_t DeferredBundleHandle() {
