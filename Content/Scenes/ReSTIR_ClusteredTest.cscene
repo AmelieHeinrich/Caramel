@@ -3,7 +3,7 @@
         "children": [
             {
                 "children": [],
-                "cmdl": "Content/Cache\\IntelSponza/IntelSponza.cmdl",
+                "cmdl": "Content/Cache/IntelSponza/IntelSponza.cmdl",
                 "instances": [
                     {
                         "name": "Instance 0",
