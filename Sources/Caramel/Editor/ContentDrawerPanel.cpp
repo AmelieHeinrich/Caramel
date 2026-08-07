@@ -53,7 +53,7 @@ void ContentDrawerPanel::Draw()
     ImGui::SetNextWindowPos(ImVec2(viewport->Pos.x, viewport->Pos.y + viewport->Size.y - kBarHeight - drawerHeight));
     ImGui::SetNextWindowSize(ImVec2(viewport->Size.x, drawerHeight));
     ImGui::Begin("##ContentDrawer", nullptr, barFlags & ~ImGuiWindowFlags_NoScrollbar);
-    ImGui::TextDisabled("Drag a mesh file onto the viewport to add it to the scene");
+    ImGui::TextDisabled("Drag a mesh onto the viewport to add it to the scene, or a .cscene to open it");
     ImGui::Separator();
     DrawContentDirectory("Content");
     ImGui::End();
@@ -83,17 +83,23 @@ void ContentDrawerPanel::DrawContentDirectory(const String& directory)
 
         ImGui::PushID(label.CStr());
 
-        char entryLabel[300];
-        std::snprintf(entryLabel, sizeof(entryLabel), "%s %s", entry.is_directory() ? ICON_FA_FOLDER : ICON_FA_CUBE, label.CStr());
-
         if (entry.is_directory()) {
+            char entryLabel[300];
+            std::snprintf(entryLabel, sizeof(entryLabel), "%s %s", ICON_FA_FOLDER, label.CStr());
+
             if (ImGui::TreeNodeEx(entryLabel, ImGuiTreeNodeFlags_SpanAvailWidth)) {
                 DrawContentDirectory(String(p.string()));
                 ImGui::TreePop();
             }
         } else {
             std::string ext = p.extension().string();
-            if (ext == ".gltf" || ext == ".glb" || ext == ".cmdl") {
+            bool isMesh = ext == ".gltf" || ext == ".glb" || ext == ".cmdl";
+            bool isScene = ext == ".cscene";
+
+            if (isMesh || isScene) {
+                char entryLabel[300];
+                std::snprintf(entryLabel, sizeof(entryLabel), "%s %s", isScene ? ICON_FA_MAP : ICON_FA_CUBE, label.CStr());
+
                 ImGui::TreeNodeEx(entryLabel, ImGuiTreeNodeFlags_Leaf | ImGuiTreeNodeFlags_NoTreePushOnOpen
                                              | ImGuiTreeNodeFlags_Bullet | ImGuiTreeNodeFlags_SpanAvailWidth);
                 if (ImGui::BeginDragDropSource()) {

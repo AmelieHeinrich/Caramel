@@ -163,6 +163,7 @@ void Application::Run()
             }
         }
 
+        ProcessPendingSceneLoad();
         ProcessPendingFileDialogResult();
 
         m_Timer.Tick();
@@ -512,6 +513,12 @@ void Application::HandleDroppedFile(const String& path)
     fs::path droppedPath(path.CStr());
     String cmdlPath;
 
+    if (droppedPath.extension() == ".cscene") {
+        m_PendingSceneLoadPath = path;
+        m_HasPendingSceneLoad = true;
+        return;
+    }
+
     if (droppedPath.extension() == ".cmdl") {
         cmdlPath = path;
     } else {
@@ -547,6 +554,29 @@ void Application::HandleDroppedFile(const String& path)
     String name = String(fs::path(cmdlPath.CStr()).stem().string());
     SceneNode* entity = m_Scene.CreateModelEntity(nullptr, name, cmdlPath, *m_StreamingManager);
     m_Scene.AddInstance(entity, Instance{});
+}
+
+void Application::LoadSceneFromFile(const String& path)
+{
+    if (!m_Scene.LoadFromFile(path, *m_StreamingManager)) {
+        CARAMEL_ERROR("Failed to load scene from '{}'", path.CStr());
+        return;
+    }
+
+    // The nodes these pointed at are gone.
+    m_EditorContext.SelectedEntity = nullptr;
+    m_EditorContext.SelectedInstance = 0;
+    m_EditorContext.SelectedMesh = nullptr;
+    m_ScriptSystem->RebuildFromScene();
+}
+
+void Application::ProcessPendingSceneLoad()
+{
+    if (!m_HasPendingSceneLoad)
+        return;
+    m_HasPendingSceneLoad = false;
+
+    LoadSceneFromFile(m_PendingSceneLoadPath);
 }
 
 void Application::StorePendingDialogResult(const char* const* filelist, bool isSave)
@@ -589,12 +619,6 @@ void Application::ProcessPendingFileDialogResult()
         if (!m_Scene.SaveToFile(path))
             CARAMEL_ERROR("Failed to save scene to '{}'", path.CStr());
     } else {
-        if (!m_Scene.LoadFromFile(path, *m_StreamingManager)) {
-            CARAMEL_ERROR("Failed to load scene from '{}'", path.CStr());
-        } else {
-            m_EditorContext.SelectedEntity = nullptr;
-            m_EditorContext.SelectedMesh = nullptr;
-            m_ScriptSystem->RebuildFromScene();
-        }
+        LoadSceneFromFile(path);
     }
 }

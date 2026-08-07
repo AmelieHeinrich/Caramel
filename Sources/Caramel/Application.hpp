@@ -66,6 +66,9 @@ private:
 
     void HandleDroppedFile(const String& path);
 
+    void LoadSceneFromFile(const String& path);
+
+    void ProcessPendingSceneLoad();
     void ProcessPendingFileDialogResult();
     void StorePendingDialogResult(const char* const* filelist, bool isSave);
 
@@ -109,4 +112,9 @@ private:
     String m_PendingDialogPath;
     bool m_PendingDialogIsSave = false;
     bool m_HasPendingDialogResult = false;
+
+    // A dropped scene replaces every node, so it can't run from the drag-drop callback: that fires
+    // mid-ImGui-frame, from panels still holding SceneNode* into the scene being destroyed.
+    String m_PendingSceneLoadPath;
+    bool m_HasPendingSceneLoad = false;
 };
